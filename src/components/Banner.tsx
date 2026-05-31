@@ -2,19 +2,17 @@ import React from "react";
 import { Box, Text } from "ink";
 import { VERSION } from "../version.ts";
 
-// Anchor-with-a-padlock-on-top motif rendered in ASCII — the Privateer mark.
-// (Padlock shackle + body with keyhole, then the anchor shank, stock, and arms.)
+// Anchor motif rendered in ASCII — the Privateer mark (ring, stock, shank, flukes).
 const ANCHOR = [
-  "    _____    ",
-  "   /     \\   ",
-  "  | .---. |  ",
-  "  | | o | |  ",
-  "  | '---' |  ",
-  "  '---+---'  ",
-  "  ----+----  ",
-  "   \\  |  /   ",
-  "    \\_|_/    ",
-  "    '-.-'    ",
+  "    .-.     ",
+  "   (   )    ",
+  "    '+'     ",
+  "  ---+---   ",
+  "     |      ",
+  "     |      ",
+  "  \\  |  /   ",
+  "   \\_|_/    ",
+  "  (_/ \\_)   ",
 ];
 
 export function Banner({ model }: { model: string }) {

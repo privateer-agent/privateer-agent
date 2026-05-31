@@ -18,16 +18,15 @@ Ollama with one command. Built on the Vercel AI SDK, so tool-calling and streami
 work identically across every provider.
 
 ```
-    _____
-   /     \
-  | .---. |     PRIVATEER
-  | | o | |     bring your own model
-  | '---' |
-  '---+---'
-  ----+----
-   \  |  /
-    \_|_/
-    '-.-'
+    .-.
+   (   )
+    '+'
+  ---+---       PRIVATEER
+     |          bring your own model
+     |
+  \  |  /
+   \_|_/
+  (_/ \_)
 ```
 
 ## Requirements
