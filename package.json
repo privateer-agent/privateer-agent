@@ -3,6 +3,25 @@
   "version": "0.0.1",
   "description": "Privateer — a provider-agnostic terminal coding agent. Bring your own model (OpenRouter, Anthropic, OpenAI, Ollama).",
   "type": "module",
+  "license": "MIT",
+  "author": "Patrick (zahnno)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zahnno/privateer-agentic-tui.git"
+  },
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "cli",
+    "tui",
+    "terminal",
+    "openrouter",
+    "anthropic",
+    "openai",
+    "ollama",
+    "ai-sdk",
+    "ink"
+  ],
   "bin": {
     "privateer": "./bin/privateer.mjs"
   },

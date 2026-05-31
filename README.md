@@ -4,6 +4,14 @@
 
 <h1 align="center">⚓ Privateer</h1>
 
+<p align="center">
+  <a href="https://github.com/zahnno/privateer-agentic-tui/actions/workflows/ci.yml">
+    <img src="https://github.com/zahnno/privateer-agentic-tui/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen" alt="Node >= 20" />
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
+</p>
+
 A provider-agnostic terminal coding agent, in the spirit of Claude Code — but you
 **bring your own model**. Switch between OpenRouter, Anthropic, OpenAI, and local
 Ollama with one command. Built on the Vercel AI SDK, so tool-calling and streaming
@@ -125,3 +133,7 @@ npm test
 
 - [Architecture](docs/ARCHITECTURE.md) — how the provider layer, agent loop, tools, and permissions fit together
 - [Brand assets](brand/README.md) — the logo and icon set
+
+## License
+
+[MIT](LICENSE) © Patrick
