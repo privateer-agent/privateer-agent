@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { ToolContext } from "./context.ts";
 import { resolveInCwd, displayPath } from "./context.ts";
 import { PermissionDeniedError } from "../permissions/gate.ts";
+import { isProtectedPath } from "../permissions/protected.ts";
 
 export function writeTool(ctx: ToolContext) {
   return tool({
@@ -23,6 +24,7 @@ export function writeTool(ctx: ToolContext) {
         kind: "write",
         title: exists ? "Overwrite file" : "Create file",
         detail: `${displayPath(ctx, abs)} (${content.split("\n").length} lines)`,
+        protected: isProtectedPath(abs),
       });
       if (decision === "deny") throw new PermissionDeniedError("write");
 

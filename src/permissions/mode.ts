@@ -20,8 +20,11 @@ export function decideAuto(
   mode: PermissionMode,
   allowlist: string[],
 ): AutoDecision {
+  // Read-only mode allows network reads but no mutations or shell.
+  if (mode === "plan") return req.kind === "fetch" ? "ask" : "deny";
   if (mode === "bypass") return "allow";
-  if (mode === "plan") return "deny"; // read-only mode: no mutations or shell
+  // Guarded files always surface a prompt, even under acceptEdits or the allowlist.
+  if (req.protected) return "ask";
   if (req.kind === "bash" && isAllowlisted(req.detail, allowlist)) return "allow";
   if (mode === "acceptEdits" && (req.kind === "write" || req.kind === "edit")) return "allow";
   return "ask";

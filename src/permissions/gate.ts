@@ -6,13 +6,14 @@
 
 export type PermissionDecision = "allow" | "deny";
 
-export type PermissionKind = "write" | "edit" | "bash";
+export type PermissionKind = "write" | "edit" | "bash" | "fetch";
 
 export interface PermissionRequest {
   tool: string;
   kind: PermissionKind;
   title: string; // short action label, e.g. "Run command"
   detail: string; // the command, or file path + change preview
+  protected?: boolean; // target is a guarded file: never auto-approve, always prompt
 }
 
 export interface PermissionGate {

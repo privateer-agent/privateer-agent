@@ -4,11 +4,12 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTools } from "../src/tools/index.ts";
-import { autoApproveGate } from "../src/permissions/gate.ts";
+import { autoApproveGate, type PermissionRequest } from "../src/permissions/gate.ts";
+import { TodoStore } from "../src/tools/todoStore.ts";
 
-function setup() {
+function setup(extra?: Partial<Parameters<typeof createTools>[0]>) {
   const cwd = mkdtempSync(join(tmpdir(), "privateer-test-"));
-  const tools: any = createTools({ cwd, gate: autoApproveGate });
+  const tools: any = createTools({ cwd, gate: autoApproveGate, ...extra });
   const run = (name: string, args: any) => tools[name].execute(args, { toolCallId: "t", messages: [] });
   return { cwd, run, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
 }
@@ -74,6 +75,74 @@ test("path guardrail blocks escaping the cwd", async () => {
   const { run, cleanup } = setup();
   try {
     await assert.rejects(() => run("read", { path: "../../etc/passwd" }), /outside the working directory/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("todo tool records the list into the store", async () => {
+  const todos = new TodoStore();
+  const { run, cleanup } = setup({ todos });
+  try {
+    const out = await run("todo", {
+      todos: [
+        { content: "Explore code", status: "completed" },
+        { content: "Write feature", status: "in_progress", activeForm: "Writing feature" },
+      ],
+    });
+    assert.match(out, /1\/2 done/);
+    assert.match(out, /In progress: Write feature/);
+    assert.equal(todos.get().length, 2);
+    assert.equal(todos.get()[1].status, "in_progress");
+  } finally {
+    cleanup();
+  }
+});
+
+test("write/edit flag protected files for the gate", async () => {
+  const seen: PermissionRequest[] = [];
+  const recordingGate = {
+    async request(req: PermissionRequest) {
+      seen.push(req);
+      return "allow" as const;
+    },
+  };
+  const cwd = mkdtempSync(join(tmpdir(), "privateer-test-"));
+  const tools: any = createTools({ cwd, gate: recordingGate });
+  try {
+    await tools.write.execute({ path: ".env", content: "SECRET=1\n" }, { toolCallId: "t", messages: [] });
+    await tools.write.execute({ path: "normal.txt", content: "hi\n" }, { toolCallId: "t", messages: [] });
+    assert.equal(seen[0].protected, true, ".env should be flagged protected");
+    assert.notEqual(seen[1].protected, true, "normal.txt should not be flagged");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("web_fetch strips HTML to text (fetch mocked)", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("<html><body><h1>Title</h1><p>Hello <b>world</b></p><script>ignore()</script></body></html>", {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    })) as typeof fetch;
+  const { run, cleanup } = setup();
+  try {
+    const out = await run("web_fetch", { url: "https://example.com" });
+    assert.match(out, /\[200/);
+    assert.match(out, /Title/);
+    assert.match(out, /Hello world/);
+    assert.doesNotMatch(out, /ignore\(\)/);
+  } finally {
+    globalThis.fetch = realFetch;
+    cleanup();
+  }
+});
+
+test("web_fetch rejects non-http urls", async () => {
+  const { run, cleanup } = setup();
+  try {
+    assert.match(await run("web_fetch", { url: "file:///etc/passwd" }), /not a valid http/);
   } finally {
     cleanup();
   }

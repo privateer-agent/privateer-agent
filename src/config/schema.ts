@@ -27,6 +27,10 @@ export const Config = z.object({
   allowlist: z.array(z.string()).default([]),
   // Hard cap on agent tool-loop steps per turn.
   maxSteps: z.number().int().positive().default(50),
+  // Approx token budget for the conversation context (used to trigger auto-compaction).
+  contextBudget: z.number().int().positive().default(120_000),
+  // Fraction of contextBudget at which to auto-compact older history (0–1).
+  compactRatio: z.number().positive().max(1).default(0.8),
 });
 export type Config = z.infer<typeof Config>;
 

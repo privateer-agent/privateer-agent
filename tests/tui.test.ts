@@ -6,6 +6,7 @@ import { join } from "node:path";
 import React from "react";
 import { render } from "ink-testing-library";
 import { App } from "../src/components/App.tsx";
+import { TodoPanel } from "../src/components/TodoPanel.tsx";
 import { Config } from "../src/config/schema.ts";
 
 // Smoke test: the App renders its full component tree (banner, status bar, input)
@@ -30,4 +31,25 @@ test("App renders banner, status bar, and prompt", async () => {
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("TodoPanel hides when empty and lists tasks when populated", () => {
+  const empty = render(React.createElement(TodoPanel, { todos: [] }));
+  assert.equal((empty.lastFrame() ?? "").trim(), "");
+  empty.unmount();
+
+  const full = render(
+    React.createElement(TodoPanel, {
+      todos: [
+        { content: "Explore", status: "completed" as const },
+        { content: "Implement", status: "in_progress" as const, activeForm: "Implementing" },
+        { content: "Test", status: "pending" as const },
+      ],
+    }),
+  );
+  const frame = full.lastFrame() ?? "";
+  assert.match(frame, /Tasks 1\/3/);
+  assert.match(frame, /Implementing/); // in_progress shows activeForm
+  assert.match(frame, /Test/);
+  full.unmount();
 });

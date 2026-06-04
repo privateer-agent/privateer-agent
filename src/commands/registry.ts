@@ -5,6 +5,7 @@ import { PERMISSION_MODES } from "../config/schema.ts";
 import { configuredProviders, parseModelSpec } from "../providers/resolve.ts";
 import { KNOWN_PROVIDERS } from "../config/schema.ts";
 import type { UsageTotals } from "../engine/events.ts";
+import type { TodoItem } from "../tools/todoStore.ts";
 import { VERSION } from "../version.ts";
 
 // The result of running a slash command. The App interprets these so command logic
@@ -14,7 +15,11 @@ export type CommandResult =
   | { type: "clear" }
   | { type: "exit" }
   | { type: "setModel"; spec: string }
-  | { type: "setMode"; mode: PermissionMode };
+  | { type: "setMode"; mode: PermissionMode }
+  // Hand a prompt to the agent to run as if the user had asked it (e.g. /init).
+  | { type: "runPrompt"; text: string }
+  // Summarize older history to free up context.
+  | { type: "compact" };
 
 export interface CommandContext {
   config: Config;
@@ -22,6 +27,7 @@ export interface CommandContext {
   mode: PermissionMode;
   usage: UsageTotals;
   cwd: string;
+  todos: TodoItem[];
 }
 
 interface CommandDef {
@@ -95,17 +101,31 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: "init",
-    summary: "create a PRIVATEER.md project context file",
-    run: (_args, ctx) => {
+    summary: "analyze the repo and write PRIVATEER.md (--stub for an empty template)",
+    run: (args, ctx) => {
       const path = join(ctx.cwd, "PRIVATEER.md");
-      if (existsSync(path)) return { type: "notice", tone: "error", text: "PRIVATEER.md already exists." };
-      writeFileSync(
-        path,
-        "# Project context\n\nDescribe this project, conventions, and anything Privateer should\n" +
-          "always keep in mind here. This file is loaded into the system prompt.\n",
-        "utf8",
-      );
-      return { type: "notice", text: "Created PRIVATEER.md." };
+      // Offline/empty template path.
+      if (args.trim() === "--stub") {
+        if (existsSync(path)) return { type: "notice", tone: "error", text: "PRIVATEER.md already exists." };
+        writeFileSync(
+          path,
+          "# Project context\n\nDescribe this project, conventions, and anything Privateer should\n" +
+            "always keep in mind here. This file is loaded into the system prompt.\n",
+          "utf8",
+        );
+        return { type: "notice", text: "Created PRIVATEER.md (stub)." };
+      }
+      // Default: let the agent investigate and write the file itself, like CC's /init.
+      const verb = existsSync(path) ? "Update" : "Create";
+      return {
+        type: "runPrompt",
+        text:
+          `${verb} a PRIVATEER.md in the working directory. First explore the codebase ` +
+          `(read package manifests, build/test config, the directory layout, and a few key ` +
+          `source files). Then write a concise PRIVATEER.md covering: what the project is, how ` +
+          `to build/test/run it, the high-level architecture, and any conventions a contributor ` +
+          `should follow. Keep it tight — prefer bullet points over prose. Use the write tool.`,
+      };
     },
   },
   {
@@ -126,6 +146,21 @@ const COMMANDS: CommandDef[] = [
           `  providers: ${provs}`,
       };
     },
+  },
+  {
+    name: "todo",
+    summary: "show the current task list",
+    run: (_args, ctx) => {
+      if (ctx.todos.length === 0) return { type: "notice", text: "No tasks yet." };
+      const mark = { completed: "✔", in_progress: "▸", pending: "○" } as const;
+      const lines = ctx.todos.map((t) => `  ${mark[t.status]} ${t.content}`);
+      return { type: "notice", text: `Tasks:\n${lines.join("\n")}` };
+    },
+  },
+  {
+    name: "compact",
+    summary: "summarize older history to free up context",
+    run: () => ({ type: "compact" }),
   },
   {
     name: "clear",

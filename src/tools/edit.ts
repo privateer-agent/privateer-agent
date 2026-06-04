@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ToolContext } from "./context.ts";
 import { resolveInCwd, displayPath } from "./context.ts";
 import { PermissionDeniedError } from "../permissions/gate.ts";
+import { isProtectedPath } from "../permissions/protected.ts";
 
 // Count occurrences of a substring (non-overlapping).
 function countOccurrences(haystack: string, needle: string): number {
@@ -51,6 +52,7 @@ export function editTool(ctx: ToolContext) {
         kind: "edit",
         title: "Edit file",
         detail: `${displayPath(ctx, abs)} (${replace_all ? occ + "×, " : ""}-${removed} +${added})`,
+        protected: isProtectedPath(abs),
       });
       if (decision === "deny") throw new PermissionDeniedError("edit");
 

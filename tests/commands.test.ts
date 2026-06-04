@@ -10,6 +10,7 @@ const ctx: CommandContext = {
   mode: "default",
   usage: emptyUsage(),
   cwd: process.cwd(),
+  todos: [],
 };
 
 test("non-slash input is not a command", () => {
@@ -54,4 +55,23 @@ test("unknown command errors", () => {
 test("/clear and /exit map to control results", () => {
   assert.deepEqual(runCommand("/clear", ctx), { type: "clear" });
   assert.deepEqual(runCommand("/exit", ctx), { type: "exit" });
+});
+
+test("/compact maps to a compact result", () => {
+  assert.deepEqual(runCommand("/compact", ctx), { type: "compact" });
+});
+
+test("/init (no args) asks the agent to write PRIVATEER.md", () => {
+  const r = runCommand("/init", ctx);
+  assert.equal(r?.type, "runPrompt");
+  assert.match((r as any).text, /PRIVATEER\.md/);
+});
+
+test("/todo reports empty and populated lists", () => {
+  assert.match((runCommand("/todo", ctx) as any).text, /No tasks/);
+  const withTodos = {
+    ...ctx,
+    todos: [{ content: "Wire auth", status: "in_progress" as const }],
+  };
+  assert.match((runCommand("/todo", withTodos) as any).text, /Wire auth/);
 });

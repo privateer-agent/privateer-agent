@@ -98,12 +98,25 @@ Model strings are `provider:model`:
 ## Slash commands
 
 `/help` `/model [spec]` `/provider` `/permissions [mode]` `/cost` `/init`
-`/doctor` `/clear` `/exit`
+`/todo` `/compact` `/doctor` `/clear` `/exit`
+
+- `/init` — the agent explores the repo and writes a `PRIVATEER.md` for you
+  (`/init --stub` just drops an empty template, no model call).
+- `/todo` — print the agent's current task list.
+- `/compact` — summarize older history to reclaim context (also happens automatically).
+
+While the agent is working, press **Esc** to interrupt the turn (partial output is kept);
+**Ctrl-C** quits.
 
 ## Tools
 
-`read` · `write` · `edit` · `glob` · `grep` · `bash` — all pure-Node (no external
-binaries required). Mutating tools (write/edit/bash) go through the permission gate.
+`read` · `write` · `edit` · `glob` · `grep` · `bash` · `todo` · `task` ·
+`web_fetch` · `web_search`
+
+The file/search/shell tools are pure-Node (no external binaries required). Mutating tools
+(write/edit/bash) and network tools (web_fetch/web_search) go through the permission gate.
+`todo` maintains the live task list; `task` delegates an investigation to a read-only
+sub-agent that returns a summary.
 
 ## Permission modes
 
@@ -127,6 +140,24 @@ context — conventions, architecture notes, anything it should always know.
 npm run typecheck
 npm test
 ```
+
+## Caveats
+
+Privateer ports Claude Code's design *patterns* onto a provider-agnostic core; a few are
+deliberately simplified:
+
+- **Prompt caching is Anthropic-only.** Ephemeral cache breakpoints are attached for direct
+  Anthropic models and OpenRouter routes to `anthropic/*`. Other providers ignore them (a
+  harmless no-op).
+- **Sub-agents are synchronous.** A `task` runs one read-only child agent to completion and
+  returns its summary — there's no parallel worker fan-out.
+- **Compaction is heuristic.** Context size is estimated (~4 chars/token) and older history is
+  summarized by a one-shot generate, not a structured-output schema. The most recent messages
+  are always kept verbatim.
+- **`web_search` scrapes DuckDuckGo's keyless HTML endpoint.** It needs no API key but is
+  best-effort and can break if their markup changes. `web_fetch` is robust for known URLs.
+- **Protected files** (`.env`, `.npmrc`, shell rc files, …) always prompt before edit — except
+  in `bypass` mode, which by definition skips all prompts.
 
 ## Docs
 

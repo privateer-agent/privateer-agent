@@ -25,6 +25,21 @@ test("decideAuto follows the mode policy", () => {
   assert.equal(decideAuto(bash("ls"), "default", ["ls"]), "allow"); // allowlisted
 });
 
+test("protected files always prompt, even under acceptEdits", () => {
+  const guarded: PermissionRequest = { ...edit, detail: ".env", protected: true };
+  assert.equal(decideAuto(guarded, "acceptEdits", []), "ask");
+  assert.equal(decideAuto(guarded, "default", []), "ask");
+  // bypass is explicitly "no prompts", so it still allows.
+  assert.equal(decideAuto(guarded, "bypass", []), "allow");
+});
+
+test("fetch is a network read: allowed-with-prompt in plan, asks otherwise", () => {
+  const fetchReq: PermissionRequest = { tool: "web_fetch", kind: "fetch", title: "Fetch", detail: "https://x" };
+  assert.equal(decideAuto(fetchReq, "plan", []), "ask"); // plan denies mutations but permits network reads
+  assert.equal(decideAuto(fetchReq, "default", []), "ask");
+  assert.equal(decideAuto(fetchReq, "bypass", []), "allow");
+});
+
 function makeGate(initialMode: PermissionMode, answer: AskOutcome) {
   let mode = initialMode;
   const allowlist: string[] = [];
