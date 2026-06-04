@@ -2,14 +2,10 @@ import React from "react";
 import { Box, Text } from "ink";
 import { basename } from "node:path";
 import type { PermissionMode } from "../config/schema.ts";
+import { theme, MODE_COLOR } from "./theme.ts";
 
-const MODE_COLOR: Record<PermissionMode, string> = {
-  default: "yellow",
-  acceptEdits: "green",
-  bypass: "red",
-  plan: "blue",
-};
-
+// The footer line rendered directly under the prompt box (Claude Code layout):
+// mode · model · cwd · tokens on the left, a shortcuts hint on the right.
 export function StatusBar(props: {
   modelSpec: string;
   cwd: string;
@@ -17,15 +13,15 @@ export function StatusBar(props: {
   mode: PermissionMode;
 }) {
   return (
-    <Box marginTop={1} gap={1}>
-      <Text backgroundColor="cyan" color="black">
-        {" "}
-        ⚓ privateer{" "}
-      </Text>
-      <Text color="green">{props.modelSpec}</Text>
-      <Text dimColor>· {basename(props.cwd) || props.cwd}</Text>
-      <Text color={MODE_COLOR[props.mode]}>· {props.mode}</Text>
-      <Text dimColor>· {props.totalTokens} tok</Text>
+    <Box marginTop={1} justifyContent="space-between">
+      <Box gap={1}>
+        <Text color={theme.accent}>⚓ privateer</Text>
+        <Text color={MODE_COLOR[props.mode]}>· {props.mode}</Text>
+        <Text color={theme.dim}>· {props.modelSpec}</Text>
+        <Text color={theme.dim}>· {basename(props.cwd) || props.cwd}</Text>
+        <Text color={theme.dim}>· {props.totalTokens} tok</Text>
+      </Box>
+      <Text color={theme.dim}>? for shortcuts</Text>
     </Box>
   );
 }

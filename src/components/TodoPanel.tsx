@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { TodoItem } from "../tools/todoStore.ts";
+import { theme } from "./theme.ts";
 
 const MARK: Record<TodoItem["status"], string> = {
   completed: "✔",
@@ -16,14 +17,14 @@ export function TodoPanel({ todos }: { todos: TodoItem[] }) {
   const done = todos.filter((t) => t.status === "completed").length;
 
   return (
-    <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="gray" paddingX={1}>
+    <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.dim} paddingX={1}>
       <Text dimColor>
         Tasks {done}/{todos.length}
       </Text>
       {todos.map((t, i) => {
         const label = t.status === "in_progress" ? t.activeForm ?? t.content : t.content;
         const color =
-          t.status === "in_progress" ? "cyan" : t.status === "completed" ? "green" : undefined;
+          t.status === "in_progress" ? theme.accent : t.status === "completed" ? theme.success : undefined;
         return (
           <Text key={i} color={color} dimColor={t.status === "pending"}>
             {MARK[t.status]}{" "}

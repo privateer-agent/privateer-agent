@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text, useInput } from "ink";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/uiGate.ts";
+import { theme } from "./theme.ts";
 
 // Interactive approval shown when a tool needs permission. Keys: y allow once,
 // a allow always, n / esc deny.
@@ -20,17 +21,17 @@ export function ApprovalPrompt({
   });
 
   return (
-    <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1}>
+    <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.warning} paddingX={1}>
       <Text>
-        <Text bold color="yellow">
+        <Text bold color={theme.warning}>
           {req.title}
         </Text>
         <Text dimColor> ({req.tool})</Text>
       </Text>
       <Text>{req.detail}</Text>
       <Text dimColor>
-        <Text color="green">y</Text> allow · <Text color="green">a</Text> always ·{" "}
-        <Text color="red">n</Text> deny
+        <Text color={theme.success}>y</Text> allow · <Text color={theme.success}>a</Text> always ·{" "}
+        <Text color={theme.error}>n</Text> deny
       </Text>
     </Box>
   );

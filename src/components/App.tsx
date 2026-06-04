@@ -18,6 +18,8 @@ import { saveGlobalConfig } from "../config/load.ts";
 import { ModeGate, type AskOutcome } from "../permissions/uiGate.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import { saveSession, type SessionData } from "../memory/store.ts";
+import { theme } from "./theme.ts";
+import { randomVerb } from "./spinnerVerbs.ts";
 
 interface PendingApproval {
   req: PermissionRequest;
@@ -52,6 +54,8 @@ export function App({
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingApproval | null>(null);
   const [todos, setTodos] = useState<TodoItem[]>([]);
+  const [verb, setVerb] = useState(randomVerb());
+  const [elapsed, setElapsed] = useState(0);
   const engineRef = useRef<QueryEngine | null>(null);
   const todosRef = useRef<TodoStore | null>(null);
   const seededRef = useRef(false);
@@ -129,6 +133,17 @@ export function App({
     // Esc interrupts an in-flight turn (the run loop persists partial output).
     if (key.escape && busy && abortRef.current) abortRef.current.abort();
   });
+
+  // Drive the elapsed-seconds counter shown beside the spinner while a turn runs.
+  useEffect(() => {
+    if (!busy) {
+      setElapsed(0);
+      return;
+    }
+    const started = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
 
   const append = (...entries: Entry[]) => setCommitted((c) => [...c, ...entries]);
 
@@ -213,6 +228,7 @@ export function App({
       return;
     }
 
+    setVerb(randomVerb());
     setBusy(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -316,11 +332,14 @@ export function App({
         ))}
 
         {busy && (
-          <Box marginTop={1}>
-            <Text color="cyan">
+          <Box marginTop={1} gap={1}>
+            <Text color={theme.accent}>
               <Spinner type="dots" />
             </Text>
-            <Text dimColor> working…</Text>
+            <Text color={theme.accent}>{verb}…</Text>
+            <Text color={theme.dim}>
+              (esc to interrupt · {elapsed}s · {usage.totalTokens} tokens)
+            </Text>
           </Box>
         )}
 
@@ -337,8 +356,8 @@ export function App({
             }}
           />
         ) : (
-          <Box>
-            <Text color={busy ? "gray" : "blue"}>{"› "}</Text>
+          <Box borderStyle="round" borderColor={busy ? theme.dim : theme.accent} paddingX={1}>
+            <Text color={busy ? theme.dim : theme.accent}>{"> "}</Text>
             <TextInput
               value={input}
               onChange={setInput}

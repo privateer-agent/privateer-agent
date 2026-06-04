@@ -22,7 +22,7 @@ test("App renders banner, status bar, and prompt", async () => {
     // Let effects (session build) flush.
     await new Promise((r) => setTimeout(r, 50));
     const frame = lastFrame() ?? "";
-    assert.match(frame, /PRIVATEER/);
+    assert.match(frame, /Welcome to Privateer/);
     assert.match(frame, /anthropic:claude-opus-4-8/);
     assert.match(frame, /privateer/); // status bar chip
     assert.match(frame, /default/); // permission mode in status bar
