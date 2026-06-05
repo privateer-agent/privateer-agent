@@ -31,6 +31,8 @@ export type CommandResult =
   | { type: "setOutputStyle"; name: string | null }
   // Write the conversation transcript to a markdown file (path optional).
   | { type: "export"; path?: string }
+  // Open the checkpoint picker to rewind conversation and/or files.
+  | { type: "rewind" }
   // Re-enter the provider/key onboarding flow.
   | { type: "onboarding" };
 
@@ -239,6 +241,11 @@ const COMMANDS: CommandDef[] = [
     name: "export",
     summary: "write the conversation to a markdown file",
     run: (args) => ({ type: "export", path: args.trim() || undefined }),
+  },
+  {
+    name: "rewind",
+    summary: "restore an earlier checkpoint (conversation and/or files)",
+    run: () => ({ type: "rewind" }),
   },
   {
     name: "compact",

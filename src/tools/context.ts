@@ -13,6 +13,9 @@ export interface ToolContext {
   gate: PermissionGate;
   todos?: TodoStore; // session todo list, for the `todo` tool + TUI panel
   runSubAgent?: SubAgentRunner; // spawns a `task` sub-agent
+  // Called by write/edit just before they mutate a file, so the checkpoint store
+  // can capture its pre-modification state for /rewind.
+  recordMutation?: (abs: string) => void;
 }
 
 // Resolve a possibly-relative path against the session cwd and keep it inside the

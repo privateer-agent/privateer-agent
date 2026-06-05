@@ -7,6 +7,7 @@ import { QueryEngine } from "./engine/QueryEngine.ts";
 import { autoApproveGate, type PermissionGate } from "./permissions/gate.ts";
 import type { SubAgentRunner } from "./tools/context.ts";
 import { TodoStore } from "./tools/todoStore.ts";
+import type { CheckpointStore } from "./memory/checkpoints.ts";
 
 export interface SessionOptions {
   config: Config;
@@ -17,6 +18,8 @@ export interface SessionOptions {
   outputStyle?: string;
   // When true, the system prompt instructs the model to plan, not implement.
   planMode?: boolean;
+  // Session checkpoint store; write/edit record mutations into it for /rewind.
+  checkpoints?: CheckpointStore;
 }
 
 export interface Session {
@@ -54,7 +57,13 @@ export function createSession(opts: SessionOptions): Session {
     return out.trim() || "(sub-agent returned no output)";
   };
 
-  const tools = createTools({ cwd: opts.cwd, gate, todos, runSubAgent });
+  const tools = createTools({
+    cwd: opts.cwd,
+    gate,
+    todos,
+    runSubAgent,
+    recordMutation: opts.checkpoints ? (abs) => opts.checkpoints!.recordMutation(abs) : undefined,
+  });
   const outputStyleBody = opts.outputStyle
     ? findOutputStyle(opts.outputStyle, opts.cwd)?.body
     : undefined;

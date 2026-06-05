@@ -10,6 +10,8 @@ import { ApprovalPrompt } from "./ApprovalPrompt.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { PlanConfirm } from "./PlanConfirm.tsx";
+import { RewindPicker } from "./RewindPicker.tsx";
+import { CheckpointStore, type RewindScope } from "../memory/checkpoints.ts";
 import { TodoPanel } from "./TodoPanel.tsx";
 import { exec } from "../tools/exec.ts";
 import type { Entry } from "./types.ts";
@@ -80,6 +82,7 @@ export function App({
   const [vim, setVim] = useState<boolean>(Boolean(config.vim));
   const [outputStyle, setOutputStyle] = useState<string | null>(config.outputStyle ?? null);
   const [planReady, setPlanReady] = useState(false);
+  const [rewinding, setRewinding] = useState(false);
   const engineRef = useRef<QueryEngine | null>(null);
   const todosRef = useRef<TodoStore | null>(null);
   const seededRef = useRef(false);
@@ -88,6 +91,10 @@ export function App({
   const historyRef = useRef<string[]>([]);
   const queueRef = useRef<string[]>([]);
   const drainingRef = useRef(false);
+  // Session-lifetime checkpoint store (survives model/style switches) for /rewind,
+  // plus a live mirror of the committed transcript length for checkpointing.
+  const checkpointsRef = useRef<CheckpointStore>(new CheckpointStore());
+  const committedRef = useRef<Entry[]>([]);
 
   // The gate reads the live mode via a ref (so changing mode doesn't require
   // rebuilding the session/tools) and surfaces approvals through React state.
@@ -125,6 +132,7 @@ export function App({
         gate,
         outputStyle: outputStyle ?? undefined,
         planMode: mode === "plan",
+        checkpoints: checkpointsRef.current,
       });
       if (prev) {
         session.engine.messages.push(...prev.messages);
@@ -160,6 +168,12 @@ export function App({
       ]);
     }
   }, []);
+
+  // Keep a live mirror of the committed transcript so checkpoints can record its
+  // length synchronously (the useInput/runTurn closures can lag a render).
+  useEffect(() => {
+    committedRef.current = committed;
+  }, [committed]);
 
   function persist() {
     const eng = engineRef.current;
@@ -238,6 +252,13 @@ export function App({
         trySave({ ...config, outputStyle: res.name ?? undefined });
         append({ kind: "notice", text: `Output style: ${res.name ?? "default"}.` });
         break;
+      case "rewind":
+        if (checkpointsRef.current.list().length === 0) {
+          append({ kind: "notice", text: "No checkpoints yet — they're taken before each turn." });
+        } else {
+          setRewinding(true);
+        }
+        break;
       case "export": {
         const dest = res.path ?? join(cwd, `privateer-transcript-${Date.now()}.md`);
         try {
@@ -292,6 +313,15 @@ export function App({
   }
 
   async function runTurn(text: string, opts?: { hideInput?: boolean; skipPlanConfirm?: boolean }) {
+    // Checkpoint the state before this turn so /rewind can return here.
+    const eng0 = engineRef.current;
+    if (eng0) {
+      checkpointsRef.current.create({
+        messagesLength: eng0.messages.length,
+        committedLength: committedRef.current.length,
+        label: text,
+      });
+    }
     if (!opts?.hideInput) append({ kind: "user", text });
     const engine = engineRef.current;
     if (!engine) {
@@ -385,6 +415,22 @@ export function App({
     setMode("default");
     trySave({ ...config, permissionMode: "default" });
     append({ kind: "notice", text: "Plan approved — exited plan mode. Tell me to proceed." });
+  }
+
+  function restoreCheckpoint(id: string, scope: RewindScope) {
+    setRewinding(false);
+    const store = checkpointsRef.current;
+    const cp = store.get(id);
+    if (!cp) return;
+    if (scope === "files" || scope === "both") store.restoreFiles(cp);
+    if (scope === "conversation" || scope === "both") {
+      const eng = engineRef.current;
+      if (eng && eng.messages.length > cp.messagesLength) eng.messages.length = cp.messagesLength;
+      setCommitted(committedRef.current.slice(0, cp.committedLength));
+      setLive([]);
+    }
+    persist();
+    append({ kind: "notice", text: `Rewound to "${cp.label}" (${scope}).` });
   }
 
   // Entry point from the prompt input. While a turn is running, messages are
@@ -533,6 +579,12 @@ export function App({
               pending.resolve(outcome);
               setPending(null);
             }}
+          />
+        ) : rewinding ? (
+          <RewindPicker
+            checkpoints={checkpointsRef.current.list()}
+            onRestore={restoreCheckpoint}
+            onCancel={() => setRewinding(false)}
           />
         ) : planReady ? (
           <PlanConfirm onApprove={approvePlan} onKeep={() => setPlanReady(false)} />

@@ -28,6 +28,7 @@ export function writeTool(ctx: ToolContext) {
       });
       if (decision === "deny") throw new PermissionDeniedError("write");
 
+      ctx.recordMutation?.(abs);
       mkdirSync(dirname(abs), { recursive: true });
       writeFileSync(abs, content, "utf8");
       return `${exists ? "Wrote" : "Created"} ${displayPath(ctx, abs)} (${content.length} bytes).`;
