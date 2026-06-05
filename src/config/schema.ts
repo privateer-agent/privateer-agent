@@ -33,6 +33,8 @@ export const Config = z.object({
   compactRatio: z.number().positive().max(1).default(0.8),
   // Modal (vim) editing in the prompt input.
   vim: z.boolean().default(false),
+  // Active output style (persona) by name; loaded from .privateer/output-styles.
+  outputStyle: z.string().optional(),
 })
   // Preserve unknown keys so layered settings files can carry forward-compatible
   // sections (hooks, mcpServers, statusLine, …) before they have explicit schemas.

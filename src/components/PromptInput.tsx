@@ -3,7 +3,6 @@ import { Box, Text, useInput } from "ink";
 import { theme } from "./theme.ts";
 import { POINTER } from "./figures.ts";
 import { walkFiles } from "../tools/walk.ts";
-import { COMMAND_LIST } from "../commands/registry.ts";
 import { detectMode, slashQuery, mentionAt, filterCommands, filterFiles } from "./promptModel.ts";
 
 const MENU_LIMIT = 8;
@@ -25,6 +24,7 @@ export function PromptInput({
   cwd,
   queued,
   vimEnabled = false,
+  commands,
   history,
   onSubmit,
   onClear,
@@ -33,6 +33,7 @@ export function PromptInput({
   cwd: string;
   queued: number;
   vimEnabled?: boolean;
+  commands: { name: string; summary: string }[];
   history: React.MutableRefObject<string[]>;
   onSubmit: (value: string) => void;
   onClear?: () => void;
@@ -77,7 +78,7 @@ export function PromptInput({
   } => {
     if (dismissed) return { candidates: [], menuKind: null };
     if (sQuery !== null) {
-      const items: Candidate[] = filterCommands(COMMAND_LIST, sQuery).map((c) => ({
+      const items: Candidate[] = filterCommands(commands, sQuery).map((c) => ({
         value: c.name,
         label: `/${c.name}`,
         hint: c.summary,
@@ -93,7 +94,7 @@ export function PromptInput({
     }
     return { candidates: [], menuKind: null };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, cursor, dismissed]);
+  }, [value, cursor, dismissed, commands]);
 
   const menuOpen = menuKind !== null && candidates.length > 0;
   const selClamped = Math.min(sel, Math.max(0, candidates.length - 1));

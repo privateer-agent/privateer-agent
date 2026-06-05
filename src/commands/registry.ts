@@ -1,8 +1,10 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config, PermissionMode } from "../config/schema.ts";
 import { PERMISSION_MODES } from "../config/schema.ts";
 import { configLayers } from "../config/load.ts";
+import { expandCommand, type CustomCommand } from "./custom.ts";
+import { loadOutputStyles } from "../context/outputStyles.ts";
 import { configuredProviders, parseModelSpec } from "../providers/resolve.ts";
 import { KNOWN_PROVIDERS } from "../config/schema.ts";
 import type { UsageTotals } from "../engine/events.ts";
@@ -25,6 +27,10 @@ export type CommandResult =
   | { type: "compact" }
   // Toggle modal (vim) editing in the prompt input.
   | { type: "toggleVim" }
+  // Switch the active output style (persona); null resets to default.
+  | { type: "setOutputStyle"; name: string | null }
+  // Write the conversation transcript to a markdown file (path optional).
+  | { type: "export"; path?: string }
   // Re-enter the provider/key onboarding flow.
   | { type: "onboarding" };
 
@@ -35,6 +41,7 @@ export interface CommandContext {
   usage: UsageTotals;
   cwd: string;
   todos: TodoItem[];
+  customCommands?: CustomCommand[];
 }
 
 interface CommandDef {
@@ -47,12 +54,16 @@ const COMMANDS: CommandDef[] = [
   {
     name: "help",
     summary: "show available commands",
-    run: () => ({
-      type: "notice",
-      text:
-        "Commands:\n" +
-        COMMANDS.map((c) => `  /${c.name.padEnd(11)} ${c.summary}`).join("\n"),
-    }),
+    run: (_args, ctx) => {
+      const builtin = COMMANDS.map((c) => `  /${c.name.padEnd(11)} ${c.summary}`).join("\n");
+      const custom = (ctx.customCommands ?? [])
+        .map((c) => `  /${c.name.padEnd(11)} ${c.description}`)
+        .join("\n");
+      return {
+        type: "notice",
+        text: "Commands:\n" + builtin + (custom ? "\n\nCustom commands:\n" + custom : ""),
+      };
+    },
   },
   {
     name: "model",
@@ -191,6 +202,45 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: "context",
+    summary: "show context-window usage",
+    run: (_args, ctx) => {
+      const u = ctx.usage;
+      const budget = ctx.config.contextBudget;
+      const pct = budget ? Math.round((u.totalTokens / budget) * 100) : 0;
+      const compactAt = Math.round(budget * ctx.config.compactRatio);
+      return {
+        type: "notice",
+        text:
+          `Context window:\n` +
+          `  used: ${u.totalTokens} tokens (${pct}% of ${budget})\n` +
+          `  in: ${u.inputTokens}  out: ${u.outputTokens}\n` +
+          `  auto-compact at ~${compactAt} tokens (ratio ${ctx.config.compactRatio})`,
+      };
+    },
+  },
+  {
+    name: "memory",
+    summary: "show the project memory file (PRIVATEER.md)",
+    run: (_args, ctx) => {
+      const path = join(ctx.cwd, "PRIVATEER.md");
+      if (!existsSync(path)) {
+        return {
+          type: "notice",
+          text: "No PRIVATEER.md yet. Use /init to create one, or `# <note>` to append a line.",
+        };
+      }
+      const body = readFileSync(path, "utf8").trim();
+      const shown = body.length > 1500 ? body.slice(0, 1500) + "\n… (truncated)" : body;
+      return { type: "notice", text: `PRIVATEER.md:\n${shown}` };
+    },
+  },
+  {
+    name: "export",
+    summary: "write the conversation to a markdown file",
+    run: (args) => ({ type: "export", path: args.trim() || undefined }),
+  },
+  {
     name: "compact",
     summary: "summarize older history to free up context",
     run: () => ({ type: "compact" }),
@@ -199,6 +249,31 @@ const COMMANDS: CommandDef[] = [
     name: "vim",
     summary: "toggle modal (vim) editing in the prompt",
     run: () => ({ type: "toggleVim" }),
+  },
+  {
+    name: "output-style",
+    summary: "switch the output style (persona), or list the available styles",
+    run: (args, ctx) => {
+      const name = args.trim();
+      const styles = loadOutputStyles(ctx.cwd);
+      if (!name) {
+        const current = ctx.config.outputStyle ?? "default";
+        const list = styles.length
+          ? styles.map((s) => `  ${s.name}${s.description ? " — " + s.description : ""}`).join("\n")
+          : "  (none found in .privateer/output-styles)";
+        return {
+          type: "notice",
+          text:
+            `Output style: ${current}\nAvailable:\n${list}\n\n` +
+            `Use /output-style <name>, or /output-style default to reset.`,
+        };
+      }
+      if (name === "default") return { type: "setOutputStyle", name: null };
+      if (!styles.some((s) => s.name === name)) {
+        return { type: "notice", tone: "error", text: `No output style "${name}". See /output-style.` };
+      }
+      return { type: "setOutputStyle", name };
+    },
   },
   {
     name: "clear",
@@ -215,19 +290,26 @@ const COMMANDS: CommandDef[] = [
 
 export const COMMAND_NAMES = COMMANDS.map((c) => c.name);
 
-// Name + summary for each command, for the slash-command autocomplete menu.
+// Name + summary for each built-in command, for the slash-command autocomplete menu.
 export const COMMAND_LIST: { name: string; summary: string }[] = COMMANDS.map((c) => ({
   name: c.name,
   summary: c.summary,
 }));
 
+// Built-ins plus any custom commands, for autocomplete.
+export function commandList(custom: CustomCommand[] = []): { name: string; summary: string }[] {
+  return [...COMMAND_LIST, ...custom.map((c) => ({ name: c.name, summary: c.description }))];
+}
+
 // Parse and run a "/command args" line. Returns null if not a slash command.
+// Falls through to custom commands (expanded into a prompt) before erroring.
 export function runCommand(raw: string, ctx: CommandContext): CommandResult | null {
   if (!raw.startsWith("/")) return null;
   const [name, ...rest] = raw.slice(1).split(" ");
+  const args = rest.join(" ");
   const cmd = COMMANDS.find((c) => c.name === name);
-  if (!cmd) {
-    return { type: "notice", tone: "error", text: `Unknown command "/${name}". Try /help.` };
-  }
-  return cmd.run(rest.join(" "), ctx);
+  if (cmd) return cmd.run(args, ctx);
+  const custom = ctx.customCommands?.find((c) => c.name === name);
+  if (custom) return { type: "runPrompt", text: expandCommand(custom, args) };
+  return { type: "notice", tone: "error", text: `Unknown command "/${name}". Try /help.` };
 }

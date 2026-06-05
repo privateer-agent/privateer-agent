@@ -9,6 +9,7 @@ import { EntryView } from "./Transcript.tsx";
 import { ApprovalPrompt } from "./ApprovalPrompt.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { PromptInput } from "./PromptInput.tsx";
+import { PlanConfirm } from "./PlanConfirm.tsx";
 import { TodoPanel } from "./TodoPanel.tsx";
 import { exec } from "../tools/exec.ts";
 import type { Entry } from "./types.ts";
@@ -17,7 +18,8 @@ import type { Config, PermissionMode } from "../config/schema.ts";
 import { createSession } from "../session.ts";
 import { QueryEngine } from "../engine/QueryEngine.ts";
 import { emptyUsage, type UsageTotals } from "../engine/events.ts";
-import { runCommand } from "../commands/registry.ts";
+import { runCommand, commandList } from "../commands/registry.ts";
+import { loadCustomCommands } from "../commands/custom.ts";
 import { saveGlobalConfig } from "../config/load.ts";
 import { ModeGate, type AskOutcome } from "../permissions/uiGate.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
@@ -34,6 +36,18 @@ const BANNER = "__banner__";
 
 function asText(output: unknown): string {
   return typeof output === "string" ? output : JSON.stringify(output);
+}
+
+// Render the committed transcript as markdown for /export.
+function serializeTranscript(entries: Entry[]): string {
+  const lines = [`# Privateer transcript`, `_${new Date().toISOString()}_`, ""];
+  for (const e of entries) {
+    if (e.kind === "user") lines.push(`## You`, "", e.text, "");
+    else if (e.kind === "assistant") lines.push(`## Privateer`, "", e.text, "");
+    else if (e.kind === "tool") lines.push(`- \`${e.name}\` — ${e.status}`, "");
+    else if (e.kind === "notice") lines.push(`> ${e.text}`, "");
+  }
+  return lines.join("\n");
 }
 
 export function App({
@@ -64,6 +78,8 @@ export function App({
   const [elapsed, setElapsed] = useState(0);
   const [queued, setQueued] = useState(0);
   const [vim, setVim] = useState<boolean>(Boolean(config.vim));
+  const [outputStyle, setOutputStyle] = useState<string | null>(config.outputStyle ?? null);
+  const [planReady, setPlanReady] = useState(false);
   const engineRef = useRef<QueryEngine | null>(null);
   const todosRef = useRef<TodoStore | null>(null);
   const seededRef = useRef(false);
@@ -81,6 +97,10 @@ export function App({
   }, [mode]);
   const allowlistRef = useRef<string[]>([...config.allowlist]);
 
+  // Custom slash commands from .privateer/commands, plus the merged autocomplete list.
+  const customCommands = useMemo(() => loadCustomCommands(cwd), [cwd]);
+  const commands = useMemo(() => commandList(customCommands), [customCommands]);
+
   const gate = useMemo(
     () =>
       new ModeGate({
@@ -92,12 +112,20 @@ export function App({
     [],
   );
 
-  // Build (and rebuild on model change) the agent session, carrying history forward.
+  // Build (and rebuild on model / output-style change) the agent session, carrying
+  // history forward.
   useEffect(() => {
     try {
       const prev = engineRef.current;
       const prevTodos = todosRef.current?.get() ?? [];
-      const session = createSession({ config, modelSpec, cwd, gate });
+      const session = createSession({
+        config,
+        modelSpec,
+        cwd,
+        gate,
+        outputStyle: outputStyle ?? undefined,
+        planMode: mode === "plan",
+      });
       if (prev) {
         session.engine.messages.push(...prev.messages);
       } else if (!seededRef.current && resume) {
@@ -118,7 +146,10 @@ export function App({
       engineRef.current = null;
       setSessionError(err instanceof Error ? err.message : String(err));
     }
-  }, [modelSpec]);
+    // Rebuild on model/style change, and when entering/leaving plan mode (so the
+    // system prompt gains or loses the plan-mode mandate) — not on every mode change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelSpec, outputStyle, mode === "plan"]);
 
   // One-time notice when resuming a prior conversation.
   useEffect(() => {
@@ -160,7 +191,7 @@ export function App({
   const append = (...entries: Entry[]) => setCommitted((c) => [...c, ...entries]);
 
   function handleCommand(raw: string): boolean {
-    const res = runCommand(raw, { config, modelSpec, mode, usage, cwd, todos });
+    const res = runCommand(raw, { config, modelSpec, mode, usage, cwd, todos, customCommands });
     if (!res) return false;
     append({ kind: "user", text: raw });
     switch (res.type) {
@@ -200,6 +231,21 @@ export function App({
         setVim(next);
         trySave({ ...config, vim: next });
         append({ kind: "notice", text: `Vim mode ${next ? "on" : "off"}.` });
+        break;
+      }
+      case "setOutputStyle":
+        setOutputStyle(res.name);
+        trySave({ ...config, outputStyle: res.name ?? undefined });
+        append({ kind: "notice", text: `Output style: ${res.name ?? "default"}.` });
+        break;
+      case "export": {
+        const dest = res.path ?? join(cwd, `privateer-transcript-${Date.now()}.md`);
+        try {
+          writeFileSync(dest, serializeTranscript(committed), "utf8");
+          append({ kind: "notice", text: `Exported ${committed.length} entries to ${dest}` });
+        } catch (err) {
+          append({ kind: "notice", tone: "error", text: `Export failed: ${String(err)}` });
+        }
         break;
       }
       case "onboarding":
@@ -245,7 +291,7 @@ export function App({
     }
   }
 
-  async function runTurn(text: string, opts?: { hideInput?: boolean }) {
+  async function runTurn(text: string, opts?: { hideInput?: boolean; skipPlanConfirm?: boolean }) {
     if (!opts?.hideInput) append({ kind: "user", text });
     const engine = engineRef.current;
     if (!engine) {
@@ -323,7 +369,22 @@ export function App({
       setCommitted((c) => [...c, ...finalEntries]);
       setBusy(false);
       persist();
+      // In plan mode, once the agent has presented a plan, offer to leave plan mode.
+      if (
+        !opts?.skipPlanConfirm &&
+        modeRef.current === "plan" &&
+        finalEntries.some((e) => e.kind === "assistant" && e.text.trim().length > 0)
+      ) {
+        setPlanReady(true);
+      }
     }
+  }
+
+  function approvePlan() {
+    setPlanReady(false);
+    setMode("default");
+    trySave({ ...config, permissionMode: "default" });
+    append({ kind: "notice", text: "Plan approved — exited plan mode. Tell me to proceed." });
   }
 
   // Entry point from the prompt input. While a turn is running, messages are
@@ -473,12 +534,15 @@ export function App({
               setPending(null);
             }}
           />
+        ) : planReady ? (
+          <PlanConfirm onApprove={approvePlan} onKeep={() => setPlanReady(false)} />
         ) : (
           <PromptInput
             busy={busy}
             cwd={cwd}
             queued={queued}
             vimEnabled={vim}
+            commands={commands}
             history={historyRef}
             onSubmit={handleInput}
             onClear={() => {

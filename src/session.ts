@@ -2,6 +2,7 @@ import type { Config } from "./config/schema.ts";
 import { resolveModel } from "./providers/resolve.ts";
 import { createTools, createReadOnlyTools } from "./tools/index.ts";
 import { buildSystemPrompt, buildSubAgentPrompt } from "./context/systemPrompt.ts";
+import { findOutputStyle } from "./context/outputStyles.ts";
 import { QueryEngine } from "./engine/QueryEngine.ts";
 import { autoApproveGate, type PermissionGate } from "./permissions/gate.ts";
 import type { SubAgentRunner } from "./tools/context.ts";
@@ -12,6 +13,10 @@ export interface SessionOptions {
   modelSpec: string;
   cwd: string;
   gate?: PermissionGate;
+  // Active output style name (persona); resolved against .privateer/output-styles.
+  outputStyle?: string;
+  // When true, the system prompt instructs the model to plan, not implement.
+  planMode?: boolean;
 }
 
 export interface Session {
@@ -50,7 +55,15 @@ export function createSession(opts: SessionOptions): Session {
   };
 
   const tools = createTools({ cwd: opts.cwd, gate, todos, runSubAgent });
-  const system = buildSystemPrompt({ cwd: opts.cwd, model: opts.modelSpec });
+  const outputStyleBody = opts.outputStyle
+    ? findOutputStyle(opts.outputStyle, opts.cwd)?.body
+    : undefined;
+  const system = buildSystemPrompt({
+    cwd: opts.cwd,
+    model: opts.modelSpec,
+    outputStyleBody,
+    planMode: opts.planMode,
+  });
 
   const engine = new QueryEngine({
     model: resolved.model,

@@ -41,9 +41,18 @@ stay out of the main conversation; it returns just a summary.
 - Mutating actions (write/edit/bash) may require user approval; that's expected — proceed and let \
 the gate handle it.`;
 
+const PLAN_MODE = `Plan mode is active. Your write, edit, and bash tools are disabled — do not attempt to \
+modify files or run commands. Investigate with read, glob, and grep, then present a clear, \
+step-by-step implementation plan as your final message. Do not start implementing; wait for the \
+user to approve the plan first.`;
+
 export interface SystemPromptOptions {
   cwd: string;
   model: string;
+  // Optional output-style body: replaces the default tone/persona section.
+  outputStyleBody?: string;
+  // When true, append the plan-mode mandate (read-only, produce a plan).
+  planMode?: boolean;
 }
 
 // System prompt for a `task` sub-agent: same environment grounding, but a read-only,
@@ -63,7 +72,10 @@ export function buildSubAgentPrompt(opts: SystemPromptOptions & { description: s
 }
 
 export function buildSystemPrompt(opts: SystemPromptOptions): string {
-  const parts: string[] = [IDENTITY, TONE, SECURITY, TOOL_POLICY];
+  // An active output style replaces the default tone/persona section.
+  const persona = opts.outputStyleBody?.trim() || TONE;
+  const parts: string[] = [IDENTITY, persona, SECURITY, TOOL_POLICY];
+  if (opts.planMode) parts.push(PLAN_MODE);
 
   // --- Dynamic environment section ---
   const env: string[] = [

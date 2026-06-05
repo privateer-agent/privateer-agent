@@ -6,6 +6,7 @@ import { join } from "node:path";
 import React from "react";
 import { render } from "ink-testing-library";
 import { PromptInput } from "../src/components/PromptInput.tsx";
+import { COMMAND_LIST } from "../src/commands/registry.ts";
 import {
   detectMode,
   slashQuery,
@@ -91,7 +92,7 @@ async function focusInput(stdin: any, lastFrame: () => string | undefined): Prom
 test("typing inserts text and a leading ! shows the bash tag", async () => {
   const history = { current: [] as string[] };
   const { stdin, lastFrame, unmount } = render(
-    React.createElement(PromptInput, { busy: false, cwd: process.cwd(), queued: 0, history, onSubmit: () => {} }),
+    React.createElement(PromptInput, { busy: false, cwd: process.cwd(), queued: 0, commands: COMMAND_LIST, history, onSubmit: () => {} }),
   );
   await focusInput(stdin, lastFrame);
   stdin.write("!ls");
@@ -103,7 +104,7 @@ test("typing inserts text and a leading ! shows the bash tag", async () => {
 test("'/' opens the command autocomplete menu", async () => {
   const history = { current: [] as string[] };
   const { stdin, lastFrame, unmount } = render(
-    React.createElement(PromptInput, { busy: false, cwd: process.cwd(), queued: 0, history, onSubmit: () => {} }),
+    React.createElement(PromptInput, { busy: false, cwd: process.cwd(), queued: 0, commands: COMMAND_LIST, history, onSubmit: () => {} }),
   );
   await focusInput(stdin, lastFrame);
   stdin.write("/m");
@@ -117,7 +118,7 @@ test("'@' opens the file autocomplete menu from the cwd", async () => {
   try {
     const history = { current: [] as string[] };
     const { stdin, lastFrame, unmount } = render(
-      React.createElement(PromptInput, { busy: false, cwd: dir, queued: 0, history, onSubmit: () => {} }),
+      React.createElement(PromptInput, { busy: false, cwd: dir, queued: 0, commands: COMMAND_LIST, history, onSubmit: () => {} }),
     );
     await focusInput(stdin, lastFrame);
     stdin.write("@al");
@@ -156,7 +157,7 @@ test("Enter submits the buffer and clears it; up-arrow recalls history", async (
 test("queued placeholder shows when busy", async () => {
   const history = { current: [] as string[] };
   const { lastFrame, unmount } = render(
-    React.createElement(PromptInput, { busy: true, cwd: process.cwd(), queued: 2, history, onSubmit: () => {} }),
+    React.createElement(PromptInput, { busy: true, cwd: process.cwd(), queued: 2, commands: COMMAND_LIST, history, onSubmit: () => {} }),
   );
   assert.ok(await until(frameHas(lastFrame, /2 queued/)));
   unmount();
@@ -193,7 +194,7 @@ test("vim mode: Esc enters NORMAL, letters don't insert, i returns to INSERT", a
 test("ctrl-r reverse-searches history and Enter accepts the match", async () => {
   const history = { current: ["run tests", "build project"] };
   const { stdin, lastFrame, unmount } = render(
-    React.createElement(PromptInput, { busy: false, cwd: process.cwd(), queued: 0, history, onSubmit: () => {} }),
+    React.createElement(PromptInput, { busy: false, cwd: process.cwd(), queued: 0, commands: COMMAND_LIST, history, onSubmit: () => {} }),
   );
   await focusInput(stdin, lastFrame);
   stdin.write(CTRL_R);
