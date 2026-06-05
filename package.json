@@ -36,7 +36,7 @@
     "start": "tsx src/main.tsx",
     "dev": "tsx watch src/main.tsx",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done"
   },
   "engines": {
     "node": ">=20"

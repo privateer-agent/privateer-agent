@@ -58,10 +58,10 @@ function EditDiff({ input }: { input: unknown }) {
   );
 }
 
-export function ToolCallView({ entry }: { entry: ToolEntry }) {
+export function ToolCallView({ entry, verbose }: { entry: ToolEntry; verbose?: boolean }) {
   const summary = summarizeInput(entry.name, entry.input);
   const body = entry.status === "error" ? entry.error ?? "" : entry.output ?? "";
-  const { lines, more } = previewOutput(body);
+  const { lines, more } = previewOutput(body, verbose ? Number.MAX_SAFE_INTEGER : 6);
   const isEditDiff = entry.name === "edit" && entry.status !== "error";
 
   return (

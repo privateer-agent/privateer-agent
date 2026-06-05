@@ -1,5 +1,5 @@
-// A curated subset of Claude Code's gerund "thinking" verbs, shown beside the
-// spinner while a turn runs. One is chosen at random per turn.
+// A set of gerund "thinking" verbs shown beside the spinner while a turn runs.
+// One is chosen at random per turn.
 const VERBS = [
   "Cogitating",
   "Pondering",

@@ -2,8 +2,8 @@ import { tool } from "ai";
 import { z } from "zod";
 import type { ToolContext } from "./context.ts";
 
-// The planning tool, modeled on Claude Code's TodoWrite: the model maintains a single
-// flat task list, rewriting the whole list each call. State lives in the session's
+// The planning tool: the model maintains a single flat task list, rewriting the
+// whole list each call. State lives in the session's
 // TodoStore so the TUI can render it live. No filesystem mutation, so it isn't gated.
 export function todoTool(ctx: ToolContext) {
   return tool({

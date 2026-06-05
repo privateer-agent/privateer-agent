@@ -9,9 +9,8 @@ const MARK: Record<TodoItem["status"], string> = {
   pending: "○",
 };
 
-// The live task panel, rendered above the status bar. Mirrors Claude Code's todo
-// display: completed items dimmed/struck, the in-progress item highlighted. Hidden
-// when there are no todos.
+// The live task panel, rendered above the status bar: completed items
+// dimmed/struck, the in-progress item highlighted. Hidden when there are no todos.
 export function TodoPanel({ todos }: { todos: TodoItem[] }) {
   if (todos.length === 0) return null;
   const done = todos.filter((t) => t.status === "completed").length;

@@ -1,12 +1,33 @@
 import {
   streamText,
   generateText,
+  generateObject,
   stepCountIs,
   type ModelMessage,
   type ToolSet,
   type LanguageModel,
 } from "ai";
+import { z } from "zod";
 import { type EngineEvent, type UsageTotals, emptyUsage, addUsage } from "./events.ts";
+
+// Structured shape for compaction so the summary preserves the parts that matter for
+// continuing the work, rather than a free-form blob.
+const CompactionSchema = z.object({
+  goals: z.string().describe("The user's overall goals for this session."),
+  decisions: z.array(z.string()).describe("Key decisions, approaches, and findings so far."),
+  filesTouched: z.array(z.string()).describe("File paths created or modified, each with a short note."),
+  openThreads: z.array(z.string()).describe("Unfinished tasks, next steps, and open questions."),
+});
+
+export function formatCompaction(o: z.infer<typeof CompactionSchema>): string {
+  const list = (items: string[]) => (items.length ? items.map((i) => `- ${i}`).join("\n") : "- (none)");
+  return [
+    `Goals: ${o.goals}`,
+    `Decisions:\n${list(o.decisions)}`,
+    `Files touched:\n${list(o.filesTouched)}`,
+    `Open threads:\n${list(o.openThreads)}`,
+  ].join("\n\n");
+}
 
 export interface QueryEngineOptions {
   model: LanguageModel;
@@ -20,6 +41,9 @@ export interface QueryEngineOptions {
   // turn, older history is summarized away. 0/undefined disables auto-compaction.
   contextBudget?: number;
   compactRatio?: number;
+  // Anthropic extended-thinking budget in tokens. Only applied for Anthropic-family
+  // models (set by the session); ignored elsewhere.
+  thinkingBudget?: number;
 }
 
 // Number of most-recent messages kept verbatim when compacting.
@@ -36,14 +60,28 @@ export class QueryEngine {
 
   constructor(private readonly opts: QueryEngineOptions) {}
 
-  async *send(userText: string, signal?: AbortSignal): AsyncGenerator<EngineEvent, void, void> {
+  async *send(
+    userText: string,
+    signal?: AbortSignal,
+    images?: { data: string; mediaType: string }[],
+  ): AsyncGenerator<EngineEvent, void, void> {
     // Auto-compact before the turn if the context has grown past the budget.
     if (this.shouldCompact()) {
       const res = await this.compact();
       if (res) yield { type: "compacted", before: res.before, after: res.after };
     }
 
-    this.messages.push({ role: "user", content: userText });
+    if (images && images.length > 0) {
+      this.messages.push({
+        role: "user",
+        content: [
+          { type: "text", text: userText },
+          ...images.map((im) => ({ type: "image" as const, image: im.data, mediaType: im.mediaType })),
+        ],
+      });
+    } else {
+      this.messages.push({ role: "user", content: userText });
+    }
 
     let result;
     try {
@@ -54,6 +92,9 @@ export class QueryEngine {
         tools: this.opts.tools,
         stopWhen: stepCountIs(this.opts.maxSteps),
         abortSignal: signal,
+        providerOptions: this.opts.thinkingBudget
+          ? { anthropic: { thinking: { type: "enabled", budgetTokens: this.opts.thinkingBudget } } }
+          : undefined,
       });
     } catch (err) {
       yield { type: "error", error: errMsg(err) };
@@ -156,9 +197,10 @@ export class QueryEngine {
   }
 
   // Summarize older history into a single briefing message, keeping the most recent
-  // messages verbatim. Mirrors Claude Code's auto-compact; the summarizer is a plain
-  // one-shot generate over a serialized transcript (no structured-output tool), so it
-  // can't orphan tool-call/result pairs. Returns before/after token estimates, or null
+  // messages verbatim. Uses a schema-guided summary (goals / decisions / files /
+  // open threads) so the structure survives, falling back to a plain-text summary if
+  // structured output fails. The cut always lands on a `user` message so tool-call /
+  // result pairs are never orphaned. Returns before/after token estimates, or null
   // when there's nothing worth compacting. Best-effort: failures leave history intact.
   async compact(): Promise<{ before: number; after: number } | null> {
     const before = estimateTokens(this.messages);
@@ -168,20 +210,26 @@ export class QueryEngine {
     const older = this.messages.slice(0, cut);
     const recent = this.messages.slice(cut);
     const transcript = older.map((m) => `${m.role}: ${renderContent(m.content)}`).join("\n\n");
+    const instruction =
+      `Summarize the earlier part of this coding session so the work can continue without the ` +
+      `full history. Be specific and terse.\n\n---\n${transcript}`;
 
     let summary: string;
     try {
-      const { text } = await generateText({
+      const { object } = await generateObject({
         model: this.opts.model,
-        prompt:
-          `Summarize the earlier part of this coding session into a concise briefing that lets ` +
-          `you continue the work without the full history. Preserve: the user's goals, key ` +
-          `decisions, files touched (with paths), and any unfinished tasks. Be specific and terse.` +
-          `\n\n---\n${transcript}`,
+        schema: CompactionSchema,
+        prompt: instruction,
       });
-      summary = text.trim();
+      summary = formatCompaction(object);
     } catch {
-      return null; // leave history untouched on failure
+      // Some models/providers handle structured output poorly — fall back to text.
+      try {
+        const { text } = await generateText({ model: this.opts.model, prompt: instruction });
+        summary = text.trim();
+      } catch {
+        return null; // leave history untouched on failure
+      }
     }
     if (!summary) return null;
 

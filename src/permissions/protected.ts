@@ -1,8 +1,8 @@
 import { basename } from "node:path";
 
-// Files we never auto-edit, even under acceptEdits/allowlist. Mirrors Claude Code's
-// guarded files: shell rc / git / package-manager / secrets that a coding task should
-// not silently rewrite. A protected target forces an interactive prompt (it can still
+// Files we never auto-edit, even under acceptEdits/allowlist: shell rc / git /
+// package-manager / secrets that a coding task should not silently rewrite. A
+// protected target forces an interactive prompt (it can still
 // be approved), and is never covered by `acceptEdits` or a bash allowlist entry.
 const PROTECTED_BASENAMES = new Set([
   ".gitconfig",

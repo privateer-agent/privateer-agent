@@ -24,8 +24,8 @@ test("/help lists commands", () => {
   assert.match((r as any).text, /\/provider/);
 });
 
-test("/model with no args reports current, with arg sets it", () => {
-  assert.match((runCommand("/model", ctx) as any).text, /anthropic:claude-opus-4-8/);
+test("/model with no args opens the picker, with arg sets it", () => {
+  assert.deepEqual(runCommand("/model", ctx), { type: "pickModel" });
   const set = runCommand("/model openrouter:foo/bar", ctx);
   assert.deepEqual(set, { type: "setModel", spec: "openrouter:foo/bar" });
 });

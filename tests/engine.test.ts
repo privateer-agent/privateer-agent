@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { QueryEngine, estimateTokens } from "../src/engine/QueryEngine.ts";
+import { QueryEngine, estimateTokens, formatCompaction } from "../src/engine/QueryEngine.ts";
 import { createTools } from "../src/tools/index.ts";
 import { autoApproveGate } from "../src/permissions/gate.ts";
 
@@ -121,6 +121,21 @@ test("compact replaces old history with a summary, keeping recent messages verba
   assert.match(String(engine.messages[0].content), /SUMMARY of earlier work/);
   // The most recent message is preserved verbatim.
   assert.match(String(engine.messages.at(-1)?.content), /message 11/);
+});
+
+test("formatCompaction renders the structured summary sections", () => {
+  const out = formatCompaction({
+    goals: "Ship the parser",
+    decisions: ["Use a recursive descent approach"],
+    filesTouched: ["src/parser.ts — added tokenizer"],
+    openThreads: ["Handle error recovery"],
+  });
+  assert.match(out, /Goals: Ship the parser/);
+  assert.match(out, /Decisions:\n- Use a recursive descent/);
+  assert.match(out, /Files touched:\n- src\/parser\.ts/);
+  assert.match(out, /Open threads:\n- Handle error recovery/);
+  // Empty arrays degrade gracefully.
+  assert.match(formatCompaction({ goals: "x", decisions: [], filesTouched: [], openThreads: [] }), /- \(none\)/);
 });
 
 test("estimateTokens grows with content", () => {

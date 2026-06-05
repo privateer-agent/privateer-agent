@@ -1,0 +1,115 @@
+TAP version 13
+# Subtest: Onboarding collects a masked key then opens the model step
+ok 1 - Onboarding collects a masked key then opens the model step
+  ---
+  duration_ms: 3003.549853
+  ...
+# Subtest: Onboarding masks the key input
+ok 2 - Onboarding masks the key input
+  ---
+  duration_ms: 1499.45713
+  ...
+# Subtest: planMode adds the read-only plan mandate to the system prompt
+ok 3 - planMode adds the read-only plan mandate to the system prompt
+  ---
+  duration_ms: 2569.349075
+  ...
+# Subtest: PlanConfirm: 'a' approves, 'k' keeps planning
+ok 4 - PlanConfirm: 'a' approves, 'k' keeps planning
+  ---
+  duration_ms: 1995.740892
+  ...
+# Subtest: detectMode reads the leading character
+ok 5 - detectMode reads the leading character
+  ---
+  duration_ms: 1.232375
+  ...
+# Subtest: slashQuery returns the command fragment, null once typing args
+ok 6 - slashQuery returns the command fragment, null once typing args
+  ---
+  duration_ms: 5.997538
+  ...
+# Subtest: mentionAt finds the @token and ignores mid-word @ (emails)
+ok 7 - mentionAt finds the @token and ignores mid-word @ (emails)
+  ---
+  duration_ms: 5.688937
+  ...
+# Subtest: filterCommands matches by name prefix
+ok 8 - filterCommands matches by name prefix
+  ---
+  duration_ms: 2.585943
+  ...
+# Subtest: filterFiles ranks basename hits first and respects the limit
+ok 9 - filterFiles ranks basename hits first and respects the limit
+  ---
+  duration_ms: 0.440022
+  ...
+# Subtest: typing inserts text and a leading ! shows the bash tag
+ok 10 - typing inserts text and a leading ! shows the bash tag
+  ---
+  duration_ms: 930.734154
+  ...
+# Subtest: '/' opens the command autocomplete menu
+ok 11 - '/' opens the command autocomplete menu
+  ---
+  duration_ms: 633.342611
+  ...
+# Subtest: '@' opens the file autocomplete menu from the cwd
+ok 12 - '@' opens the file autocomplete menu from the cwd
+  ---
+  duration_ms: 672.76898
+  ...
+# Subtest: Enter submits the buffer and clears it; up-arrow recalls history
+ok 13 - Enter submits the buffer and clears it; up-arrow recalls history
+  ---
+  duration_ms: 631.583442
+  ...
+# Subtest: queued placeholder shows when busy
+ok 14 - queued placeholder shows when busy
+  ---
+  duration_ms: 4.381845
+  ...
+# Subtest: vim mode: Esc enters NORMAL, letters don't insert, i returns to INSERT
+ok 15 - vim mode: Esc enters NORMAL, letters don't insert, i returns to INSERT
+  ---
+  duration_ms: 691.125481
+  ...
+# Subtest: ctrl-r reverse-searches history and Enter accepts the match
+ok 16 - ctrl-r reverse-searches history and Enter accepts the match
+  ---
+  duration_ms: 626.362507
+  ...
+# Subtest: App renders banner, status bar, and prompt
+ok 17 - App renders banner, status bar, and prompt
+  ---
+  duration_ms: 825.474573
+  ...
+# Subtest: EntryView renders a thinking block
+ok 18 - EntryView renders a thinking block
+  ---
+  duration_ms: 5.856245
+  ...
+# Subtest: ToolCallView truncates output unless verbose
+ok 19 - ToolCallView truncates output unless verbose
+  ---
+  duration_ms: 214.901819
+  ...
+# Subtest: StatusBar renders a custom status line when provided
+ok 20 - StatusBar renders a custom status line when provided
+  ---
+  duration_ms: 78.394379
+  ...
+# Subtest: TodoPanel hides when empty and lists tasks when populated
+ok 21 - TodoPanel hides when empty and lists tasks when populated
+  ---
+  duration_ms: 92.513058
+  ...
+1..21
+# tests 21
+# suites 0
+# pass 21
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 57083.839587

@@ -15,7 +15,7 @@ const MAX_OUTPUT = 30_000; // chars per stream, to keep tool results bounded
 export function exec(
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeoutMs: number; shell?: boolean },
+  opts: { cwd: string; timeoutMs: number; shell?: boolean; input?: string },
 ): Promise<ExecResult> {
   return new Promise((resolveP) => {
     const child = spawn(opts.shell ? cmd : cmd, opts.shell ? [] : args, {
@@ -23,6 +23,13 @@ export function exec(
       shell: opts.shell ?? false,
       env: process.env,
     });
+
+    // Feed the optional payload on stdin (used by hooks), then close it.
+    if (opts.input !== undefined) {
+      child.stdin?.on("error", () => {});
+      child.stdin?.write(opts.input);
+      child.stdin?.end();
+    }
 
     let stdout = "";
     let stderr = "";

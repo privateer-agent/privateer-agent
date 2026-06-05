@@ -1,0 +1,20 @@
+TAP version 13
+# Subtest: planMode adds the read-only plan mandate to the system prompt
+ok 1 - planMode adds the read-only plan mandate to the system prompt
+  ---
+  duration_ms: 994.146604
+  ...
+# Subtest: PlanConfirm: 'a' approves, 'k' keeps planning
+ok 2 - PlanConfirm: 'a' approves, 'k' keeps planning
+  ---
+  duration_ms: 1331.709072
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6128.023703

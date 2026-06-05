@@ -2,8 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gitStatus, dirSnapshot } from "./projectInfo.ts";
 
-// The system prompt is assembled from modular sections, mirroring how Claude Code
-// composes static + dynamic prompt segments. Static sections (identity, tone, tool
+// The system prompt is assembled from modular sections: static segments first,
+// then a dynamic environment block. Static sections (identity, tone, tool
 // policy) come first so they stay byte-stable across turns and cache well; the
 // dynamic environment block (cwd, git status, snapshot) comes last. `buildSystemPrompt`
 // stays a pure synchronous string builder — the only I/O is reading project files and
@@ -41,9 +41,18 @@ stay out of the main conversation; it returns just a summary.
 - Mutating actions (write/edit/bash) may require user approval; that's expected — proceed and let \
 the gate handle it.`;
 
+const PLAN_MODE = `Plan mode is active. Your write, edit, and bash tools are disabled — do not attempt to \
+modify files or run commands. Investigate with read, glob, and grep, then present a clear, \
+step-by-step implementation plan as your final message. Do not start implementing; wait for the \
+user to approve the plan first.`;
+
 export interface SystemPromptOptions {
   cwd: string;
   model: string;
+  // Optional output-style body: replaces the default tone/persona section.
+  outputStyleBody?: string;
+  // When true, append the plan-mode mandate (read-only, produce a plan).
+  planMode?: boolean;
 }
 
 // System prompt for a `task` sub-agent: same environment grounding, but a read-only,
@@ -62,8 +71,27 @@ export function buildSubAgentPrompt(opts: SystemPromptOptions & { description: s
   ].join("\n\n");
 }
 
+// System prompt for a user-defined sub-agent: the agent's own instructions plus the
+// shared identity/security stance and an autonomous report-back mandate.
+export function buildAgentPrompt(
+  opts: SystemPromptOptions & { description: string; instructions: string },
+): string {
+  return [
+    IDENTITY,
+    opts.instructions,
+    SECURITY,
+    `You are running as a sub-agent for the task: "${opts.description}". Work autonomously and ` +
+      `return a concise, self-contained final report (reference concrete file paths). Do not ask ` +
+      `the user questions — your final message is your whole report.`,
+    `Environment:\n- cwd: ${opts.cwd}\n- platform: ${process.platform}`,
+  ].join("\n\n");
+}
+
 export function buildSystemPrompt(opts: SystemPromptOptions): string {
-  const parts: string[] = [IDENTITY, TONE, SECURITY, TOOL_POLICY];
+  // An active output style replaces the default tone/persona section.
+  const persona = opts.outputStyleBody?.trim() || TONE;
+  const parts: string[] = [IDENTITY, persona, SECURITY, TOOL_POLICY];
+  if (opts.planMode) parts.push(PLAN_MODE);
 
   // --- Dynamic environment section ---
   const env: string[] = [

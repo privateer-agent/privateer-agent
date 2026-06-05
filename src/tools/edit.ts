@@ -56,6 +56,7 @@ export function editTool(ctx: ToolContext) {
       });
       if (decision === "deny") throw new PermissionDeniedError("edit");
 
+      ctx.recordMutation?.(abs);
       writeFileSync(abs, updated, "utf8");
       return `Edited ${displayPath(ctx, abs)} (${replace_all ? occ + " replacements" : "1 replacement"}).`;
     },

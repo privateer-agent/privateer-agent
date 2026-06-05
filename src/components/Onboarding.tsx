@@ -1,10 +1,19 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
-import type { ProviderName, ProviderConfig } from "../config/schema.ts";
-import { PROVIDER_LIST, type ProviderMeta } from "../providers/catalog.ts";
+import type { Config, ProviderName, ProviderConfig } from "../config/schema.ts";
+import { PROVIDER_LIST, PROVIDER_META, type ProviderMeta } from "../providers/catalog.ts";
+import { providerRequiresKey } from "../providers/registry.ts";
+import { ModelPicker } from "./ModelPicker.tsx";
 import { theme } from "./theme.ts";
 import { WELCOME } from "./figures.ts";
+
+// Which of the just-entered providers are actually usable (have a key, or are keyless).
+function readyProviders(creds: Partial<Record<ProviderName, ProviderConfig>>): ProviderName[] {
+  return (Object.keys(creds) as ProviderName[]).filter((name) =>
+    providerRequiresKey(name) ? Boolean(creds[name]?.apiKey) : true,
+  );
+}
 
 export interface OnboardingResult {
   providers: Partial<Record<ProviderName, ProviderConfig>>;
@@ -12,7 +21,7 @@ export interface OnboardingResult {
 }
 
 // Step 1 — multi-select the providers to configure. Arrows/jk move, space toggles,
-// enter confirms (needs at least one). Mirrors Claude Code's checkbox-list feel.
+// enter confirms (needs at least one).
 function SelectStep({
   initial,
   onConfirm,
@@ -117,6 +126,37 @@ function KeyStep({
   );
 }
 
+// Step 3 — pick the default model from the providers just configured, with the model
+// list fetched live using the entered keys. Esc (or a fetch failure) falls back to the
+// provider's catalog default, so onboarding always completes.
+function ModelStep({
+  creds,
+  ready,
+  fallback,
+  onDone,
+}: {
+  creds: Partial<Record<ProviderName, ProviderConfig>>;
+  ready: ProviderName[];
+  fallback: string;
+  onDone: (spec: string) => void;
+}) {
+  // ModelPicker only reads config.providers; a synthetic config is enough here.
+  const synthetic = { providers: creds } as Config;
+  return (
+    <Box flexDirection="column">
+      <Text color={theme.dim}>Choose your default model — you can change it later with /model.</Text>
+      <Box marginTop={1}>
+        <ModelPicker
+          config={synthetic}
+          providers={ready}
+          onSelect={onDone}
+          onCancel={() => onDone(fallback)}
+        />
+      </Box>
+    </Box>
+  );
+}
+
 export function Onboarding({
   initialSelected = [],
   onComplete,
@@ -125,6 +165,18 @@ export function Onboarding({
   onComplete: (result: OnboardingResult) => void;
 }) {
   const [chosen, setChosen] = useState<ProviderMeta[] | null>(null);
+  const [creds, setCreds] = useState<Partial<Record<ProviderName, ProviderConfig>> | null>(null);
+
+  function onKeysDone(entered: Partial<Record<ProviderName, ProviderConfig>>) {
+    const ready = readyProviders(entered);
+    // No usable credentials (every key skipped): nothing to pick from — finish on the
+    // chosen provider's catalog default rather than showing an empty picker.
+    if (ready.length === 0) {
+      onComplete({ providers: entered, defaultModel: chosen![0].defaultModel });
+      return;
+    }
+    setCreds(entered);
+  }
 
   return (
     <Box flexDirection="column" paddingX={1} paddingTop={1}>
@@ -135,12 +187,14 @@ export function Onboarding({
       <Box marginTop={1}>
         {chosen === null ? (
           <SelectStep initial={new Set(initialSelected)} onConfirm={setChosen} />
+        ) : creds === null ? (
+          <KeyStep providers={chosen} onDone={onKeysDone} />
         ) : (
-          <KeyStep
-            providers={chosen}
-            onDone={(creds) =>
-              onComplete({ providers: creds, defaultModel: chosen[0].defaultModel })
-            }
+          <ModelStep
+            creds={creds}
+            ready={readyProviders(creds)}
+            fallback={PROVIDER_META[readyProviders(creds)[0]].defaultModel}
+            onDone={(spec) => onComplete({ providers: creds, defaultModel: spec })}
           />
         )}
       </Box>

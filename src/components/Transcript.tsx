@@ -3,9 +3,9 @@ import { Box, Text } from "ink";
 import type { Entry } from "./types.ts";
 import { ToolCallView } from "./ToolCallView.tsx";
 import { theme } from "./theme.ts";
-import { BULLET } from "./figures.ts";
+import { BULLET, WELCOME } from "./figures.ts";
 
-export function EntryView({ entry }: { entry: Entry }) {
+export function EntryView({ entry, verbose }: { entry: Entry; verbose?: boolean }) {
   switch (entry.kind) {
     case "user":
       return (
@@ -24,8 +24,20 @@ export function EntryView({ entry }: { entry: Entry }) {
           </Box>
         </Box>
       );
+    case "thinking":
+      // The model's reasoning, rendered dimmed under a thinking mark.
+      return (
+        <Box marginTop={1}>
+          <Text color={theme.dim}>{WELCOME} </Text>
+          <Box flexGrow={1}>
+            <Text color={theme.dim} dimColor>
+              {entry.text}
+            </Text>
+          </Box>
+        </Box>
+      );
     case "tool":
-      return <ToolCallView entry={entry} />;
+      return <ToolCallView entry={entry} verbose={verbose} />;
     case "notice":
       return (
         <Box marginTop={1} flexDirection="column">

@@ -65,8 +65,14 @@ and history prefix are cached. `session.ts` only enables this for `anthropic` an
 **Compaction.** Before each turn the engine estimates context size (~4 chars/token) and, if
 it crosses `contextBudget × compactRatio`, summarizes the older messages into a single
 briefing while keeping the most recent ones verbatim (the cut always lands on a `user`
-message, so tool-call/result pairs are never orphaned). `/compact` triggers the same path
-manually.
+message, so tool-call/result pairs are never orphaned). The summary is schema-guided via
+`generateObject` (goals / decisions / files-touched / open-threads), falling back to a
+plain-text generate if a model handles structured output poorly. `/compact` triggers the
+same path manually.
+
+**Thinking.** `reasoning` stream parts surface as `reasoning` events and render as dimmed
+thinking blocks. The `thinkingBudget` setting enables Anthropic extended thinking
+(passed as `providerOptions`); it's gated to the Anthropic family and ignored elsewhere.
 
 ## Tools (`src/tools/`)
 
@@ -79,9 +85,10 @@ Each tool is a self-contained AI SDK `tool({ description, inputSchema, execute }
 | `edit` | exact-string replace, unique-match guard; gated; flags protected files |
 | `glob` | pure-Node walk + `picomatch` |
 | `grep` | pure-Node regex search |
-| `bash` | shell exec with timeout; gated |
+| `bash` | shell exec with timeout; gated; `run_in_background` for detached shells |
+| `bash_output` / `kill_shell` | poll / stop a background shell (via `ProcessRegistry`) |
 | `todo` | maintains the session task list (TodoStore → TUI panel); not gated |
-| `task` | spawns a read-only sub-agent and returns its summary |
+| `task` | spawns a sub-agent (default read-only, or a named custom agent) and returns its summary |
 | `web_fetch` | fetches a URL, strips HTML to text; gated (`fetch` kind) |
 | `web_search` | DuckDuckGo keyless HTML search; gated (`fetch` kind) |
 
@@ -90,10 +97,13 @@ anywhere. Mutating and network tools call the **permission gate** before acting;
 `execute` is async, an approval is just an `await` the UI resolves. The session passes each
 tool a `ToolContext` carrying the cwd, gate, the `TodoStore`, and a `runSubAgent` runner.
 
-**Sub-agents (`task`).** `session.ts` builds the runner: a fresh `QueryEngine` with the
-**read-only** toolset (`createReadOnlyTools` — read/glob/grep, no recursion), a lower step
-budget, and a report-back system prompt. It runs to completion and returns the text it
-produced. This is synchronous — one sub-agent at a time, not parallel workers.
+**Sub-agents (`task`).** `session.ts` builds the runner: a fresh `QueryEngine` with a lower
+step budget and a report-back system prompt. With no `subagent_type` it uses the
+**read-only** toolset (`createReadOnlyTools` — read/glob/grep, no recursion) under an
+auto-approve gate. With a named custom agent (`.privateer/agents/<name>.md`) it uses that
+agent's tool subset, model override, and instructions, routing any mutating tools through
+the parent gate. A FIFO concurrency limiter (`util/limit.ts`, `config.maxSubagents`) bounds
+how many run at once when the model fans `task` calls out.
 
 **Todo panel.** The `todo` tool rewrites the whole list into a session `TodoStore`; the TUI
 subscribes to it and renders `TodoPanel` above the status bar (in-progress highlighted,
@@ -124,12 +134,37 @@ existing ancestor with `realpath` to catch symlink escapes from the cwd.
 
 ## Config & persistence (`src/config/`, `src/memory/`)
 
-`loadConfig()` merges `~/.privateer/config.json` (global) with `./.privateer/config.json`
-(project) and falls back to env vars for keys. The data dir is overridable via
-`PRIVATEER_HOME`. `memory/store.ts` persists the latest conversation per project
-(keyed by a hash of the cwd) so `--continue` can restore history. Config also carries the
-agent loop's `maxSteps`, the `contextBudget`/`compactRatio` compaction thresholds, and the
-bash `allowlist`.
+`loadConfig()` deep-merges a precedence chain (`config/load.ts`): user `config.json` →
+user `settings.json` → project `config.json` → project `settings.json` →
+`settings.local.json` → optional managed settings, then env-var fallbacks for keys. The
+schema (`config/schema.ts`) uses a catchall so forward-compatible sections (`hooks`,
+`mcpServers`, `statusLine`, …) survive parsing; `config/paths.ts` centralizes the
+`.privateer/` layout. The data dir is overridable via `PRIVATEER_HOME`. `memory/store.ts`
+persists the latest conversation per project (keyed by a hash of the cwd) so `--continue`
+can restore history.
+
+`memory/checkpoints.ts` powers `/rewind`: before each turn it records the conversation
+length and the content of every session-modified file (write/edit call a `recordMutation`
+hook that captures each file's pre-touch baseline). Restoring resolves each touched file to
+its checkpoint snapshot or baseline, deleting files the session created. Snapshots are
+in-memory (within-session undo).
+
+## Extensibility (`src/commands/`, `src/agents/`, `src/hooks/`, `src/mcp/`)
+
+All of these load from `.privateer/` (project) and `~/.privateer/` (user), project winning:
+
+- **Custom commands** (`commands/custom.ts`) — markdown files with optional frontmatter; the
+  body is a prompt template (`$ARGUMENTS`/`$1`…). `runCommand` falls through to them and they
+  join the `/` autocomplete list.
+- **Output styles** (`context/outputStyles.ts`) — markdown personas that replace the system
+  prompt's tone section while identity/security/tool-policy stay intact.
+- **Sub-agents** (`agents/loader.ts`) — see the `task` runner above.
+- **Hooks** (`hooks/engine.ts`) — `PreToolUse`/`PostToolUse` wrap each tool's `execute`;
+  `UserPromptSubmit`/`Stop` fire around the turn in `App`. Hooks run as shell commands with a
+  JSON payload on stdin and may block (exit `2` or `{"decision":"block"}`) or inject context.
+- **MCP** (`mcp/client.ts`) — a minimal stdio JSON-RPC client (initialize → tools/list →
+  tools/call). Servers from `mcp.json` are connected on mount; their tools are adapted into
+  namespaced, gated AI-SDK tools and merged into the session.
 
 ## System prompt (`src/context/`)
 
@@ -146,8 +181,12 @@ mandate for `task` sub-agents.
 
 React + [Ink](https://github.com/vadimdemedes/ink). Committed transcript lines render in
 `<Static>` (write-once scrollback); the in-flight turn streams live below, followed by the
-status bar and either the prompt input or an approval prompt. Model switching rebuilds the
-session while carrying history forward.
+status bar and one of the prompt input, an approval prompt, the model/rewind pickers, or the
+plan-confirm step. `PromptInput` is a self-contained modal editor (command/file autocomplete,
+`!`/`#` modes, history, vim mode, reverse-search) — its logic mutates a single buffer state
+via functional updates and reads "current mode" through refs synced during render, because
+Ink's `useInput` closure can lag a render. Model/style/plan-mode changes rebuild the session
+while carrying history forward.
 
 ## Runtime
 
@@ -158,5 +197,8 @@ Commander parses flags and either renders the TUI or runs the headless `-p` path
 ## Testing
 
 `npm test` (Node's built-in test runner via tsx) covers tools, the engine loop (driven by
-a hand-rolled `LanguageModelV2` mock — no network), slash commands, permissions, the store,
-and a TUI render smoke test. `npm run typecheck` runs `tsc --noEmit`.
+a hand-rolled `LanguageModelV2` mock — no network), config layering, slash and custom
+commands, output styles, plan mode, checkpoints, sub-agents, hooks, the MCP client (against
+a mock stdio server), the process registry, the concurrency limiter, image extraction, and
+the modal prompt / TUI components. Each test file runs in its **own process** so Ink-driven
+input tests don't accumulate cross-file state. `npm run typecheck` runs `tsc --noEmit`.

@@ -14,5 +14,6 @@ export interface ToolEntry {
 export type Entry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
+  | { kind: "thinking"; text: string }
   | ToolEntry
   | { kind: "notice"; text: string; tone?: "info" | "error" };

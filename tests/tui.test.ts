@@ -7,6 +7,9 @@ import React from "react";
 import { render } from "ink-testing-library";
 import { App } from "../src/components/App.tsx";
 import { TodoPanel } from "../src/components/TodoPanel.tsx";
+import { EntryView } from "../src/components/Transcript.tsx";
+import { ToolCallView } from "../src/components/ToolCallView.tsx";
+import { StatusBar } from "../src/components/StatusBar.tsx";
 import { Config } from "../src/config/schema.ts";
 
 // Smoke test: the App renders its full component tree (banner, status bar, input)
@@ -31,6 +34,54 @@ test("App renders banner, status bar, and prompt", async () => {
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("EntryView renders a thinking block", () => {
+  const { lastFrame, unmount } = render(
+    React.createElement(EntryView, { entry: { kind: "thinking", text: "weighing two approaches" } }),
+  );
+  assert.match(lastFrame() ?? "", /weighing two approaches/);
+  unmount();
+});
+
+test("ToolCallView truncates output unless verbose", () => {
+  const entry = {
+    kind: "tool" as const,
+    id: "1",
+    name: "bash",
+    input: { command: "x" },
+    status: "done" as const,
+    output: Array.from({ length: 10 }, (_, i) => `line${i}`).join("\n"),
+  };
+  const t = render(React.createElement(ToolCallView, { entry }));
+  assert.match(t.lastFrame() ?? "", /more lines/);
+  t.unmount();
+
+  const v = render(React.createElement(ToolCallView, { entry, verbose: true }));
+  assert.doesNotMatch(v.lastFrame() ?? "", /more lines/);
+  assert.match(v.lastFrame() ?? "", /line9/);
+  v.unmount();
+});
+
+test("StatusBar renders a custom status line when provided", () => {
+  const def = render(
+    React.createElement(StatusBar, { modelSpec: "m", cwd: "/x", totalTokens: 0, mode: "default" as const }),
+  );
+  assert.match(def.lastFrame() ?? "", /privateer/);
+  def.unmount();
+
+  const custom = render(
+    React.createElement(StatusBar, {
+      modelSpec: "m",
+      cwd: "/x",
+      totalTokens: 0,
+      mode: "default" as const,
+      custom: "MY-STATUS-LINE",
+    }),
+  );
+  assert.match(custom.lastFrame() ?? "", /MY-STATUS-LINE/);
+  assert.doesNotMatch(custom.lastFrame() ?? "", /privateer/);
+  custom.unmount();
 });
 
 test("TodoPanel hides when empty and lists tasks when populated", () => {
