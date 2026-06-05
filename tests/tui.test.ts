@@ -25,10 +25,9 @@ test("App renders banner, status bar, and prompt", async () => {
     // Let effects (session build) flush.
     await new Promise((r) => setTimeout(r, 50));
     const frame = lastFrame() ?? "";
-    assert.match(frame, /Welcome to Privateer/);
+    assert.match(frame, /PRIVATEER/); // banner title
     assert.match(frame, /anthropic:claude-opus-4-8/);
     assert.match(frame, /privateer/); // status bar chip
-    assert.match(frame, /default/); // permission mode in status bar
     assert.match(frame, /type a prompt/); // input placeholder
     unmount();
   } finally {
@@ -65,7 +64,7 @@ test("ToolCallView truncates output unless verbose", () => {
 
 test("StatusBar renders a custom status line when provided", () => {
   const def = render(
-    React.createElement(StatusBar, { modelSpec: "m", cwd: "/x", totalTokens: 0, mode: "default" as const }),
+    React.createElement(StatusBar, { modelSpec: "m", cwd: "/x", totalTokens: 0 }),
   );
   assert.match(def.lastFrame() ?? "", /privateer/);
   def.unmount();
@@ -75,7 +74,6 @@ test("StatusBar renders a custom status line when provided", () => {
       modelSpec: "m",
       cwd: "/x",
       totalTokens: 0,
-      mode: "default" as const,
       custom: "MY-STATUS-LINE",
     }),
   );

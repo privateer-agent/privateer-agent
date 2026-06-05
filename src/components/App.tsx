@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Box, Text, Static, useApp, useInput } from "ink";
+import { Box, Text, Static, useApp, useInput, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import { Banner } from "./Banner.tsx";
 import { StatusBar } from "./StatusBar.tsx";
@@ -10,6 +10,7 @@ import { ApprovalPrompt } from "./ApprovalPrompt.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { PlanConfirm } from "./PlanConfirm.tsx";
+import { ModeHint } from "./ModeHint.tsx";
 import { RewindPicker } from "./RewindPicker.tsx";
 import { CheckpointStore, type RewindScope } from "../memory/checkpoints.ts";
 import { ProcessRegistry } from "../tools/processRegistry.ts";
@@ -71,6 +72,10 @@ export function App({
   onLogin?: () => void;
 }) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  // Bumped on resize to remount <Static> (forcing the whole transcript to be
+  // re-emitted) as part of a full repaint — see the resize effect below.
+  const [resizeNonce, setResizeNonce] = useState(0);
   const [committed, setCommitted] = useState<Entry[]>([]);
   const [live, setLive] = useState<Entry[]>([]);
   const [busy, setBusy] = useState(false);
@@ -196,6 +201,33 @@ export function App({
     return () => procs.killAll();
   }, []);
 
+  // Repaint cleanly when the terminal is resized.
+  //
+  // Ink commits the transcript once via <Static> and redraws only the footer
+  // below it, erasing the prior frame by its newline count. That count is
+  // width-unaware, so when the terminal reflows the previously-printed (always
+  // full-width) footer on a narrower drag, Ink under-erases and leaves a stale
+  // copy — one per resize event, which stacks into the duplicated status bars.
+  // There's no way to stop the terminal reflow, so on resize-settle we wipe the
+  // screen + scrollback and remount <Static> to re-emit the whole transcript at
+  // the new width. Debounced so it fires once when dragging stops, not per tick.
+  useEffect(() => {
+    if (!stdout) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onResize = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback, home cursor
+        setResizeNonce((n) => n + 1); // remount <Static> → repaint transcript
+      }, 120);
+    };
+    stdout.on("resize", onResize);
+    return () => {
+      clearTimeout(timer);
+      stdout.off("resize", onResize);
+    };
+  }, [stdout]);
+
   // Custom status line: run the configured command with session JSON on stdin and use
   // its first line of stdout. Re-runs when the surfaced state changes. Best-effort.
   useEffect(() => {
@@ -252,10 +284,23 @@ export function App({
     }
   }
 
+  // Shift+Tab cycles the permission mode in place (like Claude Code), without
+  // having to type /permissions. Dangerous bypass sits last so it takes three
+  // taps to reach from default.
+  const MODE_CYCLE: PermissionMode[] = ["default", "acceptEdits", "plan", "bypass"];
+  function cycleMode() {
+    const next = MODE_CYCLE[(MODE_CYCLE.indexOf(modeRef.current) + 1) % MODE_CYCLE.length];
+    setMode(next);
+    trySave({ ...config, permissionMode: next });
+  }
+
   useInput((input, key) => {
     if (key.ctrl && input === "c") exit();
     // Esc interrupts an in-flight turn (the run loop persists partial output).
     if (key.escape && busy && abortRef.current) abortRef.current.abort();
+    // Shift+Tab rotates the permission mode — but not while a modal overlay owns
+    // input (it has its own keybindings).
+    if (key.tab && key.shift && !pending && !picking && !rewinding && !planReady) cycleMode();
   });
 
   // Drive the elapsed-seconds counter shown beside the spinner while a turn runs.
@@ -653,7 +698,7 @@ export function App({
 
   return (
     <Box flexDirection="column">
-      <Static items={staticItems}>
+      <Static key={resizeNonce} items={staticItems}>
         {(item, i) =>
           item === BANNER ? (
             <Box key="banner" paddingX={1} paddingTop={1}>
@@ -677,8 +722,10 @@ export function App({
             <Text color={theme.accent}>
               <Spinner type="dots" />
             </Text>
-            <Text color={theme.accent}>{verb}…</Text>
-            <Text color={theme.dim}>
+            <Text color={theme.accent} wrap="truncate-end">
+              {verb}…
+            </Text>
+            <Text color={theme.dim} wrap="truncate-end">
               (esc to interrupt · {elapsed}s · {usage.totalTokens} tokens)
             </Text>
           </Box>
@@ -690,7 +737,6 @@ export function App({
           modelSpec={modelSpec}
           cwd={cwd}
           totalTokens={usage.totalTokens}
-          mode={mode}
           custom={statusText || undefined}
         />
 
@@ -720,19 +766,22 @@ export function App({
         ) : planReady ? (
           <PlanConfirm onApprove={approvePlan} onKeep={() => setPlanReady(false)} />
         ) : (
-          <PromptInput
-            busy={busy}
-            cwd={cwd}
-            queued={queued}
-            vimEnabled={vim}
-            commands={commands}
-            history={historyRef}
-            onSubmit={handleInput}
-            onClear={() => {
-              setCommitted([]);
-              setLive([]);
-            }}
-          />
+          <>
+            <PromptInput
+              busy={busy}
+              cwd={cwd}
+              queued={queued}
+              vimEnabled={vim}
+              commands={commands}
+              history={historyRef}
+              onSubmit={handleInput}
+              onClear={() => {
+                setCommitted([]);
+                setLive([]);
+              }}
+            />
+            <ModeHint mode={mode} />
+          </>
         )}
       </Box>
     </Box>

@@ -335,7 +335,9 @@ export function PromptInput({
       setSel((s) => (key.upArrow ? (Math.min(s, n - 1) - 1 + n) % n : (Math.min(s, n - 1) + 1) % n));
       return;
     }
-    if (key.tab && menuOpen) {
+    // Plain Tab accepts the menu selection; Shift+Tab is reserved for the
+    // app-level permission-mode cycle, so let it fall through.
+    if (key.tab && !key.shift && menuOpen) {
       accept(candidates[selClamped]);
       return;
     }
@@ -463,7 +465,7 @@ export function PromptInput({
 function renderBuffer(value: string, cursor: number, placeholder: string): React.ReactNode {
   if (value.length === 0) {
     return (
-      <Text>
+      <Text wrap="truncate-end">
         <Text inverse> </Text>
         <Text color={theme.dim}>{placeholder}</Text>
       </Text>

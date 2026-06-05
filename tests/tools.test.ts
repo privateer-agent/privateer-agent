@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { createTools } from "../src/tools/index.ts";
 import { autoApproveGate, type PermissionRequest } from "../src/permissions/gate.ts";
 import { TodoStore } from "../src/tools/todoStore.ts";
@@ -71,10 +71,18 @@ test("bash runs a command and reports exit code", async () => {
   }
 });
 
-test("path guardrail blocks escaping the cwd", async () => {
-  const { run, cleanup } = setup();
+test("cwd is a soft anchor: relative paths resolve from it, escapes are allowed", async () => {
+  const { run, cwd, cleanup } = setup();
   try {
-    await assert.rejects(() => run("read", { path: "../../etc/passwd" }), /outside the working directory/);
+    // A sibling file outside cwd is reachable (soft boundary, not a wall).
+    const outside = join(cwd, "..", `privateer-soft-${process.pid}.txt`);
+    writeFileSync(outside, "reachable");
+    try {
+      const out = await run("read", { path: `../${basename(outside)}` });
+      assert.match(out, /reachable/);
+    } finally {
+      rmSync(outside, { force: true });
+    }
   } finally {
     cleanup();
   }

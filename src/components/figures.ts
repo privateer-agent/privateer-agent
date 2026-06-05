@@ -4,3 +4,5 @@ export const TREE = "⎿"; // U+23BF — connects a tool's result under its call
 export const WELCOME = "✻"; // U+273B — teardrop-asterisk welcome mark
 export const EFFORT = { low: "○", medium: "◐", high: "●", max: "◉" } as const;
 export const POINTER = "❯"; // selection pointer in menus and the prompt caret
+export const FAST_FORWARD = "⏵⏵"; // marks an "on" permission mode below the prompt
+export const PAUSE = "⏸"; // marks plan mode (paused execution) below the prompt

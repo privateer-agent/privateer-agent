@@ -1,20 +1,28 @@
 import React from "react";
+import os from "node:os";
 import { Box, Text } from "ink";
 import { VERSION } from "../version.ts";
 import { theme } from "./theme.ts";
 import { WELCOME } from "./figures.ts";
 
+// Collapse the user's home directory to ~ for a compact path display.
+function shortenPath(cwd: string): string {
+  const home = os.homedir();
+  return cwd === home || cwd.startsWith(home + "/")
+    ? "~" + cwd.slice(home.length)
+    : cwd;
+}
+
 // Anchor motif rendered in ASCII — the Privateer mark (ring, stock, shank, flukes).
 const ANCHOR = [
-  "    .-.     ",
-  "   (   )    ",
-  "    '+'     ",
-  "  ---+---   ",
-  "     |      ",
-  "     |      ",
-  "  \\  |  /   ",
-  "   \\_|_/    ",
-  "  (_/ \\_)   ",
+  "    .-.    ",
+  "   |___|   ",
+  "   | + |   ",
+  "   '-+-'   ",
+  "  ---|---  ",
+  " _   |   _ ",
+  "  \\  |  /  ",
+  "   \\_|_/   ",
 ];
 
 export function Banner({ model }: { model: string }) {
@@ -36,14 +44,15 @@ export function Banner({ model }: { model: string }) {
         </Box>
         <Box flexDirection="column" justifyContent="center">
           <Text bold color={theme.accent}>
-            {WELCOME} Welcome to Privateer
+            {WELCOME} PRIVATEER
           </Text>
-          <Text color={theme.dim}>v{VERSION} · bring your own model</Text>
+          <Text color={theme.dim}>bring your own model · v{VERSION}</Text>
           <Text> </Text>
           <Text>
             model <Text color={theme.accent}>{model}</Text>
           </Text>
           <Text color={theme.dim}>type a prompt · /help for commands</Text>
+          <Text color={theme.accent}>{shortenPath(process.cwd())}</Text>
         </Box>
       </Box>
     </Box>

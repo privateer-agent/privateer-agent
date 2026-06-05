@@ -98,8 +98,13 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
     `Environment:`,
     `- cwd: ${opts.cwd}`,
     `- model: ${opts.model}`,
+    `- launched in: ${process.cwd()}`,
     `- platform: ${process.platform}`,
     `- date: ${new Date().toISOString().slice(0, 10)}`,
+    `\nTreat cwd as the project scope: interpret relative paths from it and keep your ` +
+      `exploration and edits inside it by default. You may read or write outside cwd when the ` +
+      `user clearly asks (e.g. an absolute path or a sibling directory) — it's a soft boundary, ` +
+      `not a wall — but don't wander outside it on your own.`,
   ];
 
   const git = gitStatus(opts.cwd);

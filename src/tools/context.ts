@@ -1,5 +1,4 @@
-import { resolve, isAbsolute, relative, sep } from "node:path";
-import { realpathSync } from "node:fs";
+import { resolve, isAbsolute, relative } from "node:path";
 import type { PermissionGate } from "../permissions/gate.ts";
 import type { TodoStore } from "./todoStore.ts";
 import type { AgentDefinition } from "../agents/loader.ts";
@@ -27,45 +26,12 @@ export interface ToolContext {
   processes?: ProcessRegistry;
 }
 
-// Resolve a possibly-relative path against the session cwd and keep it inside the
-// working directory (basic guardrail against `../` escapes from the model).
+// Resolve a possibly-relative path against the session cwd. The cwd is a *soft*
+// anchor: relative paths are interpreted from it, but absolute paths and `../`
+// escapes are allowed through — the model is nudged (via the system prompt) to
+// stay inside cwd rather than being walled in here.
 export function resolveInCwd(ctx: ToolContext, p: string): string {
-  const abs = isAbsolute(p) ? p : resolve(ctx.cwd, p);
-  if (isOutside(ctx.cwd, abs)) {
-    throw new Error(`Path "${p}" is outside the working directory.`);
-  }
-  // Defense in depth: if the path (or its nearest existing parent) resolves through
-  // a symlink to somewhere outside cwd, reject it. realpath only sees existing nodes,
-  // so for not-yet-created files we canonicalize the closest existing ancestor.
-  const realRoot = safeRealpath(ctx.cwd);
-  const realTarget = safeRealpath(nearestExisting(abs));
-  if (realRoot && realTarget && isOutside(realRoot, realTarget)) {
-    throw new Error(`Path "${p}" resolves outside the working directory via a symlink.`);
-  }
-  return abs;
-}
-
-function isOutside(root: string, target: string): boolean {
-  const rel = relative(root, target);
-  return rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel);
-}
-
-function safeRealpath(p: string): string | null {
-  try {
-    return realpathSync(p);
-  } catch {
-    return null;
-  }
-}
-
-function nearestExisting(p: string): string {
-  let cur = p;
-  for (;;) {
-    if (safeRealpath(cur)) return cur;
-    const parent = resolve(cur, "..");
-    if (parent === cur) return cur;
-    cur = parent;
-  }
+  return isAbsolute(p) ? p : resolve(ctx.cwd, p);
 }
 
 // Display a path relative to cwd when possible (nicer for tool output / UI).

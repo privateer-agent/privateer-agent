@@ -18,14 +18,13 @@ AI SDK, so tool-calling and streaming work identically across every provider.
 
 ```
     .-.
-   (   )
-    '+'
-  ---+---       PRIVATEER
-     |          bring your own model
-     |
-  \  |  /
+   |___|
+   | + |
+   '-+-'      
+  ---|---
+ _   |   _
+  \  |  / 
    \_|_/
-  (_/ \_)
 ```
 
 **Highlights**
