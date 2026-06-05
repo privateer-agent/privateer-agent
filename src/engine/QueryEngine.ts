@@ -103,6 +103,11 @@ export class QueryEngine {
 
     let assistantText = "";
     let aborted = false;
+    // Track usage as steps finish so the UI can tick the token count up live,
+    // instead of jumping only when the whole turn ends. `totalUsage` reconciles
+    // the authoritative number at finish.
+    const baseline = this.usage;
+    let stepsUsage = emptyUsage();
 
     try {
       for await (const part of result.fullStream) {
@@ -135,9 +140,20 @@ export class QueryEngine {
               error: errMsg((part as { error: unknown }).error),
             };
             break;
-          case "finish-step":
+          case "finish-step": {
+            const u = (part as { usage?: Partial<UsageTotals> }).usage;
+            if (u) {
+              stepsUsage = addUsage(stepsUsage, {
+                inputTokens: u.inputTokens ?? 0,
+                outputTokens: u.outputTokens ?? 0,
+                totalTokens: u.totalTokens ?? 0,
+              });
+              this.usage = addUsage(baseline, stepsUsage);
+              yield { type: "usage", usage: this.usage };
+            }
             yield { type: "step-finish" };
             break;
+          }
           case "abort":
             aborted = true;
             break;
@@ -183,7 +199,10 @@ export class QueryEngine {
       outputTokens: turnUsage.outputTokens ?? 0,
       totalTokens: turnUsage.totalTokens ?? 0,
     };
-    this.usage = addUsage(this.usage, usage);
+    // Reconcile against the authoritative turn total. We already folded per-step
+    // usage into this.usage live; rebase on the baseline so we don't double-count.
+    // Fall back to the accumulated step usage if the provider omitted totalUsage.
+    this.usage = addUsage(baseline, usage.totalTokens > 0 ? usage : stepsUsage);
 
     const finishReason = await result.finishReason.catch(() => "unknown");
     yield { type: "finish", usage, finishReason };

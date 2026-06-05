@@ -37,6 +37,9 @@ in_progress and mark items completed as you finish them. This keeps the user ori
 - For broad, open-ended search or investigation, delegate to a 'task' sub-agent so the details \
 stay out of the main conversation; it returns just a summary.
 - Use 'bash' for builds, tests, git, and other CLI work. Avoid long-running or interactive commands.
+- When you create a git commit, end the message with a blank line followed by this trailer so the \
+work is attributed to Privateer as a co-author:
+  Co-Authored-By: Privateer <privateer@noreply.local>
 - Use 'web_fetch' to read a known URL when the user provides one or you need current docs.
 - Mutating actions (write/edit/bash) may require user approval; that's expected — proceed and let \
 the gate handle it.`;

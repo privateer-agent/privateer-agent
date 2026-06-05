@@ -5,7 +5,15 @@ import { ToolCallView } from "./ToolCallView.tsx";
 import { theme } from "./theme.ts";
 import { BULLET, WELCOME } from "./figures.ts";
 
-export function EntryView({ entry, verbose }: { entry: Entry; verbose?: boolean }) {
+export function EntryView({
+  entry,
+  verbose,
+  collapsed,
+}: {
+  entry: Entry;
+  verbose?: boolean;
+  collapsed?: boolean;
+}) {
   switch (entry.kind) {
     case "user":
       return (
@@ -24,8 +32,19 @@ export function EntryView({ entry, verbose }: { entry: Entry; verbose?: boolean 
           </Box>
         </Box>
       );
-    case "thinking":
-      // The model's reasoning, rendered dimmed under a thinking mark.
+    case "thinking": {
+      // The model's reasoning, rendered dimmed under a thinking mark. When
+      // collapsed (Ctrl+O), show just a one-line summary instead of the full text.
+      if (collapsed) {
+        const lineCount = entry.text.trim() === "" ? 0 : entry.text.trim().split("\n").length;
+        return (
+          <Box marginTop={1}>
+            <Text color={theme.dim} dimColor>
+              {WELCOME} Thinking{lineCount ? ` (${lineCount} lines)` : ""} — ⌃o to expand
+            </Text>
+          </Box>
+        );
+      }
       return (
         <Box marginTop={1}>
           <Text color={theme.dim}>{WELCOME} </Text>
@@ -36,6 +55,7 @@ export function EntryView({ entry, verbose }: { entry: Entry; verbose?: boolean 
           </Box>
         </Box>
       );
+    }
     case "tool":
       return <ToolCallView entry={entry} verbose={verbose} />;
     case "notice":

@@ -15,6 +15,7 @@ export type EngineEvent =
   | { type: "tool-result"; id: string; name: string; output: unknown }
   | { type: "tool-error"; id: string; name: string; error: string }
   | { type: "step-finish" }
+  | { type: "usage"; usage: UsageTotals } // running total, emitted live as steps finish
   | { type: "aborted" }
   | { type: "compacted"; before: number; after: number }
   | { type: "finish"; usage: UsageTotals; finishReason: string }

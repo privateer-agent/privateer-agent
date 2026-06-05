@@ -5,16 +5,22 @@
 <h1 align="center">⚓ Privateer</h1>
 
 <p align="center">
+  <strong>A provider-agnostic terminal coding agent — bring your own model.</strong>
+</p>
+
+<p align="center">
   <a href="https://github.com/zahnno/privateer-agentic-tui/actions/workflows/ci.yml">
     <img src="https://github.com/zahnno/privateer-agentic-tui/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
+  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Ollama-5b8def" alt="Providers" />
+  <img src="https://img.shields.io/badge/built%20on-Vercel%20AI%20SDK-black" alt="Vercel AI SDK" />
 </p>
 
-A provider-agnostic terminal coding agent — **bring your own model**. Switch between
-OpenRouter, Anthropic, OpenAI, and local Ollama with one command. Built on the Vercel
-AI SDK, so tool-calling and streaming work identically across every provider.
+Switch between **OpenRouter**, **Anthropic**, **OpenAI**, and local **Ollama** with one
+command. Built on the Vercel AI SDK, so tool-calling and streaming work identically across
+every provider — no model lock-in, no separate code paths.
 
 ```
     .-.
@@ -27,7 +33,18 @@ AI SDK, so tool-calling and streaming work identically across every provider.
    \_|_/
 ```
 
-**Highlights**
+## Why Privateer?
+
+- **No lock-in.** Point it at a frontier model today and a local Ollama model tomorrow —
+  `/model` swaps mid-session. Your config, commands, and agents come along for the ride.
+- **The agent UX you already know.** Plan mode, checkpoint/rewind, a modal prompt, slash
+  commands, sub-agents, and project memory — but vendor-neutral.
+- **Genuinely extensible.** MCP servers, lifecycle hooks, custom commands, output styles,
+  and sub-agents are all just files under `.privateer/`. No plugins to compile.
+- **Zero binary deps.** The file/search/shell tools are pure Node — nothing to install
+  beyond `node`.
+
+## Highlights
 
 - A modal prompt with `/` command and `@` file autocomplete, `!` shell passthrough,
   `#` memory append, input history, optional **vim** mode, and **ctrl-r** history search
@@ -38,6 +55,25 @@ AI SDK, so tool-calling and streaming work identically across every provider.
 - Extensible: **MCP servers**, lifecycle **hooks**, and **custom sub-agents**
 - Background shells, bounded parallel sub-agents, thinking display, structured compaction,
   and image attachment for vision-capable models
+
+## Quickstart
+
+```bash
+git clone https://github.com/zahnno/privateer-agentic-tui.git
+cd privateer-agentic-tui
+npm install
+export OPENROUTER_API_KEY=sk-or-...     # one provider is enough
+npm start                               # launches the interactive TUI
+```
+
+First run walks you through picking a provider and default model. From there, just type.
+
+## Contents
+
+- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Usage](#usage)
+- [The prompt](#the-prompt) · [Slash commands](#slash-commands) · [Tools](#tools)
+- [Customize & extend](#customize--extend) · [Permission modes](#permission-modes) · [Project context](#project-context)
+- [Develop](#develop) · [Caveats](#caveats) · [Docs](#docs) · [License](#license)
 
 ## Requirements
 

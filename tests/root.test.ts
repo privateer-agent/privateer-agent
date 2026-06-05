@@ -45,7 +45,7 @@ test("Root shows the app when a provider is configured", async () => {
       }),
     );
     await tick();
-    assert.match(lastFrame() ?? "", /Welcome to Privateer/);
+    assert.match(lastFrame() ?? "", /PRIVATEER/);
     assert.match(lastFrame() ?? "", /type a prompt/);
     unmount();
   } finally {

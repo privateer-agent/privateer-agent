@@ -97,6 +97,9 @@ export function App({
   const mcpRef = useRef<McpConnection | null>(null);
   const [statusText, setStatusText] = useState("");
   const [verbose, setVerbose] = useState(false);
+  // Collapsed view (Ctrl+O) compacts the model's reasoning blocks to a single
+  // line each, so the transcript isn't dominated by thinking. On by default.
+  const [collapsed, setCollapsed] = useState(true);
   const engineRef = useRef<QueryEngine | null>(null);
   const todosRef = useRef<TodoStore | null>(null);
   const seededRef = useRef(false);
@@ -298,6 +301,13 @@ export function App({
     if (key.ctrl && input === "c") exit();
     // Esc interrupts an in-flight turn (the run loop persists partial output).
     if (key.escape && busy && abortRef.current) abortRef.current.abort();
+    // Ctrl+O toggles the collapsed (compact reasoning) view. The committed
+    // transcript lives in <Static>, so force a full repaint to re-render it.
+    if (key.ctrl && input === "o") {
+      setCollapsed((c) => !c);
+      stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+      setResizeNonce((n) => n + 1);
+    }
     // Shift+Tab rotates the permission mode — but not while a modal overlay owns
     // input (it has its own keybindings).
     if (key.tab && key.shift && !pending && !picking && !rewinding && !planReady) cycleMode();
@@ -545,6 +555,10 @@ export function App({
             );
             sync();
             break;
+          case "usage":
+            // Live running total — ticks the token count up between steps.
+            setUsage(ev.usage);
+            break;
           case "finish":
             setUsage(engine.usage);
             break;
@@ -706,7 +720,7 @@ export function App({
             </Box>
           ) : (
             <Box key={i} paddingX={1}>
-              <EntryView entry={item as Entry} verbose={verbose} />
+              <EntryView entry={item as Entry} verbose={verbose} collapsed={collapsed} />
             </Box>
           )
         }
@@ -714,7 +728,7 @@ export function App({
 
       <Box flexDirection="column" paddingX={1}>
         {live.map((e, i) => (
-          <EntryView key={i} entry={e} verbose={verbose} />
+          <EntryView key={i} entry={e} verbose={verbose} collapsed={collapsed} />
         ))}
 
         {busy && (
@@ -737,6 +751,7 @@ export function App({
           modelSpec={modelSpec}
           cwd={cwd}
           totalTokens={usage.totalTokens}
+          collapsed={collapsed}
           custom={statusText || undefined}
         />
 

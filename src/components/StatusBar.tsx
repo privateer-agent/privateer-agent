@@ -14,6 +14,7 @@ export function StatusBar(props: {
   modelSpec: string;
   cwd: string;
   totalTokens: number;
+  collapsed?: boolean; // whether reasoning is collapsed (Ctrl+O) — flips the hint label
   custom?: string; // settings-driven status line; overrides the default when set
 }) {
   // Stay clear of the right edge (parent paddingX={1} plus a 2-col safety gap) so
@@ -40,7 +41,7 @@ export function StatusBar(props: {
       </Box>
       <Box flexShrink={0}>
         <Text color={theme.dim} wrap="truncate-end">
-          {"  /help · esc interrupts"}
+          {`  /help · esc interrupts · ⌃o ${props.collapsed ? "expand" : "collapse"}`}
         </Text>
       </Box>
     </Box>
