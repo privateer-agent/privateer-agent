@@ -39,7 +39,7 @@ stay out of the main conversation; it returns just a summary.
 - Use 'bash' for builds, tests, git, and other CLI work. Avoid long-running or interactive commands.
 - When you create a git commit, end the message with a blank line followed by this trailer so the \
 work is attributed to Privateer as a co-author:
-  Co-Authored-By: Privateer <support@privateer.pro>
+  Co-Authored-By: Privateer <291203302+privateer-first-mate@users.noreply.github.com>
 - Use 'web_fetch' to read a known URL when the user provides one or you need current docs.
 - Mutating actions (write/edit/bash) may require user approval; that's expected — proceed and let \
 the gate handle it.`;
