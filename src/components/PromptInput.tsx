@@ -1,9 +1,11 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { theme } from "./theme.ts";
-import { POINTER } from "./figures.ts";
+import { POINTER, TREE } from "./figures.ts";
 import { walkFiles } from "../tools/walk.ts";
 import { detectMode, slashQuery, mentionAt, filterCommands, filterFiles } from "./promptModel.ts";
+import { resolveAttachments, chipFor, describeAttachment } from "../util/images.ts";
+import type { Attachment } from "../util/images.ts";
 
 const MENU_LIMIT = 8;
 
@@ -26,6 +28,8 @@ export function PromptInput({
   vimEnabled = false,
   commands,
   history,
+  imageSeqRef,
+  pendingImagesRef,
   onSubmit,
   onClear,
 }: {
@@ -35,6 +39,11 @@ export function PromptInput({
   vimEnabled?: boolean;
   commands: { name: string; summary: string }[];
   history: React.MutableRefObject<string[]>;
+  // Shared session counter for "[Image #n]" chips and the staging area where
+  // live-resolved (drag-drop/paste) attachments wait to be claimed at submit.
+  // Both optional so the component can render without image support (tests).
+  imageSeqRef?: React.MutableRefObject<number>;
+  pendingImagesRef?: React.MutableRefObject<Attachment[]>;
   onSubmit: (value: string) => void;
   onClear?: () => void;
 }) {
@@ -64,6 +73,8 @@ export function PromptInput({
   vimModeRef.current = vimMode;
   const searchRef = useRef(search);
   searchRef.current = search;
+  // Most recently killed text (Ctrl+K/U/W, Alt+D); re-inserted by Ctrl+Y.
+  const killRef = useRef<string>("");
   // File list is walked lazily on first @-mention so we don't pay for it at mount.
   const filesRef = useRef<string[] | null>(null);
   const getFiles = () => (filesRef.current ??= walkFiles(cwd));
@@ -118,6 +129,14 @@ export function PromptInput({
     let i = c;
     while (i > 0 && /\s/.test(v[i - 1])) i--;
     while (i > 0 && !/\s/.test(v[i - 1])) i--;
+    return i;
+  }
+  // Readline-style forward word (Alt+F / Alt+D): skip leading whitespace then
+  // the word, landing at the *end* of the word (unlike vim's `w` above).
+  function wordRight(v: string, c: number): number {
+    let i = c;
+    while (i < v.length && /\s/.test(v[i])) i++;
+    while (i < v.length && !/\s/.test(v[i])) i++;
     return i;
   }
   // History entries (newest first, de-duped) containing `query`, for ctrl-r search.
@@ -364,6 +383,9 @@ export function PromptInput({
       return;
     }
     // Arrows work in both vim modes.
+    // Ctrl/Alt+arrow jumps by word (must precede the plain one-char moves).
+    if (key.leftArrow && (key.ctrl || key.meta)) return void moveCursor((b) => wordBack(b.value, b.cursor));
+    if (key.rightArrow && (key.ctrl || key.meta)) return void moveCursor((b) => wordRight(b.value, b.cursor));
     if (key.leftArrow) return void moveCursor((b) => b.cursor - 1);
     if (key.rightArrow) return void moveCursor((b) => b.cursor + 1);
     if (key.upArrow) {
@@ -380,6 +402,19 @@ export function PromptInput({
     if (vimEnabled && vimModeRef.current === "normal" && !key.ctrl && !key.meta && str) {
       if (handleNormalKey(str)) return;
     }
+    // Alt/Option+Backspace deletes the word before the cursor (readline
+    // backward-kill-word; macOS Option+Delete sends ESC + DEL, i.e. meta+backspace).
+    // Must precede the plain backspace handler below, which checks neither modifier
+    // and would otherwise swallow it as a single-char delete. Saves to killRef so
+    // Ctrl+Y can yank it back, matching Ctrl+W.
+    if ((key.meta || key.ctrl) && (key.backspace || key.delete))
+      return void edit((b) => {
+        let i = b.cursor;
+        while (i > 0 && /\s/.test(b.value[i - 1])) i--;
+        while (i > 0 && !/\s/.test(b.value[i - 1])) i--;
+        killRef.current = b.value.slice(i, b.cursor);
+        return { value: b.value.slice(0, i) + b.value.slice(b.cursor), cursor: i };
+      });
     if (key.backspace || key.delete) {
       edit((b) =>
         b.cursor === 0
@@ -388,24 +423,74 @@ export function PromptInput({
       );
       return;
     }
-    // Emacs-style line editing.
+    // Emacs/readline-style line editing.
     if (key.ctrl && str === "a") return void moveCursor((b) => lineStart(b.value, b.cursor));
     if (key.ctrl && str === "e") return void moveCursor((b) => lineEnd(b.value, b.cursor));
+    if (key.ctrl && str === "b") return void moveCursor((b) => b.cursor - 1);
+    if (key.ctrl && str === "f") return void moveCursor((b) => b.cursor + 1);
+    if (key.meta && !key.escape && str === "b") return void moveCursor((b) => wordBack(b.value, b.cursor));
+    if (key.meta && !key.escape && str === "f") return void moveCursor((b) => wordRight(b.value, b.cursor));
     if (key.ctrl && str === "u")
       return void edit((b) => {
         const ls = lineStart(b.value, b.cursor);
+        killRef.current = b.value.slice(ls, b.cursor);
         return { value: b.value.slice(0, ls) + b.value.slice(b.cursor), cursor: ls };
+      });
+    if (key.ctrl && str === "k")
+      return void edit((b) => {
+        const le = lineEnd(b.value, b.cursor);
+        killRef.current = b.value.slice(b.cursor, le);
+        return { value: b.value.slice(0, b.cursor) + b.value.slice(le), cursor: b.cursor };
       });
     if (key.ctrl && str === "w")
       return void edit((b) => {
         let i = b.cursor;
         while (i > 0 && /\s/.test(b.value[i - 1])) i--;
         while (i > 0 && !/\s/.test(b.value[i - 1])) i--;
+        killRef.current = b.value.slice(i, b.cursor);
         return { value: b.value.slice(0, i) + b.value.slice(b.cursor), cursor: i };
       });
+    if (key.meta && !key.escape && str === "d")
+      return void edit((b) => {
+        const j = wordRight(b.value, b.cursor);
+        killRef.current = b.value.slice(b.cursor, j);
+        return { value: b.value.slice(0, b.cursor) + b.value.slice(j), cursor: b.cursor };
+      });
+    if (key.ctrl && str === "d")
+      return void edit((b) =>
+        b.cursor >= b.value.length
+          ? b
+          : { value: b.value.slice(0, b.cursor) + b.value.slice(b.cursor + 1), cursor: b.cursor },
+      );
+    if (key.ctrl && str === "y")
+      return void edit((b) => ({
+        value: b.value.slice(0, b.cursor) + killRef.current + b.value.slice(b.cursor),
+        cursor: b.cursor + killRef.current.length,
+      }));
     if (key.ctrl && str === "l") return void onClear?.();
     if (key.ctrl || key.meta) return; // ignore other control combos (ctrl-c handled in App)
     if (str) {
+      // A multi-char chunk is a paste or drag-drop (a terminal sends a dropped
+      // file as one escaped path). If it carries attachable file paths, convert them
+      // to "[Kind #n]" chips live — so the user sees a short reference instead of a
+      // long escaped path — and stage the base64 for the next submit. Single
+      // keystrokes are never paths, so they skip this and insert verbatim. (Inlined
+      // text files are resolved at submit, not here, so the buffer stays clean.)
+      // inlineMaxBytes 0 → text files aren't inlined here; their raw paths stay in the
+      // buffer and get inlined at submit (runTurn). Only binary attachments chip live.
+      if (str.length > 1 && imageSeqRef && pendingImagesRef) {
+        const resolved = resolveAttachments(str, cwd, imageSeqRef.current, 0);
+        if (resolved.attachments.length > 0) {
+          imageSeqRef.current += resolved.attachments.length;
+          pendingImagesRef.current.push(...resolved.attachments);
+          const chunk = resolved.text;
+          edit((b) => ({
+            value: b.value.slice(0, b.cursor) + chunk + b.value.slice(b.cursor),
+            cursor: b.cursor + chunk.length,
+          }));
+          return;
+        }
+      }
       edit((b) => ({
         value: b.value.slice(0, b.cursor) + str + b.value.slice(b.cursor),
         cursor: b.cursor + str.length,
@@ -421,6 +506,14 @@ export function PromptInput({
     : "type a prompt — / commands · @ files · ! bash · # memory";
 
   const vimTag = vimEnabled ? (vimMode === "normal" ? "NORMAL" : "INSERT") : null;
+
+  // Live provenance for staged drag-drop/paste attachments still referenced in the
+  // buffer: filename · dimensions · size. Surfaces a wrong-but-complete capture (the
+  // macOS file-promise hazard) before submit — chips alone hide what actually landed.
+  // Derived from the buffer text so an edited-away chip drops its line automatically.
+  const stagedInBuffer = pendingImagesRef
+    ? pendingImagesRef.current.filter((a) => value.includes(chipFor(a)))
+    : [];
 
   return (
     <Box flexDirection="column">
@@ -443,6 +536,16 @@ export function PromptInput({
           <Text color={tag.color}> [{tag.label}]</Text>
         )}
       </Box>
+
+      {stagedInBuffer.length > 0 && (
+        <Box flexDirection="column" marginLeft={1}>
+          {stagedInBuffer.map((a) => (
+            <Text key={a.n} color={theme.dim} wrap="truncate-end">
+              {`${TREE} ${chipFor(a)} ${describeAttachment(a)}`}
+            </Text>
+          ))}
+        </Box>
+      )}
 
       {menuOpen && !search && (
         <Box flexDirection="column" paddingX={1} marginLeft={1}>

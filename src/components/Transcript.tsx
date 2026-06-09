@@ -69,7 +69,7 @@ export function EntryView({
         return (
           <Box marginTop={1}>
             <Text color={theme.dim} dimColor>
-              {WELCOME} Thinking{lineCount ? ` (${lineCount} lines)` : ""} — ⌃o to expand
+              {WELCOME} Thinking{lineCount ? ` (${lineCount} lines)` : ""} — Ctrl+O to expand
             </Text>
           </Box>
         );
@@ -99,6 +99,12 @@ export function EntryView({
               {l}
             </Text>
           ))}
+          {entry.hint &&
+            entry.hint.split("\n").map((l, i) => (
+              <Text key={`hint-${i}`} color={theme.dim} dimColor>
+                {l}
+              </Text>
+            ))}
         </Box>
       );
   }

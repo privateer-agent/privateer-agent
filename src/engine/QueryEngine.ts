@@ -5,10 +5,12 @@ import {
   stepCountIs,
   type ModelMessage,
   type ToolSet,
-  type LanguageModel,
 } from "ai";
 import { z } from "zod";
 import { type EngineEvent, type UsageTotals, emptyUsage, addUsage } from "./events.ts";
+import { type RouteSet, selectRoute, requiredModalities } from "./router.ts";
+import { redactText } from "../util/redact.ts";
+import { describeError } from "./errors.ts";
 
 // Structured shape for compaction so the summary preserves the parts that matter for
 // continuing the work, rather than a free-form blob.
@@ -30,20 +32,18 @@ export function formatCompaction(o: z.infer<typeof CompactionSchema>): string {
 }
 
 export interface QueryEngineOptions {
-  model: LanguageModel;
+  // The model routes for this session. `routes.default` is always used unless a
+  // turn's data/shape selects a specialized route (see src/engine/router.ts).
+  // Per-route flags (cacheControl/thinkingBudget) travel on each Route. Compaction
+  // always runs on the default route.
+  routes: RouteSet;
   system: string;
   tools: ToolSet;
   maxSteps: number;
-  // When true, attach Anthropic ephemeral cache breakpoints so the static prefix
-  // (system + tool schemas + history) is cached. No-op for non-Anthropic providers.
-  cacheControl?: boolean;
   // Approx token budget; when the estimated context exceeds budget*ratio before a
   // turn, older history is summarized away. 0/undefined disables auto-compaction.
   contextBudget?: number;
   compactRatio?: number;
-  // Anthropic extended-thinking budget in tokens. Only applied for Anthropic-family
-  // models (set by the session); ignored elsewhere.
-  thinkingBudget?: number;
 }
 
 // Number of most-recent messages kept verbatim when compacting.
@@ -63,7 +63,7 @@ export class QueryEngine {
   async *send(
     userText: string,
     signal?: AbortSignal,
-    images?: { data: string; mediaType: string }[],
+    attachments?: { data: string; mediaType: string; modality?: string }[],
   ): AsyncGenerator<EngineEvent, void, void> {
     // Auto-compact before the turn if the context has grown past the budget.
     if (this.shouldCompact()) {
@@ -71,34 +71,70 @@ export class QueryEngine {
       if (res) yield { type: "compacted", before: res.before, after: res.after };
     }
 
-    if (images && images.length > 0) {
+    if (attachments && attachments.length > 0) {
       this.messages.push({
         role: "user",
         content: [
           { type: "text", text: userText },
-          ...images.map((im) => ({ type: "image" as const, image: im.data, mediaType: im.mediaType })),
+          // Images go as image parts; documents/audio/video as generic file parts.
+          ...attachments.map((a) =>
+            a.modality === "image" || a.mediaType.startsWith("image/")
+              ? ({ type: "image" as const, image: a.data, mediaType: a.mediaType })
+              : ({ type: "file" as const, data: a.data, mediaType: a.mediaType })),
         ],
       });
     } else {
       this.messages.push({ role: "user", content: userText });
     }
 
+    // Pick the model for this turn from its data/shape. Modality requirements are
+    // sticky over the whole conversation so attachment history never gets replayed to
+    // a model that can't accept it.
+    const sel = selectRoute(this.opts.routes, {
+      modalities: requiredModalities(this.messages),
+      estTokens: estimateTokens(this.messages),
+      promptChars: userText.length,
+    });
+    if (sel.name !== "default" || (sel.missing && sel.missing.length > 0)) {
+      yield {
+        type: "routed",
+        route: sel.name,
+        label: sel.route.label,
+        reason: sel.reason,
+        missing: sel.missing,
+      };
+    }
+    const route = sel.route;
+
     let result;
     try {
       result = streamText({
-        model: this.opts.model,
+        model: route.model,
         system: this.opts.system,
-        messages: this.opts.cacheControl ? withCacheBreakpoints(this.messages) : this.messages,
+        messages: route.cacheControl ? withCacheBreakpoints(this.messages) : this.messages,
         tools: this.opts.tools,
         stopWhen: stepCountIs(this.opts.maxSteps),
         abortSignal: signal,
-        providerOptions: this.opts.thinkingBudget
-          ? { anthropic: { thinking: { type: "enabled", budgetTokens: this.opts.thinkingBudget } } }
+        providerOptions: route.thinkingBudget
+          ? { anthropic: { thinking: { type: "enabled", budgetTokens: route.thinkingBudget } } }
           : undefined,
       });
     } catch (err) {
-      yield { type: "error", error: errMsg(err) };
+      const d = describeError(err);
+      yield { type: "error", error: d.message, hint: d.hint, retryable: d.retryable };
       return;
+    }
+
+    // The AI SDK exposes several derived promises that reject lazily when the
+    // stream errors. We await some below in their own try/catch, but any we
+    // never touch would surface as an unhandled rejection — which Node dumps,
+    // unredacted, to the terminal (scrambling the TUI and leaking the request
+    // body). Attach no-op catches so a stream error stays inside our channel.
+    for (const key of ["text", "steps", "warnings", "sources", "files", "reasoning"] as const) {
+      const p = (result as unknown as Record<string, unknown>)[key];
+      if (p && typeof (p as Promise<unknown>).then === "function") {
+        (p as Promise<unknown>).catch(() => {});
+      }
     }
 
     let assistantText = "";
@@ -157,16 +193,19 @@ export class QueryEngine {
           case "abort":
             aborted = true;
             break;
-          case "error":
-            yield { type: "error", error: errMsg(part.error) };
+          case "error": {
+            const d = describeError(part.error);
+            yield { type: "error", error: d.message, hint: d.hint, retryable: d.retryable };
             break;
+          }
         }
       }
     } catch (err) {
       if (signal?.aborted || isAbortError(err)) {
         aborted = true;
       } else {
-        yield { type: "error", error: errMsg(err) };
+        const d = describeError(err);
+        yield { type: "error", error: d.message, hint: d.hint, retryable: d.retryable };
         return;
       }
     }
@@ -236,7 +275,7 @@ export class QueryEngine {
     let summary: string;
     try {
       const { object } = await generateObject({
-        model: this.opts.model,
+        model: this.opts.routes.default.model,
         schema: CompactionSchema,
         prompt: instruction,
       });
@@ -244,7 +283,7 @@ export class QueryEngine {
     } catch {
       // Some models/providers handle structured output poorly — fall back to text.
       try {
-        const { text } = await generateText({ model: this.opts.model, prompt: instruction });
+        const { text } = await generateText({ model: this.opts.routes.default.model, prompt: instruction });
         summary = text.trim();
       } catch {
         return null; // leave history untouched on failure
@@ -323,6 +362,10 @@ function isAbortError(err: unknown): boolean {
 }
 
 function errMsg(err: unknown): string {
+  return redactText(rawErrMsg(err));
+}
+
+function rawErrMsg(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
   try {

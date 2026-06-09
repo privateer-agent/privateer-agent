@@ -1,3 +1,5 @@
+import type { RouteName, Modality } from "./router.ts";
+
 // Normalized events the engine emits while streaming a turn. The UI (and the
 // headless print path) consume these without knowing anything about the provider
 // or the AI SDK's internal stream-part shapes.
@@ -18,8 +20,13 @@ export type EngineEvent =
   | { type: "usage"; usage: UsageTotals } // running total, emitted live as steps finish
   | { type: "aborted" }
   | { type: "compacted"; before: number; after: number }
+  // The router switched this turn to a non-default model. `missing` lists modalities
+  // the chosen model can't accept (set when no configured model fully covers the turn).
+  | { type: "routed"; route: RouteName; label: string; reason?: string; missing?: Modality[] }
   | { type: "finish"; usage: UsageTotals; finishReason: string }
-  | { type: "error"; error: string };
+  // `error` is the short user-facing message; `hint` is an optional actionable
+  // next step rendered dim beneath it. Both are already secret-redacted.
+  | { type: "error"; error: string; hint?: string; retryable?: boolean };
 
 export const emptyUsage = (): UsageTotals => ({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
 

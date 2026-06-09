@@ -25,6 +25,13 @@ jobs:
 
       - run: npm ci
 
+      # Fail the build on known high/critical advisories in the locked deps.
+      # Moderate/low are reported (|| true) but don't block.
+      - name: Audit dependencies
+        run: |
+          npm audit --audit-level=high
+          npm audit || true
+
       - name: Typecheck
         run: npm run typecheck
 

@@ -3,6 +3,7 @@ import type { PermissionGate } from "../permissions/gate.ts";
 import type { TodoStore } from "./todoStore.ts";
 import type { AgentDefinition } from "../agents/loader.ts";
 import type { ProcessRegistry } from "./processRegistry.ts";
+import type { AttachmentStore } from "../util/attachmentStore.ts";
 
 // Runs a child agent and resolves to its final text answer. With no `agent` it runs the
 // default read-only sub-agent; with one it uses that agent's tools/model/instructions.
@@ -24,6 +25,9 @@ export interface ToolContext {
   recordMutation?: (abs: string) => void;
   // Background-shell registry, for bash run_in_background + bash_output/kill_shell.
   processes?: ProcessRegistry;
+  // Session attachment store (decoded bytes of pasted/dropped files, by "#n"), for the
+  // save_attachment tool to write one back to disk.
+  attachments?: AttachmentStore;
 }
 
 // Resolve a possibly-relative path against the session cwd. The cwd is a *soft*

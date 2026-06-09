@@ -63,7 +63,7 @@ First run walks you through picking a provider and default model. From there, ju
 
 ## Contents
 
-- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Usage](#usage)
+- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Model routing](#model-routing) · [Usage](#usage)
 - [The prompt](#the-prompt) · [Slash commands](#slash-commands) · [Tools](#tools)
 - [Customize & extend](#customize--extend) · [Permission modes](#permission-modes) · [Project context](#project-context)
 - [Develop](#develop) · [Caveats](#caveats) · [Docs](#docs) · [License](#license)
@@ -116,6 +116,63 @@ export OLLAMA_BASE_URL=http://localhost:11434/api   # optional; defaults to this
 
 Override the config location with `PRIVATEER_HOME`.
 
+## Model routing
+
+`defaultModel` handles most turns, but it's often the wrong tool for a particular one —
+it may not accept the file you dropped in, or you'd rather spend a cheaper model on a
+trivial question. The optional **`router`** block lets Privateer switch models per turn
+based on the turn's **data type** and shape:
+
+```json
+{
+  "defaultModel": "openrouter:minimax/minimax-m3",
+  "router": {
+    "vision":   "openrouter:google/gemini-2.5-flash",
+    "document": "openrouter:anthropic/claude-opus-4.8",
+    "audio":    "openrouter:google/gemini-2.5-flash",
+    "video":    "openrouter:google/gemini-2.5-flash",
+    "long":     "openrouter:anthropic/claude-opus-4.8",
+    "fast":     "openrouter:openai/gpt-4o-mini",
+    "longThreshold": 60000,
+    "fastMaxChars": 280,
+    "inlineTextMaxBytes": 65536,
+    "auto": true
+  }
+}
+```
+
+Reference a file in the prompt — drag-drop, paste a path, or `@`-mention — and Privateer
+classifies it by **modality** and routes accordingly:
+
+| Route | Chosen when the turn (or conversation) includes… |
+|---|---|
+| **vision** | an image (`.png .jpg .jpeg .gif .webp`) |
+| **document** | a PDF (`.pdf`) |
+| **audio** | audio (`.mp3 .wav .m4a .ogg .flac`) |
+| **video** | video (`.mp4 .mov .webm .mkv`) |
+| **long** | the estimated context exceeds `longThreshold` tokens (default: half of `contextBudget`) |
+| **fast** | the prompt is ≤ `fastMaxChars` characters (and needs no attachment) |
+| **default** | everything else (`defaultModel`) |
+
+Each attached file collapses to a chip — `[Image #1]`, `[PDF #2]`, `[Audio #3]`,
+`[Video #4]` — while the file itself rides along to the model. **Code/CSV/markdown and
+other text files aren't routed**: they're read and inlined into the prompt (up to
+`inlineTextMaxBytes`; larger ones are left as a path for the agent's read tool).
+
+**Capability requirements outrank `long`/`fast`.** A turn that needs a modality is
+routed to a model that can actually accept it — and routing is **sticky**: once a file
+is in the conversation, later turns stay on a capable model so the attachment is never
+replayed to one that can't read it. A turn that needs **several** modalities at once
+(say an image *and* a PDF) is routed to a model whose support covers all of them. When
+a turn is routed, the transcript shows a line like `↪ routed to gemini-2.5-flash ·
+image input`.
+
+**Hybrid auto-detect** (`"auto": true`, the default): if you reference, say, a PDF but
+haven't set `router.document`, and your `defaultModel` can't read PDFs, Privateer
+auto-selects a capable model from a configured provider. Set the route explicitly to
+control exactly which model is used, or `"auto": false` to disable it (you'll get a
+one-line warning when nothing can handle the modality).
+
 ## Usage
 
 ```bash
@@ -153,7 +210,12 @@ The input is modal — the first character chooses what happens:
 Also: **↑/↓** history, **ctrl-r** reverse history search, emacs line editing
 (`ctrl-a/e/u/w`), `ctrl-l` to clear the screen, and **`\`+Enter** for a newline. Messages
 typed while the agent is busy are queued and run in order. `/vim` toggles modal (vim)
-editing. Reference an image file (`@screenshot.png`) to attach it for vision-capable models.
+editing. Reference an image file to attach it for vision-capable models — by `@`-mention
+(`@screenshot.png`), or by pasting a path anywhere in the prompt. Absolute paths and paths
+with spaces work too, quoted (`"/Users/me/My Shot.png"`) or backslash-escaped
+(`/Users/me/My\ Shot.png`); a leading `/path/...` is treated as a file, not a command. Each
+referenced image collapses to a short `[Image #1]` chip in the transcript (numbered across
+the session) while the picture itself rides along to the model.
 
 While the agent is working, press **Esc** to interrupt the turn (partial output is kept);
 **Ctrl-C** quits.

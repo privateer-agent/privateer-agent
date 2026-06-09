@@ -1,6 +1,8 @@
-import type { ToolSet } from "ai";
+import type { LanguageModel, ToolSet } from "ai";
 import type { Config } from "./config/schema.ts";
-import { resolveModel } from "./providers/resolve.ts";
+import { resolveModel, parseModelSpec } from "./providers/resolve.ts";
+import { modelSupports, modalitiesFor, suggestModelFor } from "./providers/capabilities.ts";
+import type { Route, RouteSet, Modality } from "./engine/router.ts";
 import { createTools, createReadOnlyTools, createToolSubset } from "./tools/index.ts";
 import { buildSystemPrompt, buildSubAgentPrompt, buildAgentPrompt } from "./context/systemPrompt.ts";
 import { findOutputStyle } from "./context/outputStyles.ts";
@@ -10,6 +12,7 @@ import type { SubAgentRunner } from "./tools/context.ts";
 import { TodoStore } from "./tools/todoStore.ts";
 import type { CheckpointStore } from "./memory/checkpoints.ts";
 import type { ProcessRegistry } from "./tools/processRegistry.ts";
+import { AttachmentStore } from "./util/attachmentStore.ts";
 import { HookRunner, loadHooks, wrapToolsWithHooks } from "./hooks/engine.ts";
 import { createLimiter } from "./util/limit.ts";
 
@@ -28,6 +31,9 @@ export interface SessionOptions {
   extraTools?: ToolSet;
   // Background-shell registry for bash run_in_background / bash_output / kill_shell.
   processes?: ProcessRegistry;
+  // Session attachment store, so dragged/pasted file bytes can be saved via the
+  // save_attachment tool. Created here when the caller doesn't supply one.
+  attachments?: AttachmentStore;
 }
 
 export interface Session {
@@ -37,6 +43,7 @@ export interface Session {
   modelId: string;
   cwd: string;
   todos: TodoStore;
+  attachments: AttachmentStore;
 }
 
 // Assemble a ready-to-run agent session: resolve the model, bind tools to the
@@ -45,6 +52,7 @@ export function createSession(opts: SessionOptions): Session {
   const resolved = resolveModel(opts.modelSpec, opts.config);
   const gate = opts.gate ?? autoApproveGate;
   const todos = new TodoStore();
+  const attachments = opts.attachments ?? new AttachmentStore();
   const cache = isAnthropicFamily(resolved.provider, resolved.modelId);
 
   // Bound how many sub-agents run at once when the model fans `task` calls out.
@@ -75,11 +83,10 @@ export function createSession(opts: SessionOptions): Session {
       : createReadOnlyTools({ cwd: opts.cwd, gate: autoApproveGate });
 
     const child = new QueryEngine({
-      model,
+      routes: singleRouteSet(agent?.model ?? opts.modelSpec, model, childCache),
       system,
       tools,
       maxSteps: Math.min(opts.config.maxSteps, 20),
-      cacheControl: childCache,
     });
     let out = "";
     for await (const ev of child.send(prompt)) {
@@ -99,6 +106,7 @@ export function createSession(opts: SessionOptions): Session {
         runSubAgent,
         recordMutation: opts.checkpoints ? (abs) => opts.checkpoints!.recordMutation(abs) : undefined,
         processes: opts.processes,
+        attachments,
       }),
       ...(opts.extraTools ?? {}),
     },
@@ -115,15 +123,12 @@ export function createSession(opts: SessionOptions): Session {
   });
 
   const engine = new QueryEngine({
-    model: resolved.model,
+    routes: buildRouteSet(opts.config, opts.modelSpec, resolved.model, cache),
     system,
     tools,
     maxSteps: opts.config.maxSteps,
-    cacheControl: cache,
     contextBudget: opts.config.contextBudget,
     compactRatio: opts.config.compactRatio,
-    // Extended thinking is Anthropic-only; pass the budget only for that family.
-    thinkingBudget: cache ? opts.config.thinkingBudget : undefined,
   });
 
   return {
@@ -133,6 +138,7 @@ export function createSession(opts: SessionOptions): Session {
     modelId: resolved.modelId,
     cwd: opts.cwd,
     todos,
+    attachments,
   };
 }
 
@@ -143,4 +149,96 @@ function isAnthropicFamily(provider: string, modelId: string): boolean {
   if (provider === "anthropic") return true;
   if (provider === "openrouter") return modelId.startsWith("anthropic/");
   return false;
+}
+
+// Short display name for UI notices: drop any "vendor/" prefix from the model id.
+function shortLabel(spec: string): string {
+  const modelId = spec.includes(":") ? spec.slice(spec.indexOf(":") + 1) : spec;
+  return modelId.slice(modelId.lastIndexOf("/") + 1);
+}
+
+// Resolve a "provider:model" spec into a Route, deriving its per-model cache /
+// thinking flags and supported input modalities from the model family.
+function buildRoute(spec: string, config: Config): Route {
+  const r = resolveModel(spec, config);
+  const cache = isAnthropicFamily(r.provider, r.modelId);
+  return {
+    spec,
+    model: r.model,
+    cacheControl: cache,
+    thinkingBudget: cache ? config.thinkingBudget : undefined,
+    label: shortLabel(spec),
+    supports: modalitiesFor(r.provider, r.modelId),
+  };
+}
+
+// A trivial RouteSet with only the default route (sub-agents, which run one fixed
+// model). The high `longThreshold` / zero `fastMaxChars` keep the router on default.
+function singleRouteSet(spec: string, model: LanguageModel, cacheControl: boolean): RouteSet {
+  const { provider, modelId } = parseModelSpec(spec);
+  return {
+    default: { spec, model, cacheControl, label: shortLabel(spec), supports: modalitiesFor(provider, modelId) },
+    longThreshold: Number.POSITIVE_INFINITY,
+    fastMaxChars: 0,
+  };
+}
+
+// Pairs of (config key, RouteSet key, modality) for the modality routes.
+const MODALITY_ROUTE_KEYS: { cfg: "vision" | "document" | "audio" | "video"; modality: Modality }[] = [
+  { cfg: "vision", modality: "image" },
+  { cfg: "document", modality: "document" },
+  { cfg: "audio", modality: "audio" },
+  { cfg: "video", modality: "video" },
+];
+
+// Assemble the session's RouteSet: the default route (the already-resolved session
+// model) plus any configured modality/long/fast routes, each tagged with the input
+// modalities its model accepts. Optional routes that fail to resolve are skipped
+// rather than failing the session. For each modality whose route is unset, hybrid
+// auto-detect picks a capable model when the default can't handle that modality.
+function buildRouteSet(
+  config: Config,
+  defaultSpec: string,
+  defaultModel: LanguageModel,
+  defaultCache: boolean,
+): RouteSet {
+  const router = config.router;
+  const tryRoute = (spec?: string): Route | undefined => {
+    if (!spec) return undefined;
+    try {
+      return buildRoute(spec, config);
+    } catch {
+      return undefined; // unconfigured/invalid optional route → ignored
+    }
+  };
+
+  const { provider: defProvider, modelId: defModelId } = parseModelSpec(defaultSpec);
+  const routes: RouteSet = {
+    default: {
+      spec: defaultSpec,
+      model: defaultModel,
+      cacheControl: defaultCache,
+      thinkingBudget: defaultCache ? config.thinkingBudget : undefined,
+      label: shortLabel(defaultSpec),
+      supports: modalitiesFor(defProvider, defModelId),
+    },
+    vision: tryRoute(router?.vision),
+    document: tryRoute(router?.document),
+    audio: tryRoute(router?.audio),
+    video: tryRoute(router?.video),
+    long: tryRoute(router?.long),
+    fast: tryRoute(router?.fast),
+    longThreshold: router?.longThreshold ?? Math.floor((config.contextBudget ?? 120_000) / 2),
+    fastMaxChars: router?.fastMaxChars ?? 280,
+  };
+
+  if (router?.auto ?? true) {
+    for (const { cfg, modality } of MODALITY_ROUTE_KEYS) {
+      if (routes[cfg]) continue; // explicitly configured → leave it
+      if (modelSupports(modality, defProvider, defModelId)) continue; // default handles it
+      const suggestion = suggestModelFor(modality, config);
+      if (suggestion) routes[cfg] = tryRoute(suggestion);
+    }
+  }
+  return routes;
 }

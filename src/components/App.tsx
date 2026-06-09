@@ -12,6 +12,7 @@ import { PromptInput } from "./PromptInput.tsx";
 import { PlanConfirm } from "./PlanConfirm.tsx";
 import { ModeHint } from "./ModeHint.tsx";
 import { RewindPicker } from "./RewindPicker.tsx";
+import { SessionPicker } from "./SessionPicker.tsx";
 import { CheckpointStore, type RewindScope } from "../memory/checkpoints.ts";
 import { ProcessRegistry } from "../tools/processRegistry.ts";
 import { HookRunner, loadHooks } from "../hooks/engine.ts";
@@ -19,7 +20,9 @@ import type { ToolSet } from "ai";
 import { loadMcpServers, connectMcpServers, type McpStdioClient, type McpConnection } from "../mcp/client.ts";
 import { TodoPanel } from "./TodoPanel.tsx";
 import { exec } from "../tools/exec.ts";
-import { extractImages } from "../util/images.ts";
+import { resolveAttachments, chipFor } from "../util/images.ts";
+import type { Attachment } from "../util/images.ts";
+import { AttachmentStore } from "../util/attachmentStore.ts";
 import type { Entry } from "./types.ts";
 import type { TodoStore, TodoItem } from "../tools/todoStore.ts";
 import type { Config, PermissionMode } from "../config/schema.ts";
@@ -27,11 +30,19 @@ import { createSession } from "../session.ts";
 import { QueryEngine } from "../engine/QueryEngine.ts";
 import { emptyUsage, type UsageTotals } from "../engine/events.ts";
 import { runCommand, commandList } from "../commands/registry.ts";
+import { isSlashCommand } from "./promptModel.ts";
 import { loadCustomCommands } from "../commands/custom.ts";
 import { saveGlobalConfig } from "../config/load.ts";
 import { ModeGate, type AskOutcome } from "../permissions/uiGate.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
-import { saveSession, type SessionData } from "../memory/store.ts";
+import {
+  saveSession,
+  loadSession,
+  listSessions,
+  newSessionId,
+  type SessionData,
+  type SessionMeta,
+} from "../memory/store.ts";
 import { theme } from "./theme.ts";
 import { randomVerb } from "./spinnerVerbs.ts";
 
@@ -93,6 +104,8 @@ export function App({
   const [outputStyle, setOutputStyle] = useState<string | null>(config.outputStyle ?? null);
   const [planReady, setPlanReady] = useState(false);
   const [rewinding, setRewinding] = useState(false);
+  const [sessionsPicking, setSessionsPicking] = useState(false);
+  const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [mcpTools, setMcpTools] = useState<ToolSet>({});
   const mcpRef = useRef<McpConnection | null>(null);
   const [statusText, setStatusText] = useState("");
@@ -102,18 +115,30 @@ export function App({
   const [collapsed, setCollapsed] = useState(true);
   const engineRef = useRef<QueryEngine | null>(null);
   const todosRef = useRef<TodoStore | null>(null);
+  // Stable id for the session being written this run; reused when resuming so a
+  // continued session overwrites its own file instead of forking a new one.
+  const sessionIdRef = useRef(resume?.id ?? newSessionId());
   const seededRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   // Input history (↑/↓) and the type-ahead queue for messages entered while busy.
   const historyRef = useRef<string[]>([]);
   const queueRef = useRef<string[]>([]);
   const drainingRef = useRef(false);
+  // Monotonic counter for "[Image #n]" reference chips, shared across the session.
+  const imageSeqRef = useRef(0);
+  // Attachments the prompt input resolved live (on drag-drop/paste) and already
+  // rewrote to chips in the buffer text. Each turn claims the ones whose chip
+  // survives into its submitted text, so the base64 still rides along.
+  const pendingImagesRef = useRef<Attachment[]>([]);
   // Session-lifetime checkpoint store (survives model/style switches) for /rewind,
   // plus a live mirror of the committed transcript length for checkpointing.
   const checkpointsRef = useRef<CheckpointStore>(new CheckpointStore());
   const committedRef = useRef<Entry[]>([]);
   // Background-shell registry, shared across the session for bash run_in_background.
   const processesRef = useRef<ProcessRegistry>(new ProcessRegistry());
+  // Session-lifetime store of attachment bytes (by "#n"), so the save_attachment tool
+  // can write a pasted/dropped file to disk without re-reading the volatile drop path.
+  const attachmentsRef = useRef<AttachmentStore>(new AttachmentStore());
 
   // The gate reads the live mode via a ref (so changing mode doesn't require
   // rebuilding the session/tools) and surfaces approvals through React state.
@@ -135,6 +160,7 @@ export function App({
         getMode: () => modeRef.current,
         setMode: (m) => setMode(m),
         allowlist: allowlistRef.current,
+        denylist: config.denylist,
         ask: (req) => new Promise<AskOutcome>((resolve) => setPending({ req, resolve })),
       }),
     [],
@@ -156,6 +182,7 @@ export function App({
         checkpoints: checkpointsRef.current,
         extraTools: mcpTools,
         processes: processesRef.current,
+        attachments: attachmentsRef.current,
       });
       if (prev) {
         session.engine.messages.push(...prev.messages);
@@ -217,9 +244,20 @@ export function App({
   useEffect(() => {
     if (!stdout) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let lastCols = stdout.columns;
+    let lastRows = stdout.rows;
     const onResize = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
+        // Terminals emit "resize" spuriously (focus changes, refreshes, and on
+        // some setups while a drag-selection scrolls the view) without the
+        // dimensions actually changing. The wipe below clears the screen *and*
+        // scrollback, so firing it on a non-resize destroys any active text
+        // selection out from under the user — which reads as the whole screen
+        // flashing while idle. Only repaint when the size genuinely changed.
+        if (stdout.columns === lastCols && stdout.rows === lastRows) return;
+        lastCols = stdout.columns;
+        lastRows = stdout.rows;
         stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback, home cursor
         setResizeNonce((n) => n + 1); // remount <Static> → repaint transcript
       }, 120);
@@ -281,7 +319,11 @@ export function App({
     const eng = engineRef.current;
     if (!eng) return;
     try {
-      saveSession(cwd, { modelSpec, messages: eng.messages, usage: eng.usage });
+      saveSession(cwd, sessionIdRef.current, {
+        modelSpec,
+        messages: eng.messages,
+        usage: eng.usage,
+      });
     } catch {
       /* non-fatal */
     }
@@ -310,7 +352,8 @@ export function App({
     }
     // Shift+Tab rotates the permission mode — but not while a modal overlay owns
     // input (it has its own keybindings).
-    if (key.tab && key.shift && !pending && !picking && !rewinding && !planReady) cycleMode();
+    if (key.tab && key.shift && !pending && !picking && !rewinding && !planReady && !sessionsPicking)
+      cycleMode();
   });
 
   // Drive the elapsed-seconds counter shown beside the spinner while a turn runs.
@@ -402,6 +445,17 @@ export function App({
           setRewinding(true);
         }
         break;
+      case "sessions": {
+        // Exclude the in-progress session so the picker only offers prior ones.
+        const list = listSessions(cwd).filter((s) => s.id !== sessionIdRef.current);
+        if (list.length === 0) {
+          append({ kind: "notice", text: "No other saved sessions for this project yet." });
+        } else {
+          setSessions(list);
+          setSessionsPicking(true);
+        }
+        break;
+      }
       case "export": {
         const dest = res.path ?? join(cwd, `privateer-transcript-${Date.now()}.md`);
         try {
@@ -456,6 +510,25 @@ export function App({
   }
 
   async function runTurn(text: string, opts?: { hideInput?: boolean; skipPlanConfirm?: boolean }) {
+    // Claim any attachments the input already resolved live (drag-drop/paste): their
+    // chips are in `text`, so pull their base64 out of the pending list. Filtering by
+    // surviving chip drops ones the user edited away and is queue-safe (each turn
+    // takes only its own).
+    const liveAttachments = pendingImagesRef.current.filter((a) => text.includes(chipFor(a)));
+    pendingImagesRef.current = pendingImagesRef.current.filter((a) => !liveAttachments.includes(a));
+    // Rewrite any *still-raw* file paths (typed, or @-mentioned from the file menu) to
+    // short "[Kind #n]" chips, and inline referenced text/code files, before the prompt
+    // is checkpointed, shown, or sent. Binary attachments ride alongside the chip text
+    // into the model message; inlined text is appended to what the model receives.
+    const resolved = resolveAttachments(text, cwd, imageSeqRef.current, config.router?.inlineTextMaxBytes);
+    imageSeqRef.current += resolved.attachments.length;
+    text = resolved.text;
+    const attachments = [...liveAttachments, ...resolved.attachments];
+    // Persist each attachment's bytes to the session store so the save_attachment tool
+    // can write it to disk later, by its "#n", without touching the volatile drop path.
+    for (const a of attachments) attachmentsRef.current.register(a);
+    const inlinedText = resolved.inlinedText;
+
     // Checkpoint the state before this turn so /rewind can return here.
     const eng0 = engineRef.current;
     if (eng0) {
@@ -483,13 +556,27 @@ export function App({
     let liveEntries: Entry[] = [];
     let assistantIdx = -1;
     let thinkingIdx = -1;
-    const sync = () => setLive(liveEntries);
+    // Coalesce streaming re-renders. Pushing every token delta to state repaints
+    // the entire dynamic region per token, which thrashes the CPU and makes any
+    // in-progress text selection flicker. Throttle to a trailing flush (~30fps);
+    // the finally block clears the timer and does the final commit, so nothing is
+    // lost. setLive reads the current `liveEntries` at flush time.
+    let syncTimer: ReturnType<typeof setTimeout> | undefined;
+    const sync = () => {
+      if (syncTimer) return;
+      syncTimer = setTimeout(() => {
+        syncTimer = undefined;
+        setLive(liveEntries);
+      }, 33);
+    };
     const pushLive = (e: Entry) => {
       liveEntries = [...liveEntries, e];
       sync();
     };
 
-    let sendText = text;
+    // The transcript shows `text` (chips + [file: …]); the model also receives the
+    // inlined contents of any read-as-text files.
+    let sendText = inlinedText ? `${text}\n\n${inlinedText}` : text;
     try {
       // UserPromptSubmit hooks may veto the turn or inject extra context.
       if (hooks.has("UserPromptSubmit")) {
@@ -503,15 +590,10 @@ export function App({
           return;
         }
         if (outcome.additionalContext) {
-          sendText = `${text}\n\n[Hook context]\n${outcome.additionalContext}`;
+          sendText = `${sendText}\n\n[Hook context]\n${outcome.additionalContext}`;
         }
       }
-      // Attach any image files referenced in the prompt (vision-capable models only).
-      const images = extractImages(text, cwd);
-      if (images.length > 0) {
-        pushLive({ kind: "notice", text: `Attached ${images.length} image(s).` });
-      }
-      for await (const ev of engine.send(sendText, controller.signal, images)) {
+      for await (const ev of engine.send(sendText, controller.signal, attachments)) {
         switch (ev.type) {
           case "text":
             thinkingIdx = -1;
@@ -568,8 +650,19 @@ export function App({
           case "compacted":
             pushLive({ kind: "notice", text: `Auto-compacted context (~${ev.before} → ~${ev.after} tokens).` });
             break;
+          case "routed":
+            pushLive(
+              ev.missing && ev.missing.length > 0
+                ? {
+                    kind: "notice",
+                    tone: "error",
+                    text: `No model configured for ${ev.missing.join("/")} input — ${ev.label} may not process it. Set router.${ev.missing[0] === "image" ? "vision" : ev.missing[0]}.`,
+                  }
+                : { kind: "notice", text: `↪ routed to ${ev.label}${ev.reason ? ` · ${ev.reason}` : ""}` },
+            );
+            break;
           case "error":
-            pushLive({ kind: "notice", tone: "error", text: ev.error });
+            pushLive({ kind: "notice", tone: "error", text: ev.error, hint: ev.hint });
             break;
         }
       }
@@ -577,6 +670,9 @@ export function App({
       pushLive({ kind: "notice", tone: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
       abortRef.current = null;
+      // Cancel any pending throttled flush so it can't re-emit these entries into
+      // the live region after we've moved them into the committed transcript.
+      clearTimeout(syncTimer);
       const finalEntries = liveEntries;
       setLive([]);
       setCommitted((c) => [...c, ...finalEntries]);
@@ -617,6 +713,29 @@ export function App({
     append({ kind: "notice", text: `Rewound to "${cp.label}" (${scope}).` });
   }
 
+  // Swap the live conversation for a stored one. Like startup --continue, this reseeds
+  // the engine's context (and adopts that session's id so further turns persist back to
+  // it) rather than replaying the old transcript as visible history.
+  function resumeSession(id: string) {
+    setSessionsPicking(false);
+    const data = loadSession(cwd, id);
+    const eng = engineRef.current;
+    if (!data || !eng) {
+      append({ kind: "notice", tone: "error", text: "Could not load that session." });
+      return;
+    }
+    eng.messages.length = 0;
+    eng.messages.push(...data.messages);
+    eng.usage = data.usage;
+    setUsage(data.usage);
+    setCommitted([]);
+    setLive([]);
+    todosRef.current?.set([]);
+    sessionIdRef.current = data.id;
+    persist();
+    append({ kind: "notice", text: `Resumed session (${data.messages.length} messages).` });
+  }
+
   // Entry point from the prompt input. While a turn is running, messages are
   // queued and drained in order when it finishes.
   function handleInput(value: string) {
@@ -633,7 +752,7 @@ export function App({
 
   async function dispatchInput(value: string) {
     const text = value.trim();
-    if (text.startsWith("/")) {
+    if (isSlashCommand(text)) {
       handleCommand(text);
       return;
     }
@@ -731,7 +850,11 @@ export function App({
           <EntryView key={i} entry={e} verbose={verbose} collapsed={collapsed} />
         ))}
 
-        {busy && (
+        {/* While a prompt is pending the turn is blocked on the human, so there's
+            no work to animate. Crucially, ink-spinner re-renders the whole dynamic
+            region every frame; left running it would erase+redraw the bordered
+            ApprovalPrompt below it ~10×/s, which reads as the box flickering. */}
+        {busy && !pending && (
           <Box marginTop={1} gap={1}>
             <Text color={theme.accent}>
               <Spinner type="dots" />
@@ -751,7 +874,6 @@ export function App({
           modelSpec={modelSpec}
           cwd={cwd}
           totalTokens={usage.totalTokens}
-          collapsed={collapsed}
           custom={statusText || undefined}
         />
 
@@ -778,6 +900,12 @@ export function App({
             onRestore={restoreCheckpoint}
             onCancel={() => setRewinding(false)}
           />
+        ) : sessionsPicking ? (
+          <SessionPicker
+            sessions={sessions}
+            onResume={resumeSession}
+            onCancel={() => setSessionsPicking(false)}
+          />
         ) : planReady ? (
           <PlanConfirm onApprove={approvePlan} onKeep={() => setPlanReady(false)} />
         ) : (
@@ -789,13 +917,15 @@ export function App({
               vimEnabled={vim}
               commands={commands}
               history={historyRef}
+              imageSeqRef={imageSeqRef}
+              pendingImagesRef={pendingImagesRef}
               onSubmit={handleInput}
               onClear={() => {
                 setCommitted([]);
                 setLive([]);
               }}
             />
-            <ModeHint mode={mode} />
+            <ModeHint mode={mode} collapsed={collapsed} />
           </>
         )}
       </Box>

@@ -10,6 +10,7 @@ import { COMMAND_LIST } from "../src/commands/registry.ts";
 import {
   detectMode,
   slashQuery,
+  isSlashCommand,
   mentionAt,
   filterCommands,
   filterFiles,
@@ -25,6 +26,17 @@ test("detectMode reads the leading character", () => {
   assert.equal(detectMode("/model"), "command");
   assert.equal(detectMode("hello"), "prompt");
   assert.equal(detectMode(""), "prompt");
+  // An absolute file path is a prompt (it gets attached), not a command.
+  assert.equal(detectMode("/Users/me/shot.png"), "prompt");
+});
+
+test("isSlashCommand distinguishes commands from pasted file paths", () => {
+  assert.equal(isSlashCommand("/"), true); // bare slash still opens the menu
+  assert.equal(isSlashCommand("/model"), true);
+  assert.equal(isSlashCommand("/model gpt-4"), true);
+  assert.equal(isSlashCommand("/Users/me/Desktop/shot.png"), false); // path separators
+  assert.equal(isSlashCommand("/My\\ Shot.png"), false); // has a dot/extension
+  assert.equal(isSlashCommand("hello"), false);
 });
 
 test("slashQuery returns the command fragment, null once typing args", () => {
@@ -154,6 +166,42 @@ test("Enter submits the buffer and clears it; up-arrow recalls history", async (
   unmount();
 });
 
+test("dropping an image path converts it to an [Image #n] chip live and stages the attachment", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "priv-drop-"));
+  try {
+    const abs = join(dir, "Screenshot 2026-06-08 at 5.07.42 PM.png");
+    // Full 8-byte PNG signature — a 4-byte truncation is a macOS promise stub and is
+    // now rejected at capture, so it would never chip.
+    writeFileSync(abs, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const history = { current: [] as string[] };
+    const imageSeqRef = { current: 0 };
+    const pendingImagesRef = { current: [] as any[] };
+    const { stdin, lastFrame, unmount } = render(
+      React.createElement(PromptInput, {
+        busy: false,
+        cwd: dir,
+        queued: 0,
+        commands: COMMAND_LIST,
+        history,
+        imageSeqRef,
+        pendingImagesRef,
+        onSubmit: () => {},
+      }),
+    );
+    await focusInput(stdin, lastFrame);
+    // The form a macOS terminal drag-drop produces: backslash-escaped spaces + trailing space.
+    stdin.write(abs.replace(/ /g, "\\ ") + " ");
+    assert.ok(await until(frameHas(lastFrame, /\[Image #1\]/)), "buffer should show the chip");
+    assert.doesNotMatch(lastFrame() ?? "", /Screenshot/, "raw path should be gone");
+    assert.equal(pendingImagesRef.current.length, 1, "attachment staged");
+    assert.equal(pendingImagesRef.current[0].n, 1);
+    assert.equal(imageSeqRef.current, 1, "session counter advanced");
+    unmount();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("queued placeholder shows when busy", async () => {
   const history = { current: [] as string[] };
   const { lastFrame, unmount } = render(
@@ -205,4 +253,103 @@ test("ctrl-r reverse-searches history and Enter accepts the match", async () => 
   assert.ok(await until(() => !/reverse-i-search/.test(lastFrame() ?? "")), "search closes");
   assert.match(lastFrame() ?? "", /build project/);
   unmount();
+});
+
+// --- readline navigation / editing shortcuts ---------------------------------
+
+// Control codes. Alt+<letter> is ESC followed by the letter.
+const CTRL_A = "\x01";
+const CTRL_B = "\x02";
+const CTRL_D = "\x04";
+const CTRL_F = "\x06";
+const CTRL_K = "\x0b";
+const CTRL_U = "\x15";
+const CTRL_Y = "\x19";
+const CTRL_LEFT = `${ESC}[1;5D`;
+const CTRL_RIGHT = `${ESC}[1;5C`;
+const ALT_LEFT = `${ESC}[1;3D`;
+const ALT_RIGHT = `${ESC}[1;3C`;
+
+// Drive a fresh input, type `keys`, submit, and return the value passed to
+// onSubmit. The block cursor splits the rendered frame with ANSI codes, so we
+// assert on the submitted buffer rather than scraping the frame.
+async function typeAndSubmit(keys: string[]): Promise<string | undefined> {
+  const history = { current: [] as string[] };
+  const calls: string[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    React.createElement(PromptInput, {
+      busy: false,
+      cwd: process.cwd(),
+      queued: 0,
+      commands: COMMAND_LIST,
+      history,
+      onSubmit: (v: string) => calls.push(v),
+    }),
+  );
+  try {
+    await focusInput(stdin, lastFrame);
+    for (const k of keys) stdin.write(k);
+    stdin.write("\r");
+    await until(() => calls.length > 0);
+    return calls[0];
+  } finally {
+    unmount();
+  }
+}
+
+test("Ctrl+A + Alt+F + Ctrl+K: jump to start, word-forward, kill to end", async () => {
+  // "hello world" → Ctrl+A (start) → Alt+F (end of "hello") → Ctrl+K (kill " world")
+  assert.equal(await typeAndSubmit(["hello world", CTRL_A, `${ESC}f`, CTRL_K]), "hello");
+});
+
+test("Ctrl+U kills to start and Ctrl+Y yanks it back", async () => {
+  // "world" → Ctrl+U (kill to "") → Ctrl+Y (paste "world" back)
+  assert.equal(await typeAndSubmit(["world", CTRL_U, CTRL_Y]), "world");
+});
+
+test("Ctrl+D forward-deletes the char under the cursor", async () => {
+  // "abc" → Ctrl+A (start) → Ctrl+D (delete 'a')
+  assert.equal(await typeAndSubmit(["abc", CTRL_A, CTRL_D]), "bc");
+});
+
+test("Ctrl+D is a no-op at end of buffer", async () => {
+  assert.equal(await typeAndSubmit(["abc", CTRL_D]), "abc");
+});
+
+test("Ctrl+B and Ctrl+F move by one character", async () => {
+  // "ab" → Ctrl+A (start) → Ctrl+F (between a,b) → type X → "aXb"
+  assert.equal(await typeAndSubmit(["ab", CTRL_A, CTRL_F, "X"]), "aXb");
+  // "ac" → Ctrl+B (before c) → type b → "abc"
+  assert.equal(await typeAndSubmit(["ac", CTRL_B, "b"]), "abc");
+});
+
+test("Alt+B jumps back one word", async () => {
+  // "foo bar" → Alt+B (start of "bar") → type X → "foo Xbar"
+  assert.equal(await typeAndSubmit(["foo bar", `${ESC}b`, "X"]), "foo Xbar");
+});
+
+test("Alt+D kills the next word (readline: leaves leading space)", async () => {
+  // "foo bar" → Ctrl+A (start) → Alt+D (kill "foo", leaving " bar")
+  assert.equal(await typeAndSubmit(["foo bar", CTRL_A, `${ESC}d`]), " bar");
+});
+
+const ALT_BACKSPACE = `${ESC}\x7f`;
+
+test("Alt/Option+Backspace deletes the word before the cursor", async () => {
+  // "foo bar" → Option+Delete kills "bar", leaving "foo "
+  assert.equal(await typeAndSubmit(["foo bar", ALT_BACKSPACE]), "foo ");
+  // killed word is yankable via Ctrl+Y
+  assert.equal(await typeAndSubmit(["foo bar", ALT_BACKSPACE, CTRL_Y]), "foo bar");
+});
+
+test("Ctrl+Left/Right jump by word", async () => {
+  // "foo bar" → Ctrl+Left (start of "bar") → type X
+  assert.equal(await typeAndSubmit(["foo bar", CTRL_LEFT, "X"]), "foo Xbar");
+  // "foo bar" → Ctrl+A → Ctrl+Right (end of "foo") → type X
+  assert.equal(await typeAndSubmit(["foo bar", CTRL_A, CTRL_RIGHT, "X"]), "fooX bar");
+});
+
+test("Alt+Left/Right jump by word", async () => {
+  assert.equal(await typeAndSubmit(["foo bar", ALT_LEFT, "X"]), "foo Xbar");
+  assert.equal(await typeAndSubmit(["foo bar", CTRL_A, ALT_RIGHT, "X"]), "fooX bar");
 });

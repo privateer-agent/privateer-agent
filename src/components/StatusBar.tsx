@@ -28,7 +28,6 @@ export function StatusBar(props: {
   modelSpec: string;
   cwd: string;
   totalTokens: number;
-  collapsed?: boolean; // whether reasoning is collapsed (Ctrl+O) — flips the hint label
   custom?: string; // settings-driven status line; overrides the default when set
 }) {
   // Stay clear of the right edge (parent paddingX={1} plus a 2-col safety gap) so
@@ -44,20 +43,14 @@ export function StatusBar(props: {
     );
   }
   return (
-    <Box marginTop={1} width={width} justifyContent="space-between">
-      <Box flexShrink={1} minWidth={0}>
-        <Text wrap="truncate-end">
-          <Text color={theme.accent}>⚓ privateer</Text>
-          <Text color={theme.dim}>
-            {` · ${props.modelSpec} · ${basename(props.cwd) || props.cwd} · ${formatTokens(props.totalTokens)} tk`}
-          </Text>
+    <Box marginTop={1} width={width}>
+      <Text wrap="truncate-end">
+        <Text color={theme.accent}>⚓ privateer</Text>
+        <Text color={theme.dim}> (shift+tab to cycle)</Text>
+        <Text color={theme.dim}>
+          {` · ${props.modelSpec} · ${basename(props.cwd) || props.cwd} · ${formatTokens(props.totalTokens)} tk`}
         </Text>
-      </Box>
-      <Box flexShrink={0}>
-        <Text color={theme.dim} wrap="truncate-end">
-          {`  /help · esc interrupts · ⌃o ${props.collapsed ? "expand" : "collapse"}`}
-        </Text>
-      </Box>
+      </Text>
     </Box>
   );
 }

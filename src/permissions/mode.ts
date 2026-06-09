@@ -1,5 +1,6 @@
 import type { PermissionMode } from "../config/schema.ts";
 import type { PermissionRequest } from "./gate.ts";
+import { isDangerousCommand } from "./danger.ts";
 
 export type AutoDecision = "allow" | "deny" | "ask";
 
@@ -19,9 +20,13 @@ export function decideAuto(
   req: PermissionRequest,
   mode: PermissionMode,
   allowlist: string[],
+  denylist: string[] = [],
 ): AutoDecision {
   // Read-only mode allows network reads but no mutations or shell.
   if (mode === "plan") return req.kind === "fetch" ? "ask" : "deny";
+  // Dangerous shell (destructive / secret-exfil) always confirms — this sits
+  // above bypass and the allowlist so an injected command can't run silently.
+  if (req.kind === "bash" && isDangerousCommand(req.detail, denylist)) return "ask";
   if (mode === "bypass") return "allow";
   // Guarded files always surface a prompt, even under acceptEdits or the allowlist.
   if (req.protected) return "ask";

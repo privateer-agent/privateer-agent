@@ -5,8 +5,23 @@ import { Root } from "./components/Root.tsx";
 import { NAME, VERSION, DESCRIPTION } from "./version.ts";
 import { loadConfig } from "./config/load.ts";
 import { createSession } from "./session.ts";
-import { loadLatest } from "./memory/store.ts";
+import { loadLatest, loadSession } from "./memory/store.ts";
 import { configuredProviders } from "./providers/resolve.ts";
+import { describeError } from "./engine/errors.ts";
+
+// Set while Ink owns the screen. A stray unhandled rejection while the TUI is up
+// must NOT reach stdout/stderr — Node's default printer dumps the whole error
+// object (the request body included) unredacted and scrambles the render. The
+// underlying error has already surfaced cleanly via the engine's `error` event,
+// so here we just swallow the duplicate.
+let tuiActive = false;
+
+process.on("unhandledRejection", (reason) => {
+  if (tuiActive) return;
+  const d = describeError(reason);
+  process.stderr.write(`\nError: ${d.message}${d.hint ? `\n${d.hint}` : ""}\n`);
+  process.exitCode = 1;
+});
 
 interface CliOptions {
   print?: boolean;
@@ -17,6 +32,7 @@ interface CliOptions {
   // default and becomes false when the flag is passed.
   quarter?: boolean;
   continue?: boolean;
+  resume?: string;
   onboard?: boolean;
 }
 
@@ -36,6 +52,7 @@ async function main() {
     .option("--dangerously-skip-permissions", "auto-approve all tool actions (bypass mode)")
     .option("--no-quarter", "auto-approve all tool actions, taking no prisoners (bypass mode)")
     .option("-c, --continue", "resume the most recent session in this directory")
+    .option("-r, --resume <id>", "resume a specific session by id (printed on exit)")
     .option("--onboard", "run the provider/key setup flow")
     .action(async (promptParts: string[], options: CliOptions) => {
       try {
@@ -43,7 +60,16 @@ async function main() {
         const config = loadConfig();
         if (options.dangerouslySkipPermissions || options.quarter === false)
           config.permissionMode = "bypass";
-        const resume = options.continue ? loadLatest(process.cwd()) : null;
+        // --resume <id> loads a specific session (the id printed on a prior exit);
+        // --continue loads the most recent one.
+        const resume = options.resume
+          ? loadSession(process.cwd(), options.resume)
+          : options.continue
+            ? loadLatest(process.cwd())
+            : null;
+        if (options.resume && !resume) {
+          process.stderr.write(`No session "${options.resume}" found in this directory.\n`);
+        }
         const modelSpec = options.model ?? resume?.modelSpec ?? config.defaultModel ?? DEFAULT_MODEL;
 
         if (options.print) {
@@ -57,6 +83,7 @@ async function main() {
         const startInOnboarding = Boolean(options.onboard) || (!resume && noProviderReady);
 
         // Interactive TUI.
+        tuiActive = true;
         const { waitUntilExit } = render(
           <Root
             config={config}
@@ -67,6 +94,15 @@ async function main() {
           />,
         );
         await waitUntilExit();
+        tuiActive = false;
+
+        // On exit, print a hash that resumes this conversation later (à la Claude
+        // Code). The latest persisted session carries the id used this run; it only
+        // exists once at least one turn has been saved.
+        const last = loadLatest(process.cwd());
+        if (last && last.messages.length > 0) {
+          process.stdout.write(`\nResume this session:  ${NAME} --resume ${last.id}\n`);
+        }
       } catch (err) {
         // Configuration/resolution errors are expected and user-facing — print them
         // cleanly without a stack trace.
@@ -97,8 +133,15 @@ async function runPrint(modelSpec: string, prompt: string) {
       case "tool-error":
         process.stderr.write(`\n! ${ev.name}: ${ev.error}\n`);
         break;
+      case "routed":
+        process.stderr.write(
+          ev.missing && ev.missing.length > 0
+            ? `\n⚠ no model configured for ${ev.missing.join("/")} input\n`
+            : `\n↪ ${ev.label}${ev.reason ? ` · ${ev.reason}` : ""}\n`,
+        );
+        break;
       case "error":
-        process.stderr.write(`\nError: ${ev.error}\n`);
+        process.stderr.write(`\nError: ${ev.error}${ev.hint ? `\n${ev.hint}` : ""}\n`);
         process.exitCode = 1;
         break;
       case "finish":
@@ -111,6 +154,9 @@ async function runPrint(modelSpec: string, prompt: string) {
 }
 
 main().catch((err) => {
-  console.error(err);
+  // Redact + summarize rather than dumping the raw error object, which may carry
+  // request bodies or key material in provider-error fields.
+  const d = describeError(err);
+  process.stderr.write(`Error: ${d.message}${d.hint ? `\n${d.hint}` : ""}\n`);
   process.exit(1);
 });

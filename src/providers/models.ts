@@ -2,9 +2,12 @@ import type { ProviderConfig, ProviderName } from "../config/schema.ts";
 
 // A model offered by a provider, as surfaced in the picker. `id` is the bare model
 // id (no "provider:" prefix); `label` is an optional human-friendly name.
+// `inputModalities` (when the provider reports it) lists accepted input kinds —
+// e.g. ["text", "image"] — and lets the router know a model can actually see images.
 export interface ModelInfo {
   id: string;
   label?: string;
+  inputModalities?: string[];
 }
 
 const TIMEOUT_MS = 12_000;
@@ -74,9 +77,11 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
       const json = (await getJson(
         `${base}/models`,
         cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {},
-      )) as { data?: { id: string; name?: string }[] };
+      )) as {
+        data?: { id: string; name?: string; architecture?: { input_modalities?: string[] } }[];
+      };
       return (json.data ?? [])
-        .map((m) => ({ id: m.id, label: m.name }))
+        .map((m) => ({ id: m.id, label: m.name, inputModalities: m.architecture?.input_modalities }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
     case "ollama": {

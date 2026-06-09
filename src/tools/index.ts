@@ -9,6 +9,8 @@ import { bashTool, bashOutputTool, killShellTool } from "./bash.ts";
 import { todoTool } from "./todo.ts";
 import { taskTool } from "./task.ts";
 import { webFetchTool, webSearchTool } from "./web.ts";
+import { saveAttachmentTool } from "./saveAttachment.ts";
+import { memoryTool } from "./memory.ts";
 
 export type { ToolContext } from "./context.ts";
 
@@ -27,6 +29,8 @@ export function createTools(ctx: ToolContext): ToolSet {
     task: taskTool(ctx),
     web_fetch: webFetchTool(ctx),
     web_search: webSearchTool(ctx),
+    save_attachment: saveAttachmentTool(ctx),
+    memory: memoryTool(ctx),
   };
 }
 

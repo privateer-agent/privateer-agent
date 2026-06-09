@@ -16,4 +16,6 @@ export type Entry =
   | { kind: "assistant"; text: string }
   | { kind: "thinking"; text: string }
   | ToolEntry
-  | { kind: "notice"; text: string; tone?: "info" | "error" };
+  // `hint` is an optional actionable line rendered dim beneath the notice
+  // (used by error notices to suggest a next step).
+  | { kind: "notice"; text: string; tone?: "info" | "error"; hint?: string };

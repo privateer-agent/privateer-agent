@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_DENYLIST } from "../permissions/danger.ts";
 
 // A provider's credentials/endpoint. All fields optional so config can be sparse
 // and filled in from environment variables at load time.
@@ -25,6 +26,9 @@ export const Config = z.object({
     .default({}),
   // Bash command prefixes that are auto-approved (e.g. "git status", "ls").
   allowlist: z.array(z.string()).default([]),
+  // Regex sources for commands that ALWAYS require confirmation, even under
+  // bypass or an allowlist entry (destructive/exfil shapes). Extend per-project.
+  denylist: z.array(z.string()).default(DEFAULT_DENYLIST),
   // Hard cap on agent tool-loop steps per turn.
   maxSteps: z.number().int().positive().default(50),
   // Approx token budget for the conversation context (used to trigger auto-compaction).
@@ -39,6 +43,31 @@ export const Config = z.object({
   maxSubagents: z.number().int().positive().default(4),
   // Anthropic extended-thinking budget in tokens (opt-in; Anthropic models only).
   thinkingBudget: z.number().int().positive().optional(),
+  // Per-turn model routing. The `default` route is `defaultModel` above; these are
+  // the specialized routes the router switches to based on the turn's data/shape.
+  // See src/engine/router.ts for the selection rules (vision > long > fast > default).
+  router: z
+    .object({
+      // Per-modality routes — turns whose input includes that kind go to this model.
+      vision: z.string().optional(), // image input
+      document: z.string().optional(), // PDF / document input
+      audio: z.string().optional(), // audio input
+      video: z.string().optional(), // video input
+      long: z.string().optional(), // large conversations
+      fast: z.string().optional(), // short, cheap turns
+      // Estimated-token threshold that triggers the `long` route. Defaults to half
+      // the contextBudget when unset (resolved in the session, not here).
+      longThreshold: z.number().int().positive().optional(),
+      // Prompts at or below this many characters are eligible for the `fast` route.
+      fastMaxChars: z.number().int().positive().default(280),
+      // Referenced text/code files at or below this many bytes are inlined into the
+      // prompt (read-as-text); larger ones are left as a path for the read tool.
+      inlineTextMaxBytes: z.number().int().positive().default(65_536),
+      // Hybrid auto-detect: when a modality route is unset and the default model can't
+      // handle that modality, pick a capable model automatically.
+      auto: z.boolean().default(true),
+    })
+    .optional(),
   // Shell command whose stdout becomes the status line; receives session JSON on stdin.
   statusLine: z.string().optional(),
 })

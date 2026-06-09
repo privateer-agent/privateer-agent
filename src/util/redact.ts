@@ -1,0 +1,37 @@
+// Secret redaction for anything that leaves the process as text — error
+// messages, exported transcripts, future telemetry. Provider SDKs sometimes
+// echo the request (auth header included) inside an error, so we scrub before
+// any of that reaches the UI or disk.
+
+const PLACEHOLDER = "«redacted»";
+
+// Common API-key shapes, masked even when we don't have the exact value on hand:
+// OpenAI `sk-…`, Anthropic `sk-ant-…`, OpenRouter `sk-or-v1-…`, and bare
+// "Bearer <token>" / "x-api-key: <token>" header fragments.
+const KEY_PATTERNS: RegExp[] = [
+  /\bsk-(ant|or|proj|live|test)?-?[A-Za-z0-9_-]{16,}\b/g,
+  /\b(authorization|x-api-key)\b\s*[:=]\s*(bearer\s+)?["']?[A-Za-z0-9_\-.]{16,}["']?/gi,
+];
+
+// Exact secret strings to mask, gathered from the resolved config + environment.
+// Only values of a meaningful length are included, so we never blank out e.g. a
+// one-character placeholder key.
+export function collectSecrets(providers?: Record<string, { apiKey?: string } | undefined>): string[] {
+  const out = new Set<string>();
+  const add = (v?: string) => {
+    if (v && v.trim().length >= 8) out.add(v.trim());
+  };
+  if (providers) for (const p of Object.values(providers)) add(p?.apiKey);
+  for (const k of ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]) add(process.env[k]);
+  return [...out];
+}
+
+// Mask any known secret substrings and key-shaped tokens inside free text.
+export function redactText(text: string, secrets: string[] = collectSecrets()): string {
+  let out = text;
+  for (const s of secrets) {
+    if (s) out = out.split(s).join(PLACEHOLDER);
+  }
+  for (const re of KEY_PATTERNS) out = out.replace(re, PLACEHOLDER);
+  return out;
+}

@@ -3,25 +3,31 @@
 
 export type InputMode = "bash" | "memory" | "command" | "prompt";
 
+// A leading "/" only starts a slash command when the first word looks like a
+// command name — no path separators or dots. This lets absolute file paths like
+// "/Users/me/shot.png" be typed as a normal prompt (and attached as an image)
+// instead of being mistaken for a command. A bare "/" still opens the menu.
+export function isSlashCommand(value: string): boolean {
+  if (value[0] !== "/") return false;
+  const firstWord = value.slice(1).split(/\s/, 1)[0];
+  // Command names are strictly alphanumeric (with - and _); anything else in the
+  // first word — a "/", ".", "\", etc. — means it's a path, not a command.
+  return firstWord.length === 0 || /^[A-Za-z0-9_-]+$/.test(firstWord);
+}
+
 // What the leading character of the buffer means. `!` shells out, `#` appends to
 // project memory, `/` runs a slash command, anything else is a model prompt.
 export function detectMode(value: string): InputMode {
-  switch (value[0]) {
-    case "!":
-      return "bash";
-    case "#":
-      return "memory";
-    case "/":
-      return "command";
-    default:
-      return "prompt";
-  }
+  if (value[0] === "!") return "bash";
+  if (value[0] === "#") return "memory";
+  if (isSlashCommand(value)) return "command";
+  return "prompt";
 }
 
 // The command-name fragment being typed, when the cursor sits within the first
 // word of a leading "/command". Null once the user moves on to typing arguments.
 export function slashQuery(value: string, cursor: number): string | null {
-  if (value[0] !== "/") return null;
+  if (!isSlashCommand(value)) return null;
   const firstSpace = value.indexOf(" ");
   const nameEnd = firstSpace === -1 ? value.length : firstSpace;
   if (cursor > nameEnd) return null;

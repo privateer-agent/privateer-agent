@@ -37,6 +37,8 @@ export type CommandResult =
   | { type: "export"; path?: string }
   // Open the checkpoint picker to rewind conversation and/or files.
   | { type: "rewind" }
+  // Open the session picker to browse and resume a past session.
+  | { type: "sessions" }
   // Show live MCP server/tool status (resolved by the App).
   | { type: "mcp" }
   // Re-enter the provider/key onboarding flow.
@@ -252,6 +254,16 @@ const COMMANDS: CommandDef[] = [
     name: "rewind",
     summary: "restore an earlier checkpoint (conversation and/or files)",
     run: () => ({ type: "rewind" }),
+  },
+  {
+    name: "resume",
+    summary: "browse and resume a past session",
+    run: () => ({ type: "sessions" }),
+  },
+  {
+    name: "sessions",
+    summary: "browse and resume a past session",
+    run: () => ({ type: "sessions" }),
   },
   {
     name: "mcp",

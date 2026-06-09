@@ -4,8 +4,19 @@ import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QueryEngine, estimateTokens, formatCompaction } from "../src/engine/QueryEngine.ts";
+import type { RouteSet } from "../src/engine/router.ts";
 import { createTools } from "../src/tools/index.ts";
 import { autoApproveGate } from "../src/permissions/gate.ts";
+
+// Wrap a mock model in a single-route RouteSet (what the engine now expects).
+function routesFor(model: any, over: Partial<RouteSet> = {}): RouteSet {
+  return {
+    default: { spec: "mock:mock-1", model, cacheControl: false, label: "mock-1", supports: new Set() },
+    longThreshold: Number.POSITIVE_INFINITY,
+    fastMaxChars: 0,
+    ...over,
+  };
+}
 
 // Build a ReadableStream that emits the given AI SDK v2 stream parts in order.
 function streamFrom(chunks: any[]): ReadableStream {
@@ -61,7 +72,7 @@ test("engine runs a full tool-call loop and accumulates usage", async () => {
   try {
     const tools = createTools({ cwd, gate: autoApproveGate });
     const engine = new QueryEngine({
-      model: scriptedModel("out.txt") as any,
+      routes: routesFor(scriptedModel("out.txt")),
       system: "test",
       tools,
       maxSteps: 10,
@@ -88,6 +99,84 @@ test("engine runs a full tool-call loop and accumulates usage", async () => {
   }
 });
 
+// A model that streams a single text answer reporting its own id, so a test can
+// tell which route the engine actually streamed from.
+function namingModel(modelId: string) {
+  return {
+    specificationVersion: "v2",
+    provider: "mock",
+    modelId,
+    supportedUrls: {},
+    async doStream() {
+      return {
+        stream: streamFrom([
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "t1" },
+          { type: "text-delta", id: "t1", delta: `answered-by:${modelId}` },
+          { type: "text-end", id: "t1" },
+          { type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+        ]),
+      };
+    },
+  };
+}
+
+test("an image turn routes to the vision model and emits 'routed' (sticky)", async () => {
+  const routes = routesFor(namingModel("text-default"), {
+    vision: {
+      spec: "mock:vision",
+      model: namingModel("vision-model") as any,
+      cacheControl: false,
+      label: "vision-model",
+      supports: new Set(["image"]),
+    },
+  });
+  const engine = new QueryEngine({ routes, system: "s", tools: {}, maxSteps: 3 });
+
+  let text = "";
+  let routed: { label: string; reason?: string } | null = null;
+  for await (const ev of engine.send("describe this", undefined, [
+    { data: "abcd", mediaType: "image/png", modality: "image" },
+  ])) {
+    if (ev.type === "text") text += ev.text;
+    if (ev.type === "routed") routed = { label: ev.label, reason: ev.reason };
+  }
+  assert.equal(text, "answered-by:vision-model", "streamed from the vision route");
+  assert.deepEqual(routed, { label: "vision-model", reason: "image input" });
+
+  // Sticky: a follow-up text turn still routes to vision because the image remains in history.
+  let text2 = "";
+  for await (const ev of engine.send("and now?")) if (ev.type === "text") text2 += ev.text;
+  assert.equal(text2, "answered-by:vision-model", "stays on vision while image is in history");
+});
+
+test("a PDF turn streams a file part and routes to a document model", async () => {
+  const routes = routesFor(namingModel("text-default"), {
+    document: {
+      spec: "mock:doc",
+      model: namingModel("doc-model") as any,
+      cacheControl: false,
+      label: "doc-model",
+      supports: new Set(["document"]),
+    },
+  });
+  const engine = new QueryEngine({ routes, system: "s", tools: {}, maxSteps: 3 });
+
+  let text = "";
+  let reason: string | undefined;
+  for await (const ev of engine.send("summarize", undefined, [
+    { data: "JVBERi0=", mediaType: "application/pdf", modality: "document" },
+  ])) {
+    if (ev.type === "text") text += ev.text;
+    if (ev.type === "routed") reason = ev.reason;
+  }
+  assert.equal(text, "answered-by:doc-model", "streamed from the document route");
+  assert.equal(reason, "document input");
+  // The pushed message carries a file part (not an image part).
+  const parts = engine.messages[0].content as any[];
+  assert.ok(parts.some((p) => p.type === "file" && p.mediaType === "application/pdf"));
+});
+
 // A model that answers a one-shot generate() (used by compaction's summarizer).
 function summarizerModel() {
   return {
@@ -107,7 +196,7 @@ function summarizerModel() {
 }
 
 test("compact replaces old history with a summary, keeping recent messages verbatim", async () => {
-  const engine = new QueryEngine({ model: summarizerModel() as any, system: "s", tools: {}, maxSteps: 5 });
+  const engine = new QueryEngine({ routes: routesFor(summarizerModel()), system: "s", tools: {}, maxSteps: 5 });
   for (let i = 0; i < 12; i++) {
     engine.messages.push({ role: i % 2 === 0 ? "user" : "assistant", content: `message ${i} ` + "x".repeat(60) });
   }
@@ -148,7 +237,7 @@ test("a pre-aborted turn ends cleanly and persists partial history", async () =>
   const cwd = mkdtempSync(join(tmpdir(), "privateer-abort-"));
   try {
     const tools = createTools({ cwd, gate: autoApproveGate });
-    const engine = new QueryEngine({ model: scriptedModel("z.txt") as any, system: "s", tools, maxSteps: 10 });
+    const engine = new QueryEngine({ routes: routesFor(scriptedModel("z.txt")), system: "s", tools, maxSteps: 10 });
     const ac = new AbortController();
     ac.abort();
 

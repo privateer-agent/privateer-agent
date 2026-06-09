@@ -1,0 +1,8 @@
+#!/bin/sh
+# Ensure every commit is attributed to the agent as a co-author, even when the
+# model forgets to append the trailer itself. Idempotent: skips if already present.
+COMMIT_MSG_FILE="$1"
+
+grep -qi '^Co-Authored-By: privateer-agent' "$COMMIT_MSG_FILE" && exit 0
+
+printf '\nCo-Authored-By: privateer-agent <support@privateer.pro>\n' >> "$COMMIT_MSG_FILE"

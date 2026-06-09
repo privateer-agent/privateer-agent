@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { Config, type Config as ConfigT, type ProviderName } from "./schema.ts";
 import { globalPaths, projectPaths, managedSettingsPath } from "./paths.ts";
 
@@ -91,9 +91,24 @@ export function loadConfig(): ConfigT {
   return applyEnv(cfg);
 }
 
-// Persist the global config (used by /model, /provider, /permissions to remember choices).
+// Persist the global config (used by /model, /provider, /permissions to remember
+// choices). The file holds provider API keys, so it is written owner-only (0600)
+// inside an owner-only directory (0700). `chmod` is best-effort: it's a no-op on
+// filesystems/platforms (e.g. Windows) that don't honour POSIX modes.
 export function saveGlobalConfig(cfg: ConfigT): void {
   const g = globalPaths();
   mkdirSync(g.dir, { recursive: true });
-  writeFileSync(g.config, JSON.stringify(cfg, null, 2) + "\n", "utf8");
+  tryChmod(g.dir, 0o700);
+  // `mode` on writeFileSync only applies when creating the file, so chmod after
+  // to also tighten a pre-existing, looser config.
+  writeFileSync(g.config, JSON.stringify(cfg, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  tryChmod(g.config, 0o600);
+}
+
+function tryChmod(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode);
+  } catch {
+    /* non-POSIX filesystem or insufficient perms — nothing we can do */
+  }
 }

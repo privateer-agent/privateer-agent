@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, configLayers } from "../src/config/load.ts";
+import { loadConfig, configLayers, saveGlobalConfig } from "../src/config/load.ts";
+import { Config } from "../src/config/schema.ts";
 
 // Run `fn` with an isolated global dir (PRIVATEER_HOME) and a temp project cwd,
 // restoring both afterward. Provider env vars are cleared so applyEnv() doesn't
@@ -82,6 +83,16 @@ test("unknown settings keys are preserved (catchall) for forward-compat", () => 
   });
 });
 
+test("saveGlobalConfig writes the credential file owner-only (0600)", { skip: process.platform === "win32" }, () => {
+  withScopes((g) => {
+    saveGlobalConfig(Config.parse({ providers: { anthropic: { apiKey: "secret-key-value" } } }));
+    const fileMode = statSync(join(g, "config.json")).mode & 0o777;
+    const dirMode = statSync(g).mode & 0o777;
+    assert.equal(fileMode, 0o600, "config.json must not be group/world readable");
+    assert.equal(dirMode, 0o700, "global dir must be owner-only");
+  });
+});
+
 test("configLayers reports presence per layer", () => {
   withScopes((g, p) => {
     writeJson(join(g, "config.json"), { maxSteps: 7 });
@@ -97,4 +108,28 @@ test("configLayers reports presence per layer", () => {
         layers.findIndex((l) => l.label === "project settings (local)"),
     );
   });
+});
+
+test("router block parses with defaults; absent by default", () => {
+  // No router configured → undefined (router is opt-in).
+  assert.equal(Config.parse({}).router, undefined);
+
+  const cfg = Config.parse({
+    router: {
+      vision: "openrouter:google/gemini-2.5-flash",
+      document: "anthropic:claude-opus-4-8",
+      audio: "openrouter:google/gemini-2.5-flash",
+      video: "openrouter:google/gemini-2.5-flash",
+      long: "anthropic:claude-opus-4-8",
+    },
+  });
+  assert.equal(cfg.router?.vision, "openrouter:google/gemini-2.5-flash");
+  assert.equal(cfg.router?.document, "anthropic:claude-opus-4-8");
+  assert.equal(cfg.router?.audio, "openrouter:google/gemini-2.5-flash");
+  assert.equal(cfg.router?.video, "openrouter:google/gemini-2.5-flash");
+  // Defaults filled in for the knobs the user didn't set.
+  assert.equal(cfg.router?.fastMaxChars, 280);
+  assert.equal(cfg.router?.inlineTextMaxBytes, 65_536);
+  assert.equal(cfg.router?.auto, true);
+  assert.equal(cfg.router?.fast, undefined);
 });

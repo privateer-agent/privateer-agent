@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gitStatus, dirSnapshot } from "./projectInfo.ts";
+import { loadMemoryContext } from "../memory/auto.ts";
 
 // The system prompt is assembled from modular sections: static segments first,
 // then a dynamic environment block. Static sections (identity, tone, tool
@@ -37,12 +38,27 @@ in_progress and mark items completed as you finish them. This keeps the user ori
 - For broad, open-ended search or investigation, delegate to a 'task' sub-agent so the details \
 stay out of the main conversation; it returns just a summary.
 - Use 'bash' for builds, tests, git, and other CLI work. Avoid long-running or interactive commands.
+- Scope a commit to how the user asked. An unqualified "commit" / "commit and push" means the \
+whole working tree (stage all changes) — not just files you touched this turn. A scoped request \
+("commit the README", "commit the screenshot") means stage only what that names. When an \
+unqualified commit would sweep in a lot of unrelated changes, say what you're including in one line \
+before doing it.
 - When you create a git commit, end the message with a blank line followed by this trailer so the \
 work is attributed to Privateer as a co-author:
   Co-Authored-By: Privateer <291203302+privateer-first-mate@users.noreply.github.com>
 - Use 'web_fetch' to read a known URL when the user provides one or you need current docs.
 - Mutating actions (write/edit/bash) may require user approval; that's expected — proceed and let \
 the gate handle it.`;
+
+const MEMORY = `Memory:
+- You have a persistent memory across sessions. When an index of saved memories is \
+present below, treat each line as something you already know; read the named .md file \
+with 'read' when an entry looks relevant to the current task.
+- Use the 'memory' tool to record durable facts worth remembering long-term: stable user \
+preferences, project conventions, and feedback on how to work — not transient details \
+about the current task. Prefer updating an existing memory (reuse its name) over \
+creating a near-duplicate. Default to project scope; use global only for facts that hold \
+across every project.`;
 
 const RECAP = `Recaps:
 - End every response with a single final line that begins with "recap: " — one plain-language \
@@ -99,7 +115,7 @@ export function buildAgentPrompt(
 export function buildSystemPrompt(opts: SystemPromptOptions): string {
   // An active output style replaces the default tone/persona section.
   const persona = opts.outputStyleBody?.trim() || TONE;
-  const parts: string[] = [IDENTITY, persona, SECURITY, TOOL_POLICY, RECAP];
+  const parts: string[] = [IDENTITY, persona, SECURITY, TOOL_POLICY, MEMORY, RECAP];
   if (opts.planMode) parts.push(PLAN_MODE);
 
   // --- Dynamic environment section ---
@@ -133,6 +149,12 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
   const ctxFile = join(opts.cwd, "PRIVATEER.md");
   if (existsSync(ctxFile)) {
     parts.push(`Project context from PRIVATEER.md:\n${readFileSync(ctxFile, "utf8").trim()}`);
+  }
+
+  // Recalled memory index, our auto-memory analog. Read a listed .md for full detail.
+  const memory = loadMemoryContext(opts.cwd);
+  if (memory) {
+    parts.push(`Persistent memory (index — read a file for detail):\n${memory}`);
   }
 
   return parts.join("\n\n");
