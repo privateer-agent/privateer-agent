@@ -35,6 +35,31 @@ test("App renders banner, status bar, and prompt", async () => {
   }
 });
 
+// Ctrl+O is the unified detail toggle: it flips both reasoning collapse and
+// verbose tool output. We can't easily drive a turn here, but the footer hint
+// reflects the state, so a label flip proves the keybinding fires and toggles.
+test("Ctrl+O toggles the transcript detail level", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "privateer-ctrlo-"));
+  try {
+    const config = Config.parse({ providers: { anthropic: { apiKey: "x" } } });
+    const { lastFrame, stdin, unmount } = render(
+      React.createElement(App, { model: "anthropic:claude-opus-4-8", config, cwd }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    // Default resting state is collapsed → footer offers to expand.
+    assert.match(lastFrame() ?? "", /Ctrl\+O expand/);
+    stdin.write("\x0f"); // Ctrl+O
+    await new Promise((r) => setTimeout(r, 50));
+    assert.match(lastFrame() ?? "", /Ctrl\+O collapse/);
+    stdin.write("\x0f"); // Ctrl+O again → back to collapsed
+    await new Promise((r) => setTimeout(r, 50));
+    assert.match(lastFrame() ?? "", /Ctrl\+O expand/);
+    unmount();
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("EntryView renders a thinking block", () => {
   const { lastFrame, unmount } = render(
     React.createElement(EntryView, { entry: { kind: "thinking", text: "weighing two approaches" } }),

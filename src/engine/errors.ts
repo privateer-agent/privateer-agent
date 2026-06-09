@@ -86,8 +86,11 @@ export function describeError(err: unknown): DescribedError {
   });
 
   // OpenRouter: the account's data-policy / guardrail settings exclude every
-  // provider that could serve this model.
-  if (status === 404 && /no endpoints? available|data policy|guardrail/i.test(text)) {
+  // provider that could serve this model. The phrasing is distinctive, so match on
+  // it regardless of status — OpenRouter returns this as a 404 *or* a 403, and the
+  // 403 must not fall through to the generic "authentication failed" branch below.
+  // This is a "you must act" error: never retried (no `retryable` flag).
+  if (/data[- ]?policy|guardrail|no endpoints?\b/i.test(text)) {
     return out({
       message: `No provider endpoint matches your data-policy settings${forModel}.`,
       hint: "Enable providers at https://openrouter.ai/settings/privacy, or pick a different model with /model.",

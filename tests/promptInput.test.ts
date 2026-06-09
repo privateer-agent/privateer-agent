@@ -192,7 +192,10 @@ test("dropping an image path converts it to an [Image #n] chip live and stages t
     // The form a macOS terminal drag-drop produces: backslash-escaped spaces + trailing space.
     stdin.write(abs.replace(/ /g, "\\ ") + " ");
     assert.ok(await until(frameHas(lastFrame, /\[Image #1\]/)), "buffer should show the chip");
-    assert.doesNotMatch(lastFrame() ?? "", /Screenshot/, "raw path should be gone");
+    // The raw dropped path (temp dir + escaped spaces) must be gone from the buffer; the
+    // basename alone is allowed to reappear in the staged-attachment provenance line below.
+    const dirRe = new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    assert.doesNotMatch(lastFrame() ?? "", dirRe, "raw dropped path should be gone");
     assert.equal(pendingImagesRef.current.length, 1, "attachment staged");
     assert.equal(pendingImagesRef.current[0].n, 1);
     assert.equal(imageSeqRef.current, 1, "session counter advanced");

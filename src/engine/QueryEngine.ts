@@ -10,7 +10,7 @@ import { z } from "zod";
 import { type EngineEvent, type UsageTotals, emptyUsage, addUsage } from "./events.ts";
 import { type RouteSet, selectRoute, requiredModalities } from "./router.ts";
 import { redactText } from "../util/redact.ts";
-import { describeError } from "./errors.ts";
+import { describeError, type DescribedError } from "./errors.ts";
 
 // Structured shape for compaction so the summary preserves the parts that matter for
 // continuing the work, rather than a free-form blob.
@@ -48,6 +48,11 @@ export interface QueryEngineOptions {
 
 // Number of most-recent messages kept verbatim when compacting.
 const KEEP_RECENT = 6;
+
+// How many times to auto-retry a turn that failed transiently (rate limit, 5xx,
+// network) before any output streamed. Fatal errors (auth/billing/data-policy/bad
+// model) are never retried — describeError leaves their `retryable` flag unset.
+const MAX_RETRIES = 3;
 
 // The agent loop. Each `send` streams one user turn through the model, letting the
 // AI SDK run the multi-step tool loop internally (executing our tools' execute()),

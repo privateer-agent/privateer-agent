@@ -109,9 +109,13 @@ export function App({
   const [mcpTools, setMcpTools] = useState<ToolSet>({});
   const mcpRef = useRef<McpConnection | null>(null);
   const [statusText, setStatusText] = useState("");
+  // Verbose expands tool output to its full text (truncated to a few lines
+  // otherwise). Driven both by `/verbose` and, in tandem with `collapsed`, by
+  // the Ctrl+O detail toggle below.
   const [verbose, setVerbose] = useState(false);
-  // Collapsed view (Ctrl+O) compacts the model's reasoning blocks to a single
-  // line each, so the transcript isn't dominated by thinking. On by default.
+  // Collapsed view compacts the model's reasoning blocks to a single line each,
+  // so the transcript isn't dominated by thinking. Collapsed (and tool output
+  // truncated) is the default resting state; Ctrl+O flips both at once.
   const [collapsed, setCollapsed] = useState(true);
   const engineRef = useRef<QueryEngine | null>(null);
   const todosRef = useRef<TodoStore | null>(null);
@@ -343,10 +347,15 @@ export function App({
     if (key.ctrl && input === "c") exit();
     // Esc interrupts an in-flight turn (the run loop persists partial output).
     if (key.escape && busy && abortRef.current) abortRef.current.abort();
-    // Ctrl+O toggles the collapsed (compact reasoning) view. The committed
+    // Ctrl+O toggles detail level for the whole transcript: it expands/collapses
+    // both the model's reasoning blocks and full tool output together. (Reasoning
+    // only exists when extended thinking is enabled, so without also flipping tool
+    // output the key would appear to do nothing on a typical session.) The committed
     // transcript lives in <Static>, so force a full repaint to re-render it.
     if (key.ctrl && input === "o") {
-      setCollapsed((c) => !c);
+      const expanding = collapsed; // currently collapsed → this press expands
+      setCollapsed(!expanding);
+      setVerbose(expanding);
       stdout?.write("\x1b[2J\x1b[3J\x1b[H");
       setResizeNonce((n) => n + 1);
     }

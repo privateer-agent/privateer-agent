@@ -24,6 +24,10 @@ export type EngineEvent =
   // the chosen model can't accept (set when no configured model fully covers the turn).
   | { type: "routed"; route: RouteName; label: string; reason?: string; missing?: Modality[] }
   | { type: "finish"; usage: UsageTotals; finishReason: string }
+  // A transient failure (rate limit, 5xx, network) is being retried automatically
+  // before any output streamed. `attempt`/`max` are 1-based for display; `reason` is
+  // the redacted error message that triggered the retry.
+  | { type: "retrying"; attempt: number; max: number; delayMs: number; reason: string }
   // `error` is the short user-facing message; `hint` is an optional actionable
   // next step rendered dim beneath it. Both are already secret-redacted.
   | { type: "error"; error: string; hint?: string; retryable?: boolean };
