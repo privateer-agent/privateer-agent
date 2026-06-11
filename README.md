@@ -45,7 +45,8 @@ every provider — no model lock-in, no separate code paths.
   and **output styles** as markdown files
 - **Plan mode** (read-only → present a plan → approve), **checkpoint/rewind** of
   conversation and files
-- Extensible: **MCP servers**, lifecycle **hooks**, and **custom sub-agents**
+- Extensible: **MCP servers** (local stdio + remote HTTP/SSE, with interactive OAuth),
+  lifecycle **hooks**, and **custom sub-agents**
 - Background shells, bounded parallel sub-agents, thinking display, structured compaction,
   and image attachment for vision-capable models
 
@@ -230,7 +231,7 @@ Built-ins (plus any custom commands you add):
 | `/model [spec]` `/provider` `/login` | choose a model, list providers, re-run onboarding |
 | `/permissions [mode]` `/cost` `/context` | permission mode, token usage, context window |
 | `/init` `/memory` | write/show `PRIVATEER.md` |
-| `/agents` `/mcp` `/hooks` | inspect custom sub-agents, MCP servers, hooks |
+| `/agents` `/mcp [logout]` `/hooks` | inspect sub-agents; MCP status / clear OAuth; hooks |
 | `/output-style [name]` `/vim` `/verbose` | persona, modal editing, full tool output |
 | `/rewind` `/compact` `/clear` `/export` | restore a checkpoint, compact, clear, save transcript |
 | `/exit` | quit |
@@ -268,9 +269,25 @@ Everything below is optional and lives under `.privateer/` (project) or `~/.priv
 - **Hooks** — a `hooks` section in `settings.json` runs shell commands on `PreToolUse`,
   `PostToolUse`, `UserPromptSubmit`, and `Stop`. A hook blocks by exiting `2` or printing
   `{"decision":"block"}`; `UserPromptSubmit` can inject `additionalContext`. `/hooks` lists them.
-- **MCP servers** — declare them in `.privateer/mcp.json` (`{ "mcpServers": { … } }`,
-  stdio transport). Their tools are namespaced `server__tool` and gated like the rest;
-  `/mcp` shows connection status.
+- **MCP servers** — declare them in `.privateer/mcp.json` (`{ "mcpServers": { … } }`).
+  Both **local stdio** servers (`{ "command", "args", "env" }`) and **remote HTTP** servers
+  (`{ "url", "headers?", "transport?" }`) are supported; remote defaults to Streamable HTTP
+  with a fallback to legacy SSE. Their tools are namespaced `server__tool` and gated like the
+  rest. Remote servers authenticate by a static `headers` bearer token, or — when none is set —
+  via **interactive OAuth** (PKCE + dynamic client registration): on a `401` Privateer opens your
+  browser, catches the redirect on a loopback port, and caches the tokens (owner-only) under
+  `~/.privateer/mcp-auth/`. `/mcp` shows each server's connection and auth state;
+  `/mcp logout [server]` clears saved OAuth.
+
+  ```json
+  {
+    "mcpServers": {
+      "fs":     { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+      "github": { "url": "https://api.githubcopilot.com/mcp/" },
+      "internal": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer $TOKEN" } }
+    }
+  }
+  ```
 - **Status line** — set `statusLine` to a shell command; it receives session JSON on stdin
   and its stdout becomes the status line.
 
@@ -308,8 +325,9 @@ deliberately simplified for now:
   `anthropic/*`. Other providers ignore them (a harmless no-op).
 - **Checkpoints are in-memory.** `/rewind` is a within-session undo; snapshots live in memory
   and aren't persisted across restarts.
-- **MCP is stdio-only.** Servers are launched as local processes; HTTP/SSE transport isn't
-  wired up yet.
+- **Remote MCP OAuth uses a fixed loopback port** (`7777` by default; override with
+  `PRIVATEER_OAUTH_PORT`) so the redirect URI stays stable across runs. Set `PRIVATEER_NO_BROWSER=1`
+  in headless environments to skip the auto-launch and use the printed URL.
 - **Image attachment assumes vision support.** Referenced images are sent as content parts;
   non-vision models will return an error.
 - **Compaction estimates context size** (~4 chars/token). The summary itself is

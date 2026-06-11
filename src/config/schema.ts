@@ -6,6 +6,11 @@ import { DEFAULT_DENYLIST } from "../permissions/danger.ts";
 export const ProviderConfig = z.object({
   apiKey: z.string().optional(),
   baseURL: z.string().optional(),
+  // OpenRouter only: when true, every request is pinned to a Zero-Data-Retention
+  // endpoint (provider.zdr) so prompts can't be retained. Models without a ZDR
+  // endpoint then become unusable (and render red in the picker). Ignored by
+  // other providers.
+  enforceZdr: z.boolean().optional(),
 });
 export type ProviderConfig = z.infer<typeof ProviderConfig>;
 

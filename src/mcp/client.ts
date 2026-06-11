@@ -1,15 +1,23 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { tool, jsonSchema, type ToolSet } from "ai";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { globalPaths, projectPaths } from "../config/paths.ts";
 import { type PermissionGate, PermissionDeniedError } from "../permissions/gate.ts";
+import { FileOAuthProvider, type AuthorizePrompt } from "./oauth.ts";
 
-export interface McpServerConfig {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-}
+// A local stdio server (launched as a child process) or a remote HTTP server.
+export type StdioServerConfig = { command: string; args?: string[]; env?: Record<string, string> };
+export type HttpServerConfig = { url: string; headers?: Record<string, string>; transport?: "http" | "sse" };
+export type McpServerConfig = StdioServerConfig | HttpServerConfig;
 export type McpServers = Record<string, McpServerConfig>;
+
+function isStdio(cfg: McpServerConfig): cfg is StdioServerConfig {
+  return typeof (cfg as StdioServerConfig).command === "string";
+}
 
 export interface McpToolDef {
   name: string;
@@ -18,7 +26,8 @@ export interface McpToolDef {
 }
 
 // Read mcp.json from project then user scope (project overrides). Accepts either a
-// top-level map or a { "mcpServers": {...} } wrapper.
+// top-level map or a { "mcpServers": {...} } wrapper. An entry is kept if it names a
+// stdio `command` or a remote `url`; anything else is dropped.
 export function loadMcpServers(cwd: string = process.cwd()): McpServers {
   const merge = (path: string, into: McpServers) => {
     if (!existsSync(path)) return;
@@ -27,8 +36,11 @@ export function loadMcpServers(cwd: string = process.cwd()): McpServers {
       const map = (raw && typeof raw === "object" && raw.mcpServers) || raw;
       if (map && typeof map === "object") {
         for (const [name, cfg] of Object.entries(map as Record<string, unknown>)) {
-          if (cfg && typeof cfg === "object" && typeof (cfg as any).command === "string") {
-            into[name] = cfg as McpServerConfig;
+          if (cfg && typeof cfg === "object") {
+            const c = cfg as Partial<StdioServerConfig & HttpServerConfig>;
+            if (typeof c.command === "string" || typeof c.url === "string") {
+              into[name] = cfg as McpServerConfig;
+            }
           }
         }
       }
@@ -42,105 +54,111 @@ export function loadMcpServers(cwd: string = process.cwd()): McpServers {
   return servers;
 }
 
-const PROTOCOL_VERSION = "2024-11-05";
+// process.env as a clean string map, so stdio servers inherit our environment
+// (StdioClientTransport otherwise launches with a minimal default env).
+function inheritedEnv(extra?: Record<string, string>): Record<string, string> {
+  const base: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) base[k] = v;
+  return { ...base, ...extra };
+}
 
-// A minimal JSON-RPC 2.0 client over an MCP server's stdio (newline-delimited JSON).
-// Implements just what an agent needs: initialize, tools/list, tools/call.
-export class McpStdioClient {
-  private child?: ChildProcessWithoutNullStreams;
-  private nextId = 1;
-  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-  private buffer = "";
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+    p.then((v) => (clearTimeout(timer), resolve(v)), (e) => (clearTimeout(timer), reject(e)));
+  });
+}
+
+// An MCP client over the official SDK, transport chosen from config: a local child
+// process (stdio) or a remote server (Streamable HTTP, falling back to legacy SSE).
+// Exposes only what the agent needs: connect, tools/list, tools/call, close.
+export class McpClient {
+  private client?: Client;
 
   constructor(
     private readonly name: string,
     private readonly cfg: McpServerConfig,
     private readonly cwd: string,
+    private readonly onAuthorize?: AuthorizePrompt,
   ) {}
 
   async connect(timeoutMs = 10_000): Promise<void> {
-    this.child = spawn(this.cfg.command, this.cfg.args ?? [], {
-      cwd: this.cwd,
-      env: { ...process.env, ...this.cfg.env },
-      stdio: ["pipe", "pipe", "pipe"],
-    }) as ChildProcessWithoutNullStreams;
-    this.child.stdout.setEncoding("utf8");
-    this.child.stdout.on("data", (d: string) => this.onData(d));
-    this.child.on("error", (err) => this.failAll(err));
-    this.child.on("exit", () => this.failAll(new Error(`MCP server "${this.name}" exited`)));
+    const client = new Client({ name: "privateer", version: "0.1.0" }, { capabilities: {} });
+    if (isStdio(this.cfg)) {
+      const transport = new StdioClientTransport({
+        command: this.cfg.command,
+        args: this.cfg.args ?? [],
+        env: inheritedEnv(this.cfg.env),
+        cwd: this.cwd,
+        stderr: "ignore", // keep server logs out of the TUI
+      });
+      await withTimeout(client.connect(transport), timeoutMs, `MCP server "${this.name}" connect`);
+      this.client = client;
+      return;
+    }
 
-    await this.request("initialize", {
-      protocolVersion: PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: "privateer", version: "0.1.0" },
-    }, timeoutMs);
-    this.notify("notifications/initialized");
+    const url = new URL(this.cfg.url);
+    const requestInit = this.cfg.headers ? { headers: this.cfg.headers } : undefined;
+    // Static header auth wins. Otherwise attach an interactive OAuth provider — it
+    // stays dormant unless the server actually answers 401.
+    const authProvider = this.cfg.headers
+      ? undefined
+      : new FileOAuthProvider(this.name, this.cfg.url, this.onAuthorize);
+    const sse = () => new SSEClientTransport(url, { requestInit, authProvider });
+
+    if (this.cfg.transport === "sse") {
+      await this.tryConnect(client, sse, authProvider, timeoutMs);
+    } else {
+      const http = () => new StreamableHTTPClientTransport(url, { requestInit, authProvider });
+      try {
+        await this.tryConnect(client, http, authProvider, timeoutMs);
+      } catch (err) {
+        // A server that only speaks the legacy HTTP+SSE transport rejects the
+        // Streamable-HTTP handshake; retry once over SSE before giving up.
+        if (this.cfg.transport !== "http") await this.tryConnect(client, sse, authProvider, timeoutMs);
+        else throw err;
+      }
+    }
+    this.client = client;
+  }
+
+  // Connect with one transport kind. On a 401 with an OAuth provider configured,
+  // run the interactive consent dance (browser → loopback redirect → code →
+  // token exchange) and reconnect with a fresh transport that picks up the tokens.
+  private async tryConnect(
+    client: Client,
+    make: () => StreamableHTTPClientTransport | SSEClientTransport,
+    provider: FileOAuthProvider | undefined,
+    timeoutMs: number,
+  ): Promise<void> {
+    const transport = make();
+    try {
+      await withTimeout(client.connect(transport), timeoutMs, `MCP server "${this.name}" connect`);
+    } catch (err) {
+      if (err instanceof UnauthorizedError && provider) {
+        const code = await provider.waitForCode();
+        await transport.finishAuth(code);
+        await withTimeout(client.connect(make()), timeoutMs, `MCP server "${this.name}" reconnect`);
+      } else {
+        throw err;
+      }
+    }
   }
 
   async listTools(): Promise<McpToolDef[]> {
-    const res = await this.request("tools/list", {});
-    return Array.isArray(res?.tools) ? res.tools : [];
+    const res = await this.client!.listTools();
+    return Array.isArray(res?.tools)
+      ? res.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema as Record<string, unknown> }))
+      : [];
   }
 
   async callTool(name: string, args: unknown): Promise<string> {
-    const res = await this.request("tools/call", { name, arguments: args ?? {} });
+    const res = await this.client!.callTool({ name, arguments: (args ?? {}) as Record<string, unknown> });
     return formatContent(res);
   }
 
   close(): void {
-    this.failAll(new Error("client closed"));
-    this.child?.kill();
-  }
-
-  private write(msg: unknown): void {
-    this.child?.stdin.write(JSON.stringify(msg) + "\n");
-  }
-
-  private notify(method: string, params?: unknown): void {
-    this.write({ jsonrpc: "2.0", method, params: params ?? {} });
-  }
-
-  private request(method: string, params: unknown, timeoutMs = 15_000): Promise<any> {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`MCP ${method} timed out`));
-      }, timeoutMs);
-      this.pending.set(id, {
-        resolve: (v) => (clearTimeout(timer), resolve(v)),
-        reject: (e) => (clearTimeout(timer), reject(e)),
-      });
-      this.write({ jsonrpc: "2.0", id, method, params });
-    });
-  }
-
-  private onData(chunk: string): void {
-    this.buffer += chunk;
-    let nl: number;
-    while ((nl = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.buffer.slice(0, nl).trim();
-      this.buffer = this.buffer.slice(nl + 1);
-      if (!line) continue;
-      let msg: any;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        continue; // ignore non-JSON (server logging on stdout)
-      }
-      if (typeof msg.id === "number" && this.pending.has(msg.id)) {
-        const p = this.pending.get(msg.id)!;
-        this.pending.delete(msg.id);
-        if (msg.error) p.reject(new Error(msg.error?.message ?? "MCP error"));
-        else p.resolve(msg.result);
-      }
-      // notifications / server requests are ignored
-    }
-  }
-
-  private failAll(err: Error): void {
-    for (const p of this.pending.values()) p.reject(err);
-    this.pending.clear();
+    void this.client?.close();
   }
 }
 
@@ -159,7 +177,7 @@ function formatContent(result: any): string {
 // routed through the permission gate (MCP calls are external, so they prompt by default).
 export function adaptMcpTools(
   server: string,
-  client: McpStdioClient,
+  client: McpClient,
   defs: McpToolDef[],
   gate: PermissionGate,
 ): ToolSet {
@@ -186,7 +204,7 @@ export function adaptMcpTools(
 
 export interface McpConnection {
   tools: ToolSet;
-  clients: McpStdioClient[];
+  clients: McpClient[];
   status: { server: string; tools: number; error?: string }[];
 }
 
@@ -196,12 +214,13 @@ export async function connectMcpServers(
   servers: McpServers,
   cwd: string,
   gate: PermissionGate,
+  onAuthorize?: AuthorizePrompt,
 ): Promise<McpConnection> {
   const tools: ToolSet = {};
-  const clients: McpStdioClient[] = [];
+  const clients: McpClient[] = [];
   const status: McpConnection["status"] = [];
   for (const [name, cfg] of Object.entries(servers)) {
-    const client = new McpStdioClient(name, cfg, cwd);
+    const client = new McpClient(name, cfg, cwd, onAuthorize);
     try {
       await client.connect();
       const defs = await client.listTools();

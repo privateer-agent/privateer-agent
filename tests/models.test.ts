@@ -1,6 +1,11 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { listModels } from "../src/providers/models.ts";
+import {
+  listModels,
+  fetchZdrAccount,
+  zdrPosture,
+  type ZdrAccountData,
+} from "../src/providers/models.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -74,4 +79,87 @@ test("a non-OK response throws with the status", async () => {
 
 test("anthropic listing requires a key", async () => {
   await assert.rejects(() => listModels("anthropic", {}), /no API key/);
+});
+
+// ── ZDR posture ──────────────────────────────────────────────────────────────
+
+// Reply with a different body depending on which endpoint the URL hits, so the two
+// concurrent calls in fetchZdrAccount get their own shape.
+function mockFetchByUrl(bodies: { zdr: unknown; user: unknown }, status = 200) {
+  const calls: { url: string; headers: Record<string, string> }[] = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    const u = String(url);
+    calls.push({ url: u, headers: (init?.headers ?? {}) as Record<string, string> });
+    const body = u.includes("/endpoints/zdr") ? bodies.zdr : bodies.user;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: "",
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    } as Response;
+  }) as typeof fetch;
+  return calls;
+}
+
+test("fetchZdrAccount hits both endpoints with a bearer token and builds the sets", async () => {
+  const calls = mockFetchByUrl({
+    zdr: { data: [{ model_id: "anthropic/claude-opus-4.8" }, { model_id: "openai/gpt-4o" }] },
+    user: { data: [{ id: "anthropic/claude-opus-4.8" }, { id: "openai/gpt-4o" }] },
+  });
+  const acct = await fetchZdrAccount({ apiKey: "sk-or" });
+  assert.ok(calls.some((c) => c.url.endsWith("/endpoints/zdr")));
+  assert.ok(calls.some((c) => c.url.endsWith("/models/user")));
+  for (const c of calls) assert.equal(c.headers.authorization, "Bearer sk-or");
+  assert.ok(acct.zdrModelIds.has("anthropic/claude-opus-4.8"));
+  assert.ok(acct.userModelIds.has("openai/gpt-4o"));
+});
+
+test("fetchZdrAccount requires a key", async () => {
+  await assert.rejects(() => fetchZdrAccount({}), /no API key/);
+});
+
+test("fetchZdrAccount propagates a non-OK status", async () => {
+  mockFetchByUrl({ zdr: { error: "bad key" }, user: { error: "bad key" } }, 401);
+  await assert.rejects(() => fetchZdrAccount({ apiKey: "nope" }), /401/);
+});
+
+test("zdrPosture: red when the model is blocked by the user's settings", () => {
+  const acct: ZdrAccountData = {
+    zdrModelIds: new Set(["openai/gpt-4o"]),
+    userModelIds: new Set([]),
+  };
+  assert.equal(zdrPosture("openai/gpt-4o", acct, true), "red");
+});
+
+test("zdrPosture: red when the model has no ZDR endpoint", () => {
+  const acct: ZdrAccountData = {
+    zdrModelIds: new Set([]),
+    userModelIds: new Set(["openai/gpt-4o"]),
+  };
+  assert.equal(zdrPosture("openai/gpt-4o", acct, true), "red");
+});
+
+test("zdrPosture: green when usable, ZDR-capable, and the client enforces ZDR", () => {
+  const acct: ZdrAccountData = {
+    zdrModelIds: new Set(["openai/gpt-4o"]),
+    userModelIds: new Set(["openai/gpt-4o"]),
+  };
+  assert.equal(zdrPosture("openai/gpt-4o", acct, true), "green");
+});
+
+test("zdrPosture: yellow when ZDR is available but the client doesn't enforce it", () => {
+  const acct: ZdrAccountData = {
+    zdrModelIds: new Set(["openai/gpt-4o"]),
+    userModelIds: new Set(["openai/gpt-4o"]),
+  };
+  assert.equal(zdrPosture("openai/gpt-4o", acct, false), "yellow");
+});
+
+test("zdrPosture: variant suffixes and case are normalized before matching", () => {
+  const acct: ZdrAccountData = {
+    zdrModelIds: new Set(["openai/gpt-4o"]),
+    userModelIds: new Set(["openai/gpt-4o"]),
+  };
+  assert.equal(zdrPosture("OpenAI/GPT-4o:free", acct, true), "green");
 });

@@ -61,10 +61,30 @@ test("/compact maps to a compact result", () => {
   assert.deepEqual(runCommand("/compact", ctx), { type: "compact" });
 });
 
+test("/zdr toggles only with an OpenRouter key", () => {
+  // No OpenRouter key configured (ctx has anthropic only) → guidance, not a toggle.
+  const noKey = runCommand("/zdr", ctx);
+  assert.equal((noKey as any).tone, "error");
+  assert.match((noKey as any).text, /OpenRouter/);
+
+  const withKey: CommandContext = {
+    ...ctx,
+    config: Config.parse({ providers: { openrouter: { apiKey: "sk-or" } } }),
+  };
+  assert.deepEqual(runCommand("/zdr", withKey), { type: "toggleZdr" });
+});
+
 test("/init (no args) asks the agent to write PRIVATEER.md", () => {
   const r = runCommand("/init", ctx);
   assert.equal(r?.type, "runPrompt");
   assert.match((r as any).text, /PRIVATEER\.md/);
+});
+
+test("/mcp shows status, /mcp logout targets a server", () => {
+  assert.deepEqual(runCommand("/mcp", ctx), { type: "mcp" });
+  assert.deepEqual(runCommand("/mcp status", ctx), { type: "mcp" });
+  assert.deepEqual(runCommand("/mcp logout", ctx), { type: "mcpLogout", server: undefined });
+  assert.deepEqual(runCommand("/mcp logout api", ctx), { type: "mcpLogout", server: "api" });
 });
 
 test("/todo reports empty and populated lists", () => {

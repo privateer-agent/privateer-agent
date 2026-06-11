@@ -44,6 +44,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^2.0.0",
     "@ai-sdk/openai": "^2.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@openrouter/ai-sdk-provider": "^1.0.0",
     "@types/picomatch": "^4.0.3",
     "ai": "^5.0.0",

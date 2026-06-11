@@ -1,9 +1,22 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { basename } from "node:path";
-import { theme } from "./theme.ts";
+import { theme, POSTURE_COLOR } from "./theme.ts";
+import { SHIELD } from "./figures.ts";
 import { useTerminalWidth } from "./useTerminalWidth.ts";
 import { effectiveTokens, type UsageTotals } from "../engine/events.ts";
+import type { ZdrState } from "./useZdrShield.ts";
+
+// OpenRouter ZDR shield: a colored "⛉ ZDR" segment summarizing the selected model's
+// zero-data-retention posture. Dim "⛉ ZDR?" while loading or when the posture is
+// unknown (no key / fetch error); nothing at all for non-OpenRouter models.
+function ZdrBadge({ zdr }: { zdr?: ZdrState }) {
+  if (!zdr || zdr.kind === "hidden") return null;
+  if (zdr.kind === "ready") {
+    return <Text color={POSTURE_COLOR[zdr.posture]}>{`${SHIELD} ZDR · `}</Text>;
+  }
+  return <Text color={theme.dim}>{`${SHIELD} ZDR? · `}</Text>;
+}
 
 // Compact token count: 100, 1k, 1m, 1b — one decimal place above 1k, trimmed of
 // trailing ".0", so 1500 → "1.5k" and 2000 → "2k".
@@ -46,6 +59,7 @@ export function StatusBar(props: {
   context?: { used: number; budget: number };
   lastTurn?: UsageTotals;
   custom?: string; // settings-driven status line; overrides the default when set
+  zdr?: ZdrState; // OpenRouter ZDR posture for the selected model (default line only)
 }) {
   // Stay clear of the right edge (parent paddingX={1} plus a 2-col safety gap) so
   // the line never reaches the final column and the terminal never reflows it.
@@ -68,6 +82,7 @@ export function StatusBar(props: {
   return (
     <Box marginTop={1} width={width}>
       <Text wrap="truncate-end">
+        <ZdrBadge zdr={props.zdr} />
         <Text color={theme.accent}>⚓ privateer</Text>
         <Text color={theme.dim}>{` [${diag}]`}</Text>
         <Text color={theme.dim}> (shift+tab to cycle)</Text>

@@ -50,6 +50,36 @@ test("rewind restores file content and removes session-created files", () => {
   }
 });
 
+test("persisted checkpoints survive a reload (restart-and-resume)", () => {
+  const work = mkdtempSync(join(tmpdir(), "priv-ckpt-work-"));
+  const ckpt = mkdtempSync(join(tmpdir(), "priv-ckpt-store-"));
+  try {
+    const f = join(work, "f.txt");
+    const g = join(work, "g.txt");
+    writeFileSync(f, "v0", "utf8");
+
+    // First "process": take a checkpoint, then edit f and create g.
+    const store = CheckpointStore.load(ckpt);
+    const cp = store.create({ messagesLength: 2, committedLength: 3, label: "before edits" });
+    mutate(store, f, "v1");
+    mutate(store, g, "created");
+
+    // Second "process": rehydrate purely from disk and rewind to the saved checkpoint.
+    const reloaded = CheckpointStore.load(ckpt);
+    const list = reloaded.list();
+    assert.equal(list.length, 1);
+    assert.equal(list[0].id, cp.id);
+    assert.equal(list[0].label, "before edits");
+
+    reloaded.restoreFiles(reloaded.get(cp.id)!);
+    assert.equal(readFileSync(f, "utf8"), "v0"); // f restored from a persisted blob
+    assert.equal(existsSync(g), false); // g (created after the checkpoint) removed
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    rmSync(ckpt, { recursive: true, force: true });
+  }
+});
+
 test("checkpoints record conversation lengths and a labelled list", () => {
   const store = new CheckpointStore();
   store.create({ messagesLength: 0, committedLength: 0, label: "  add   login   " });

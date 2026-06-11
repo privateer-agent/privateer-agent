@@ -47,6 +47,12 @@ function sessionPath(cwd: string, id: string): string {
   return join(sessionsDir(cwd), `${id}.json`);
 }
 
+// Per-session checkpoint directory (index + content-addressed blobs), kept alongside
+// the session file so `/rewind` survives a restart when that session is resumed.
+export function checkpointsDir(cwd: string, id: string): string {
+  return join(projectDir(cwd), "checkpoints", id);
+}
+
 // A fresh, time-ordered session id minted once per run.
 export function newSessionId(): string {
   return `s-${Date.now()}`;

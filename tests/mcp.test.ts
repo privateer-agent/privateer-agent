@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
-  McpStdioClient,
+  McpClient,
   loadMcpServers,
   connectMcpServers,
   adaptMcpTools,
@@ -51,12 +56,19 @@ test("loadMcpServers reads the mcpServers map and validates entries", () => {
     mkdirSync(join(proj, ".privateer"), { recursive: true });
     writeFileSync(
       join(proj, ".privateer", "mcp.json"),
-      JSON.stringify({ mcpServers: { good: { command: "node", args: ["x"] }, bad: { notcommand: 1 } } }),
+      JSON.stringify({
+        mcpServers: {
+          good: { command: "node", args: ["x"] },
+          remote: { url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
+          bad: { notcommand: 1 },
+        },
+      }),
       "utf8",
     );
     const servers = loadMcpServers(proj);
-    assert.ok(servers.good);
-    assert.equal(servers.bad, undefined); // entry without a command is dropped
+    assert.ok(servers.good); // stdio entry kept
+    assert.ok(servers.remote); // remote url entry kept
+    assert.equal(servers.bad, undefined); // entry with neither command nor url is dropped
   } finally {
     rmSync(process.env.PRIVATEER_HOME!, { recursive: true, force: true });
     if (prevHome === undefined) delete process.env.PRIVATEER_HOME;
@@ -65,9 +77,9 @@ test("loadMcpServers reads the mcpServers map and validates entries", () => {
   }
 });
 
-test("McpStdioClient connects, lists tools, and calls one", async () => {
+test("McpClient connects, lists tools, and calls one", async () => {
   await withMockServer(async (dir, script) => {
-    const client = new McpStdioClient("mock", { command: "node", args: [script] }, dir);
+    const client = new McpClient("mock", { command: "node", args: [script] }, dir);
     await client.connect();
     const tools = await client.listTools();
     assert.equal(tools.length, 1);
@@ -90,9 +102,49 @@ test("connectMcpServers adapts namespaced, gated tools", async () => {
   });
 });
 
+test("McpClient connects over Streamable HTTP and calls a tool", async () => {
+  // A real in-process Streamable HTTP MCP server. Stateless mode needs a fresh
+  // server + transport per request, so build them inside the handler.
+  const makeServer = () => {
+    const server = new Server({ name: "mock-http", version: "1" }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: [{ name: "echo", description: "Echo back", inputSchema: { type: "object", properties: { text: { type: "string" } } } }],
+    }));
+    server.setRequestHandler(CallToolRequestSchema, async (req) => ({
+      content: [{ type: "text", text: "echoed: " + ((req.params.arguments as any)?.text ?? "") }],
+    }));
+    return server;
+  };
+
+  const httpServer = createServer(async (req, res) => {
+    const server = makeServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => {
+      void transport.close();
+      void server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  });
+  await new Promise<void>((r) => httpServer.listen(0, "127.0.0.1", r));
+  const { port } = httpServer.address() as AddressInfo;
+
+  try {
+    const client = new McpClient("http", { url: `http://127.0.0.1:${port}/mcp` }, process.cwd());
+    await client.connect();
+    const tools = await client.listTools();
+    assert.equal(tools[0].name, "echo");
+    const out = await client.callTool("echo", { text: "remote" });
+    assert.match(out, /echoed: remote/);
+    client.close();
+  } finally {
+    await new Promise<void>((r) => httpServer.close(() => r()));
+  }
+});
+
 test("adapted MCP tool denies when the gate denies", async () => {
   await withMockServer(async (dir, script) => {
-    const client = new McpStdioClient("mock", { command: "node", args: [script] }, dir);
+    const client = new McpClient("mock", { command: "node", args: [script] }, dir);
     await client.connect();
     const defs = await client.listTools();
     const denyGate = { request: async () => "deny" as const };

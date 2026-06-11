@@ -20,7 +20,12 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
 
 const FACTORIES: Record<ProviderName, Factory> = {
   openrouter: (cfg, modelId) =>
-    createOpenRouter({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+    // When the user enforces ZDR, pin routing to zero-data-retention endpoints so
+    // prompts can't be retained upstream; OpenRouter rejects models that have none.
+    createOpenRouter({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(
+      modelId,
+      cfg.enforceZdr ? { provider: { zdr: true } } : {},
+    ),
   anthropic: (cfg, modelId) =>
     createAnthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   openai: (cfg, modelId) =>

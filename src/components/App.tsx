@@ -11,13 +11,15 @@ import { ModelPicker } from "./ModelPicker.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { PlanConfirm } from "./PlanConfirm.tsx";
 import { ModeHint } from "./ModeHint.tsx";
+import { useZdrShield } from "./useZdrShield.ts";
 import { RewindPicker } from "./RewindPicker.tsx";
 import { SessionPicker } from "./SessionPicker.tsx";
 import { CheckpointStore, type RewindScope } from "../memory/checkpoints.ts";
 import { ProcessRegistry } from "../tools/processRegistry.ts";
 import { HookRunner, loadHooks } from "../hooks/engine.ts";
 import type { ToolSet } from "ai";
-import { loadMcpServers, connectMcpServers, type McpStdioClient, type McpConnection } from "../mcp/client.ts";
+import { loadMcpServers, connectMcpServers, type McpConnection } from "../mcp/client.ts";
+import { hasStoredAuth, clearStoredAuth } from "../mcp/oauth.ts";
 import { TodoPanel } from "./TodoPanel.tsx";
 import { exec } from "../tools/exec.ts";
 import { resolveAttachments, chipFor } from "../util/images.ts";
@@ -40,6 +42,7 @@ import {
   loadSession,
   listSessions,
   newSessionId,
+  checkpointsDir,
   type SessionData,
   type SessionMeta,
 } from "../memory/store.ts";
@@ -71,7 +74,7 @@ function serializeTranscript(entries: Entry[]): string {
 
 export function App({
   model,
-  config,
+  config: initialConfig,
   cwd,
   resume,
   onLogin,
@@ -82,6 +85,9 @@ export function App({
   resume?: SessionData | null;
   onLogin?: () => void;
 }) {
+  // Config is state, not just a prop, so runtime toggles that change request
+  // behavior (e.g. /zdr) can update it and trigger a session rebuild.
+  const [config, setConfig] = useState<Config>(initialConfig);
   const { exit } = useApp();
   const { stdout } = useStdout();
   // Bumped on resize to remount <Static> (forcing the whole transcript to be
@@ -91,6 +97,10 @@ export function App({
   const [live, setLive] = useState<Entry[]>([]);
   const [busy, setBusy] = useState(false);
   const [modelSpec, setModelSpec] = useState(model);
+  const zdr = useZdrShield(modelSpec, config);
+  // OpenRouter ZDR enforcement (set via /zdr); rebuilds the session when toggled so
+  // the provider preference (provider.zdr) rides on the next turn's requests.
+  const zdrEnforced = Boolean(config.providers.openrouter?.enforceZdr);
   const [mode, setMode] = useState<PermissionMode>(config.permissionMode);
   const [usage, setUsage] = useState<UsageTotals>(resume?.usage ?? emptyUsage());
   // Context-window occupancy (Claude-Code-style "% of context") and per-turn cost,
@@ -142,8 +152,12 @@ export function App({
   // survives into its submitted text, so the base64 still rides along.
   const pendingImagesRef = useRef<Attachment[]>([]);
   // Session-lifetime checkpoint store (survives model/style switches) for /rewind,
-  // plus a live mirror of the committed transcript length for checkpointing.
-  const checkpointsRef = useRef<CheckpointStore>(new CheckpointStore());
+  // plus a live mirror of the committed transcript length for checkpointing. Bound to
+  // the session's on-disk checkpoint dir so /rewind survives a restart-and-resume; a
+  // fresh session loads an empty store from a dir that doesn't exist yet.
+  const checkpointsRef = useRef<CheckpointStore>(
+    CheckpointStore.load(checkpointsDir(cwd, sessionIdRef.current)),
+  );
   const committedRef = useRef<Entry[]>([]);
   // Background-shell registry, shared across the session for bash run_in_background.
   const processesRef = useRef<ProcessRegistry>(new ProcessRegistry());
@@ -218,7 +232,7 @@ export function App({
     // Rebuild on model/style change, and when entering/leaving plan mode (so the
     // system prompt gains or loses the plan-mode mandate) — not on every mode change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelSpec, outputStyle, mode === "plan", mcpTools]);
+  }, [modelSpec, outputStyle, mode === "plan", mcpTools, zdrEnforced]);
 
   // One-time notice when resuming a prior conversation.
   useEffect(() => {
@@ -302,7 +316,10 @@ export function App({
     const servers = loadMcpServers(cwd);
     if (Object.keys(servers).length === 0) return;
     let cancelled = false;
-    void connectMcpServers(servers, cwd, gate).then((conn) => {
+    const onAuthorize = ({ server, url }: { server: string; url: string }) => {
+      append({ kind: "notice", text: `MCP "${server}" needs authorization. Opening browser… if it doesn't open, visit:\n${url}` });
+    };
+    void connectMcpServers(servers, cwd, gate, onAuthorize).then((conn) => {
       if (cancelled) {
         conn.clients.forEach((c) => c.close());
         return;
@@ -428,6 +445,23 @@ export function App({
         append({ kind: "notice", text: `Vim mode ${next ? "on" : "off"}.` });
         break;
       }
+      case "toggleZdr": {
+        const or = config.providers.openrouter ?? {};
+        const next = !or.enforceZdr;
+        // trySave updates config state too, so the zdrEnforced dep rebuilds the
+        // session and the provider.zdr preference rides on the next turn's requests.
+        trySave({
+          ...config,
+          providers: { ...config.providers, openrouter: { ...or, enforceZdr: next } },
+        });
+        append({
+          kind: "notice",
+          text: next
+            ? "ZDR enforcement on — OpenRouter requests pinned to zero-data-retention endpoints. Models without one will be rejected."
+            : "ZDR enforcement off — OpenRouter may route to endpoints that retain prompts.",
+        });
+        break;
+      }
       case "toggleVerbose": {
         const next = !verbose;
         setVerbose(next);
@@ -440,18 +474,54 @@ export function App({
         append({ kind: "notice", text: `Output style: ${res.name ?? "default"}.` });
         break;
       case "mcp": {
-        const conn = mcpRef.current;
-        if (!conn || conn.status.length === 0) {
+        const servers = loadMcpServers(cwd);
+        const names = Object.keys(servers);
+        if (names.length === 0) {
           append({
             kind: "notice",
             text: "No MCP servers. Add a `mcpServers` map to .privateer/mcp.json.",
           });
-        } else {
-          const lines = conn.status.map((s) =>
-            s.error ? `  ✗ ${s.server} — ${s.error}` : `  ✓ ${s.server} — ${s.tools} tool(s)`,
-          );
-          append({ kind: "notice", text: `MCP servers:\n${lines.join("\n")}` });
+          break;
         }
+        const conn = mcpRef.current;
+        const lines = names.map((name) => {
+          const cfg = servers[name] as { url?: string; headers?: unknown };
+          const st = conn?.status.find((s) => s.server === name);
+          const state = !st ? "· connecting…" : st.error ? `✗ ${st.error}` : `✓ ${st.tools} tool(s)`;
+          let auth = "";
+          if (typeof cfg.url === "string") {
+            auth = cfg.headers
+              ? " · static auth"
+              : hasStoredAuth(cfg.url)
+                ? " · oauth: authorized"
+                : " · oauth: not signed in";
+          }
+          return `  ${name} — ${state}${auth}`;
+        });
+        append({
+          kind: "notice",
+          text: `MCP servers:\n${lines.join("\n")}\n\n/mcp logout [server] clears saved OAuth.`,
+        });
+        break;
+      }
+      case "mcpLogout": {
+        const servers = loadMcpServers(cwd);
+        // Only remote servers that use OAuth (a URL, no static header) have stored creds.
+        const oauthServers = Object.entries(servers).filter(
+          ([, c]) => typeof (c as { url?: string }).url === "string" && !(c as { headers?: unknown }).headers,
+        );
+        const targets = res.server ? oauthServers.filter(([n]) => n === res.server) : oauthServers;
+        if (res.server && targets.length === 0) {
+          append({ kind: "notice", tone: "error", text: `No OAuth MCP server "${res.server}".` });
+          break;
+        }
+        for (const [, c] of targets) clearStoredAuth((c as { url: string }).url);
+        append({
+          kind: "notice",
+          text: targets.length
+            ? `Cleared saved OAuth for ${targets.length} server(s). Reconnect to re-authorize.`
+            : "No OAuth credentials to clear.",
+        });
         break;
       }
       case "rewind":
@@ -518,6 +588,9 @@ export function App({
   }
 
   function trySave(next: Config) {
+    // Keep the in-memory config the single source of truth so independent toggles
+    // (mode, vim, model, zdr) compose instead of clobbering each other on disk.
+    setConfig(next);
     try {
       saveGlobalConfig(next);
     } catch {
@@ -754,6 +827,10 @@ export function App({
     setLive([]);
     todosRef.current?.set([]);
     sessionIdRef.current = data.id;
+    // Adopt the resumed session's checkpoints so /rewind acts on its history, not the
+    // one we just left. Mutated in place so the engine's recordMutation closure stays
+    // valid (the session isn't rebuilt on resume).
+    checkpointsRef.current.adopt(checkpointsDir(cwd, data.id));
     persist();
     append({ kind: "notice", text: `Resumed session (${data.messages.length} messages).` });
   }
@@ -899,6 +976,7 @@ export function App({
           context={context}
           lastTurn={lastTurnUsage}
           custom={statusText || undefined}
+          zdr={zdr}
         />
 
         {picking ? (

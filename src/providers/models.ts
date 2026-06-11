@@ -93,3 +93,63 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
     }
   }
 }
+
+// ── OpenRouter Zero-Data-Retention (ZDR) posture ─────────────────────────────
+// OpenRouter exposes a model's retention story through two authenticated REST
+// endpoints (both need the user's API key). We fold them into a per-account
+// snapshot that the status-bar shield reads against the selected model.
+
+export type ZdrPosture = "green" | "yellow" | "red";
+
+export interface ZdrAccountData {
+  // Models with at least one zero-data-retention endpoint (from /endpoints/zdr).
+  zdrModelIds: Set<string>;
+  // Models usable under the account's privacy settings + guardrails (from /models/user).
+  userModelIds: Set<string>;
+}
+
+// Model ids may carry a variant suffix (":free", ":thinking") that the ZDR/user
+// listings don't use on their permaslug. Strip it and lowercase so the sets,
+// and the lookup against them, compare on the same canonical id.
+function normalizeModelId(id: string): string {
+  const i = id.indexOf(":");
+  return (i === -1 ? id : id.slice(0, i)).trim().toLowerCase();
+}
+
+// Fetch the account's ZDR snapshot. Issues the two authed calls concurrently and
+// reuses getJson's timeout + readable error message. Throws "no API key" (matching
+// listModels) when no key is configured, since both endpoints require auth.
+export async function fetchZdrAccount(cfg: ProviderConfig): Promise<ZdrAccountData> {
+  if (!cfg.apiKey) throw new Error("no API key");
+  const base = baseFor("openrouter", cfg);
+  const headers = { authorization: `Bearer ${cfg.apiKey}` };
+  const [zdr, user] = await Promise.all([
+    getJson(`${base}/endpoints/zdr`, headers) as Promise<{ data?: { model_id?: string }[] }>,
+    getJson(`${base}/models/user`, headers) as Promise<{ data?: { id?: string }[] }>,
+  ]);
+  const zdrModelIds = new Set(
+    (zdr.data ?? []).flatMap((e) => (e.model_id ? [normalizeModelId(e.model_id)] : [])),
+  );
+  const userModelIds = new Set(
+    (user.data ?? []).flatMap((m) => (m.id ? [normalizeModelId(m.id)] : [])),
+  );
+  return { zdrModelIds, userModelIds };
+}
+
+// Decide the shield color for a model against an account snapshot. Pure/synchronous
+// so model switches re-evaluate without a network round-trip. `enforced` is the
+// client's own ZDR-enforcement setting (config.providers.openrouter.enforceZdr):
+// when on, Privateer pins requests to ZDR endpoints, so a ZDR-capable model is
+// guaranteed zero-retention (green) rather than merely able to be (yellow).
+export function zdrPosture(modelId: string, acct: ZdrAccountData, enforced: boolean): ZdrPosture {
+  const id = normalizeModelId(modelId);
+  const inUser = acct.userModelIds.has(id);
+  const inZdr = acct.zdrModelIds.has(id);
+  // RED: blocked by the account's privacy settings (request would 404), or no
+  // zero-retention endpoint exists for the model (data will be retained — and
+  // under enforcement the request would be rejected outright).
+  if (!inUser || !inZdr) return "red";
+  // Usable and a ZDR endpoint exists: GREEN when we force ZDR routing, YELLOW when
+  // ZDR is merely available (a request may still hit a retaining endpoint).
+  return enforced ? "green" : "yellow";
+}

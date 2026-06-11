@@ -1,4 +1,5 @@
 import type { PermissionMode } from "../config/schema.ts";
+import type { ZdrPosture } from "../providers/models.ts";
 
 // Single source of truth for TUI color. Privateer's navy/white identity drives the
 // accent: it marks bullets, the prompt prefix, headings, and the active permission
@@ -25,6 +26,14 @@ export const MODE_COLOR: Record<PermissionMode, string> = {
   acceptEdits: theme.success,
   bypass: theme.error,
   plan: theme.accent,
+};
+
+// OpenRouter ZDR posture colors — green enforced, yellow available, red retained.
+// Shared by the status-bar shield and the per-model badges in the picker.
+export const POSTURE_COLOR: Record<ZdrPosture, string> = {
+  green: theme.success,
+  yellow: theme.warning,
+  red: theme.error,
 };
 
 // Capitalized tool display names: read → Read, web_fetch → WebFetch.

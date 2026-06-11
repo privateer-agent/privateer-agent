@@ -30,6 +30,8 @@ export type CommandResult =
   | { type: "compact" }
   // Toggle modal (vim) editing in the prompt input.
   | { type: "toggleVim" }
+  // Toggle OpenRouter Zero-Data-Retention enforcement (pins requests to ZDR endpoints).
+  | { type: "toggleZdr" }
   // Toggle full vs truncated tool output in the transcript.
   | { type: "toggleVerbose" }
   // Switch the active output style (persona); null resets to default.
@@ -42,6 +44,8 @@ export type CommandResult =
   | { type: "sessions" }
   // Show live MCP server/tool status (resolved by the App).
   | { type: "mcp" }
+  // Clear saved OAuth credentials for one MCP server, or all when omitted.
+  | { type: "mcpLogout"; server?: string }
   // Re-enter the provider/key onboarding flow.
   | { type: "onboarding" };
 
@@ -278,8 +282,12 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: "mcp",
-    summary: "show MCP server connection status",
-    run: () => ({ type: "mcp" }),
+    summary: "MCP servers: show status, or `logout [server]` to clear saved OAuth",
+    run: (args) => {
+      const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      if (sub === "logout") return { type: "mcpLogout", server: rest.join(" ") || undefined };
+      return { type: "mcp" };
+    },
   },
   {
     name: "hooks",
@@ -329,6 +337,20 @@ const COMMANDS: CommandDef[] = [
     name: "vim",
     summary: "toggle modal (vim) editing in the prompt",
     run: () => ({ type: "toggleVim" }),
+  },
+  {
+    name: "zdr",
+    summary: "toggle OpenRouter Zero-Data-Retention enforcement on requests",
+    run: (_args, ctx) => {
+      if (!ctx.config.providers.openrouter?.apiKey) {
+        return {
+          type: "notice",
+          tone: "error",
+          text: "ZDR enforcement applies to OpenRouter. Add an OpenRouter key with /login first.",
+        };
+      }
+      return { type: "toggleZdr" };
+    },
   },
   {
     name: "verbose",

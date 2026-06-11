@@ -5,8 +5,10 @@ import TextInput from "ink-text-input";
 import type { Config, ProviderName } from "../config/schema.ts";
 import { configuredProviders } from "../providers/resolve.ts";
 import { PROVIDER_META } from "../providers/catalog.ts";
-import { listModels, type ModelInfo } from "../providers/models.ts";
-import { theme } from "./theme.ts";
+import { listModels, zdrPosture, type ModelInfo } from "../providers/models.ts";
+import { theme, POSTURE_COLOR } from "./theme.ts";
+import { SHIELD } from "./figures.ts";
+import { useZdrAccount, type ZdrAccountState } from "./useZdrShield.ts";
 
 const PAGE = 8; // visible rows in the scrolling model list
 
@@ -107,6 +109,9 @@ function ModelStage({
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [cursor, setCursor] = useState(0);
+  // OpenRouter only: the account's ZDR snapshot, used to color a per-model badge.
+  const zdrAccount = useZdrAccount(provider, config);
+  const zdrEnforced = Boolean(config.providers.openrouter?.enforceZdr);
 
   useEffect(() => {
     let alive = true;
@@ -181,6 +186,7 @@ function ModelStage({
         <Text color={theme.accent}>↑↓</Text> move, <Text color={theme.accent}>enter</Text> select
         {onBack ? ", esc back" : onCancel ? ", esc cancel" : ""}.
       </Text>
+      <ZdrLegend state={zdrAccount} enforced={zdrEnforced} />
       <Box marginTop={1} borderStyle="round" borderColor={theme.accent} paddingX={1}>
         <Text color={theme.accent}>{"/ "}</Text>
         <TextInput value={filter} onChange={setFilter} placeholder="filter models…" />
@@ -192,9 +198,14 @@ function ModelStage({
           view.map((m, i) => {
             const idx = start + i;
             const active = idx === cursor;
+            const posture =
+              zdrAccount.kind === "ready"
+                ? zdrPosture(m.id, zdrAccount.account, zdrEnforced)
+                : null;
             return (
               <Text key={m.id} color={active ? theme.accent : undefined}>
                 {active ? "❯ " : "  "}
+                {posture ? <Text color={POSTURE_COLOR[posture]}>{`${SHIELD} `}</Text> : null}
                 {m.id}
                 {m.label && m.label !== m.id ? <Text color={theme.dim}> — {m.label}</Text> : null}
               </Text>
@@ -203,5 +214,34 @@ function ModelStage({
         )}
       </Box>
     </Box>
+  );
+}
+
+// One-line key for the per-model ⛉ badge, shown only for OpenRouter. While the
+// account snapshot loads we say so; if it can't be fetched (no key / error) we stay
+// silent rather than imply a verdict — the rows simply render without a badge.
+// With enforcement off, ZDR-capable models read yellow; /zdr flips it on so they
+// go green (and non-ZDR models become red/unusable).
+function ZdrLegend({ state, enforced }: { state: ZdrAccountState; enforced: boolean }) {
+  if (state.kind === "idle" || state.kind === "error") return null;
+  if (state.kind === "loading") {
+    return <Text color={theme.dim}>{`${SHIELD} ZDR — checking your account…`}</Text>;
+  }
+  return (
+    <Text color={theme.dim}>
+      {enforced ? (
+        <>
+          <Text color={POSTURE_COLOR.green}>{SHIELD}</Text> ZDR enforced{"  "}
+          <Text color={POSTURE_COLOR.red}>{SHIELD}</Text> no ZDR endpoint — unusable
+          {"  "}(/zdr to relax)
+        </>
+      ) : (
+        <>
+          <Text color={POSTURE_COLOR.yellow}>{SHIELD}</Text> ZDR available{"  "}
+          <Text color={POSTURE_COLOR.red}>{SHIELD}</Text> data retained{"  "}
+          (/zdr to enforce → green)
+        </>
+      )}
+    </Text>
   );
 }
