@@ -32,6 +32,18 @@ export function formatTokens(n: number): string {
   return `${n}`;
 }
 
+// Human-readable elapsed time from milliseconds: 8200 → "8s", 83000 → "1m 23s",
+// 3723000 → "1h 2m". Drops zero-valued leading units so short turns stay terse.
+export function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 // The footer line rendered directly under the prompt box. The headline is a
 // Claude-Code-style context-window gauge ("how full is the window right now"),
 // not the cumulative billed total — a one-word message barely moves it. The gauge

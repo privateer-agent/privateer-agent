@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Box, Text, Static, useApp, useInput, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import { Banner } from "./Banner.tsx";
-import { StatusBar, formatTokens } from "./StatusBar.tsx";
+import { StatusBar, formatTokens, formatDuration } from "./StatusBar.tsx";
 import { RowView, groupRows } from "./Transcript.tsx";
 import { ApprovalPrompt } from "./ApprovalPrompt.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
@@ -658,6 +658,7 @@ export function App({
     setVerb(randomVerb());
     setBusy(true);
     setTurnUsage(emptyUsage());
+    const turnStart = Date.now();
     const controller = new AbortController();
     abortRef.current = controller;
     let liveEntries: Entry[] = [];
@@ -804,7 +805,13 @@ export function App({
       // Cancel any pending throttled flush so it can't re-emit these entries into
       // the live region after we've moved them into the committed transcript.
       clearTimeout(syncTimer);
-      const finalEntries = liveEntries;
+      // Close out the turn with how long the agent took to process the request to
+      // completion — the live spinner's running timer, frozen as a total.
+      const took = Date.now() - turnStart;
+      const finalEntries: Entry[] = [
+        ...liveEntries,
+        { kind: "notice", text: `⏱ ${formatDuration(took)} total` },
+      ];
       setLive([]);
       setCommitted((c) => [...c, ...finalEntries]);
       setBusy(false);
