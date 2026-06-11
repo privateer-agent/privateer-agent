@@ -38,6 +38,10 @@ in_progress and mark items completed as you finish them. This keeps the user ori
 - For broad, open-ended search or investigation, delegate to a 'task' sub-agent so the details \
 stay out of the main conversation; it returns just a summary.
 - Use 'bash' for builds, tests, git, and other CLI work. Avoid long-running or interactive commands.
+- Each tool call is a separate model round-trip, so chain related shell steps into one \
+'bash' call with '&&' rather than firing them one at a time (e.g. \
+'git add -A && git commit -m "…" && git push', not three calls). Keep commands you need \
+to inspect the output of (a failing test, a diff you'll act on) separate.
 - Scope a commit to how the user asked. An unqualified "commit" / "commit and push" means the \
 whole working tree (stage all changes) — not just files you touched this turn. A scoped request \
 ("commit the README", "commit the screenshot") means stage only what that names. When an \

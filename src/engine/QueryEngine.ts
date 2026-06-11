@@ -127,6 +127,15 @@ export class QueryEngine {
         tools: this.opts.tools,
         stopWhen: stepCountIs(this.opts.maxSteps),
         abortSignal: signal,
+        // Re-place the rolling cache breakpoint on every internal tool-loop step.
+        // streamText runs the multi-step loop itself, appending tool-call/result
+        // messages between API calls; without this the breakpoint stays on the
+        // pre-loop tail, so each step's accumulating tool output is re-sent at full
+        // price. Marking the new last message each step caches the prefix the
+        // previous step already sent. (No-op for non-Anthropic routes.)
+        prepareStep: route.cacheControl
+          ? ({ messages }) => ({ messages: withCacheBreakpoints(messages) })
+          : undefined,
         providerOptions: route.thinkingBudget
           ? { anthropic: { thinking: { type: "enabled", budgetTokens: route.thinkingBudget } } }
           : undefined,

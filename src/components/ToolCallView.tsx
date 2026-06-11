@@ -19,6 +19,8 @@ function summarizeInput(name: string, input: unknown): string {
       return String(o.pattern ?? "");
     case "grep":
       return String(o.pattern ?? "") + (o.glob ? ` (${o.glob})` : "");
+    case "task":
+      return String(o.description ?? o.subagent_type ?? "");
     default:
       try {
         return JSON.stringify(o);

@@ -6,6 +6,20 @@ import { PermissionDeniedError } from "../permissions/gate.ts";
 
 const DEFAULT_TIMEOUT = 120_000;
 const MAX_TIMEOUT = 600_000;
+// Cap how much command output enters the conversation. Unbounded output (a big
+// `git diff`, a verbose build log) is otherwise re-sent on every subsequent step of
+// the agentic loop, ballooning token usage. Keep the head and tail — both ends carry
+// the most signal (the command's start and its final status/errors).
+const MAX_OUTPUT_CHARS = 30_000;
+const HEAD_CHARS = 20_000;
+
+function clampOutput(text: string): string {
+  if (text.length <= MAX_OUTPUT_CHARS) return text;
+  const head = text.slice(0, HEAD_CHARS);
+  const tail = text.slice(text.length - (MAX_OUTPUT_CHARS - HEAD_CHARS));
+  const omitted = text.length - MAX_OUTPUT_CHARS;
+  return `${head}\n… (${omitted} chars of output truncated) …\n${tail}`;
+}
 
 export function bashTool(ctx: ToolContext) {
   return tool({
@@ -43,8 +57,8 @@ export function bashTool(ctx: ToolContext) {
       });
 
       const parts: string[] = [];
-      if (stdout.trim()) parts.push(stdout.trimEnd());
-      if (stderr.trim()) parts.push(`[stderr]\n${stderr.trimEnd()}`);
+      if (stdout.trim()) parts.push(clampOutput(stdout.trimEnd()));
+      if (stderr.trim()) parts.push(`[stderr]\n${clampOutput(stderr.trimEnd())}`);
       if (timedOut) parts.push(`[timed out after ${timeoutMs}ms]`);
       parts.push(`[exit code ${code ?? "null"}]`);
       return parts.join("\n");

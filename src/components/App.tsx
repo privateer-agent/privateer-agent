@@ -5,7 +5,7 @@ import { Box, Text, Static, useApp, useInput, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import { Banner } from "./Banner.tsx";
 import { StatusBar, formatTokens } from "./StatusBar.tsx";
-import { EntryView } from "./Transcript.tsx";
+import { RowView, groupRows } from "./Transcript.tsx";
 import { ApprovalPrompt } from "./ApprovalPrompt.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { PromptInput } from "./PromptInput.tsx";
@@ -25,7 +25,7 @@ import { exec } from "../tools/exec.ts";
 import { resolveAttachments, chipFor } from "../util/images.ts";
 import type { Attachment } from "../util/images.ts";
 import { AttachmentStore } from "../util/attachmentStore.ts";
-import type { Entry } from "./types.ts";
+import type { Entry, ToolEntry, Row } from "./types.ts";
 import type { TodoStore, TodoItem } from "../tools/todoStore.ts";
 import type { Config, PermissionMode } from "../config/schema.ts";
 import { createSession } from "../session.ts";
@@ -58,6 +58,16 @@ const BANNER = "__banner__";
 
 function asText(output: unknown): string {
   return typeof output === "string" ? output : JSON.stringify(output);
+}
+
+// Fold a finished sub-agent's run metrics into the entry's existing agent info
+// (description/type set at call time), leaving non-task entries untouched.
+function mergeAgentMetrics(
+  agent: ToolEntry["agent"],
+  m?: { toolUses: number; tokens: number },
+): ToolEntry["agent"] {
+  if (!agent) return agent;
+  return { ...agent, toolUses: m?.toolUses, tokens: m?.tokens };
 }
 
 // Render the committed transcript as markdown for /export.
@@ -164,6 +174,11 @@ export function App({
   // Session-lifetime store of attachment bytes (by "#n"), so the save_attachment tool
   // can write a pasted/dropped file to disk without re-reading the volatile drop path.
   const attachmentsRef = useRef<AttachmentStore>(new AttachmentStore());
+  // Run metrics (tool uses + tokens) for `task` sub-agents, keyed by tool-call id and
+  // filled in when each agent finishes. Read when its tool-result arrives to annotate
+  // the grouped agents view. A plain ref (not state) — it's merged into the entry the
+  // result already re-renders.
+  const subAgentMetricsRef = useRef<Map<string, { toolUses: number; tokens: number }>>(new Map());
 
   // The gate reads the live mode via a ref (so changing mode doesn't require
   // rebuilding the session/tools) and surfaces approvals through React state.
@@ -208,6 +223,7 @@ export function App({
         extraTools: mcpTools,
         processes: processesRef.current,
         attachments: attachmentsRef.current,
+        onSubAgentMetrics: (id, m) => subAgentMetricsRef.current.set(id, m),
       });
       if (prev) {
         session.engine.messages.push(...prev.messages);
@@ -710,23 +726,42 @@ export function App({
               sync();
             }
             break;
-          case "tool-call":
-            pushLive({ kind: "tool", id: ev.id, name: ev.name, input: ev.input, status: "running" });
+          case "tool-call": {
+            // `task` calls carry the sub-agent's description/type so the grouped
+            // agents view can label each row before its metrics land.
+            const o = (ev.input ?? {}) as Record<string, unknown>;
+            const agent =
+              ev.name === "task"
+                ? {
+                    description: String(o.description ?? ""),
+                    subagentType: o.subagent_type ? String(o.subagent_type) : undefined,
+                  }
+                : undefined;
+            pushLive({ kind: "tool", id: ev.id, name: ev.name, input: ev.input, status: "running", agent });
             assistantIdx = -1;
             thinkingIdx = -1;
             break;
-          case "tool-result":
+          }
+          case "tool-result": {
+            const m = subAgentMetricsRef.current.get(ev.id);
             liveEntries = liveEntries.map((e) =>
-              e.kind === "tool" && e.id === ev.id ? { ...e, status: "done", output: asText(ev.output) } : e,
+              e.kind === "tool" && e.id === ev.id
+                ? { ...e, status: "done", output: asText(ev.output), agent: mergeAgentMetrics(e.agent, m) }
+                : e,
             );
             sync();
             break;
-          case "tool-error":
+          }
+          case "tool-error": {
+            const m = subAgentMetricsRef.current.get(ev.id);
             liveEntries = liveEntries.map((e) =>
-              e.kind === "tool" && e.id === ev.id ? { ...e, status: "error", error: ev.error } : e,
+              e.kind === "tool" && e.id === ev.id
+                ? { ...e, status: "error", error: ev.error, agent: mergeAgentMetrics(e.agent, m) }
+                : e,
             );
             sync();
             break;
+          }
           case "usage":
             // Live running total — ticks the token count up between steps.
             setUsage(ev.usage);
@@ -926,7 +961,9 @@ export function App({
     }
   }
 
-  const staticItems: (typeof BANNER | Entry)[] = [BANNER, ...committed];
+  // Group concurrent `task` sub-agents into single rows before committing to <Static>
+  // (and again for the live region below) so the fan-out renders as one block.
+  const staticItems: (typeof BANNER | Row)[] = [BANNER, ...groupRows(committed)];
 
   return (
     <Box flexDirection="column">
@@ -938,15 +975,15 @@ export function App({
             </Box>
           ) : (
             <Box key={i} paddingX={1}>
-              <EntryView entry={item as Entry} verbose={verbose} collapsed={collapsed} />
+              <RowView row={item as Row} verbose={verbose} collapsed={collapsed} />
             </Box>
           )
         }
       </Static>
 
       <Box flexDirection="column" paddingX={1}>
-        {live.map((e, i) => (
-          <EntryView key={i} entry={e} verbose={verbose} collapsed={collapsed} />
+        {groupRows(live).map((row, i) => (
+          <RowView key={i} row={row} verbose={verbose} collapsed={collapsed} />
         ))}
 
         {/* While a prompt is pending the turn is blocked on the human, so there's

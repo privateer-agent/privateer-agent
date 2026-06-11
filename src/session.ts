@@ -34,6 +34,9 @@ export interface SessionOptions {
   // Session attachment store, so dragged/pasted file bytes can be saved via the
   // save_attachment tool. Created here when the caller doesn't supply one.
   attachments?: AttachmentStore;
+  // Reports each finished `task` sub-agent's run metrics (tool uses + tokens) by
+  // tool-call id, so the TUI can render the grouped agents view. Best-effort.
+  onSubAgentMetrics?: (toolCallId: string, m: { toolUses: number; tokens: number }) => void;
 }
 
 export interface Session {
@@ -89,11 +92,18 @@ export function createSession(opts: SessionOptions): Session {
       maxSteps: Math.min(opts.config.maxSteps, 20),
     });
     let out = "";
+    let toolUses = 0;
     for await (const ev of child.send(prompt)) {
       if (ev.type === "text") out += ev.text;
-      else if (ev.type === "error") return `Sub-agent error: ${ev.error}`;
+      else if (ev.type === "tool-call") toolUses++;
+      else if (ev.type === "error")
+        return { text: `Sub-agent error: ${ev.error}`, toolUses, tokens: child.usage.totalTokens };
     }
-    return out.trim() || "(sub-agent returned no output)";
+    return {
+      text: out.trim() || "(sub-agent returned no output)",
+      toolUses,
+      tokens: child.usage.totalTokens,
+    };
     });
 
   const hooks = new HookRunner(loadHooks((opts.config as Record<string, unknown>).hooks), opts.cwd);
@@ -104,6 +114,7 @@ export function createSession(opts: SessionOptions): Session {
         gate,
         todos,
         runSubAgent,
+        onSubAgentMetrics: opts.onSubAgentMetrics,
         recordMutation: opts.checkpoints ? (abs) => opts.checkpoints!.recordMutation(abs) : undefined,
         processes: opts.processes,
         attachments,

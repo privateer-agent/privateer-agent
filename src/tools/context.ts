@@ -5,14 +5,24 @@ import type { AgentDefinition } from "../agents/loader.ts";
 import type { ProcessRegistry } from "./processRegistry.ts";
 import type { AttachmentStore } from "../util/attachmentStore.ts";
 
-// Runs a child agent and resolves to its final text answer. With no `agent` it runs the
-// default read-only sub-agent; with one it uses that agent's tools/model/instructions.
-// Supplied by the session (which has the model + config); absent in bare tool contexts.
+// A finished sub-agent's result: its final text answer plus run metrics (how many
+// tools it called and how many tokens it spent), so the UI can show a per-agent
+// summary in the grouped "N agents finished" view.
+export interface SubAgentResult {
+  text: string;
+  toolUses: number;
+  tokens: number;
+}
+
+// Runs a child agent and resolves to its final text answer + metrics. With no `agent`
+// it runs the default read-only sub-agent; with one it uses that agent's
+// tools/model/instructions. Supplied by the session (which has the model + config);
+// absent in bare tool contexts.
 export type SubAgentRunner = (input: {
   description: string;
   prompt: string;
   agent?: AgentDefinition;
-}) => Promise<string>;
+}) => Promise<SubAgentResult>;
 
 // Shared state handed to every tool's execute().
 export interface ToolContext {
@@ -20,6 +30,10 @@ export interface ToolContext {
   gate: PermissionGate;
   todos?: TodoStore; // session todo list, for the `todo` tool + TUI panel
   runSubAgent?: SubAgentRunner; // spawns a `task` sub-agent
+  // Reports a finished `task` sub-agent's run metrics, keyed by the originating
+  // tool-call id, so the TUI can annotate the grouped agents view with each agent's
+  // tool-use and token counts. Best-effort; absent outside the interactive session.
+  onSubAgentMetrics?: (toolCallId: string, m: { toolUses: number; tokens: number }) => void;
   // Called by write/edit just before they mutate a file, so the checkpoint store
   // can capture its pre-modification state for /rewind.
   recordMutation?: (abs: string) => void;

@@ -9,8 +9,9 @@ import { loadAgents, findAgent } from "../agents/loader.ts";
 // that custom agent's tools/model/instructions. Sub-agents cannot spawn further
 // sub-agents (no recursion).
 //
-// Note: this runs synchronously (one sub-agent at a time), not as async parallel
-// workers.
+// When the model emits several `task` calls in one turn the AI SDK runs their
+// execute()s concurrently, so sub-agents fan out in parallel — bounded by the
+// session's `maxSubagents` limiter.
 export function taskTool(ctx: ToolContext) {
   const agents = loadAgents(ctx.cwd);
   const agentList = agents.length
@@ -27,7 +28,7 @@ export function taskTool(ctx: ToolContext) {
       prompt: z.string().describe("The full, self-contained task for the sub-agent."),
       subagent_type: z.string().optional().describe("Name of a custom sub-agent to use."),
     }),
-    execute: async ({ description, prompt, subagent_type }) => {
+    execute: async ({ description, prompt, subagent_type }, { toolCallId }) => {
       if (!ctx.runSubAgent) return "Sub-agents are not available in this context.";
       let agent;
       if (subagent_type) {
@@ -38,7 +39,11 @@ export function taskTool(ctx: ToolContext) {
         }
       }
       try {
-        return await ctx.runSubAgent({ description, prompt, agent });
+        const { text, toolUses, tokens } = await ctx.runSubAgent({ description, prompt, agent });
+        // Report run metrics out-of-band (keyed by this call's id) for the grouped
+        // agents view; the model itself only ever sees the text summary.
+        ctx.onSubAgentMetrics?.(toolCallId, { toolUses, tokens });
+        return text;
       } catch (err) {
         return `Sub-agent failed: ${err instanceof Error ? err.message : String(err)}`;
       }

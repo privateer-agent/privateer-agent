@@ -136,10 +136,19 @@ const COMMANDS: CommandDef[] = [
   {
     name: "cost",
     summary: "show token usage this session",
-    run: (_args, ctx) => ({
-      type: "notice",
-      text: `Tokens — in: ${ctx.usage.inputTokens}  out: ${ctx.usage.outputTokens}  total: ${ctx.usage.totalTokens}`,
-    }),
+    run: (_args, ctx) => {
+      // Headline the billed (cache-discounted) figure: the agentic loop re-sends the
+      // prompt every step, so raw `totalTokens` counts each cached re-send at full
+      // weight and badly overstates cost. Anthropic bills cache reads at ~10%; show
+      // that estimate first, with the raw counts after for reference. See effectiveTokens.
+      const u = ctx.usage;
+      return {
+        type: "notice",
+        text:
+          `Tokens — billed ~${effectiveTokens(u)} (est, cache-discounted)\n` +
+          `  raw — in: ${u.inputTokens}  out: ${u.outputTokens}  total: ${u.totalTokens}  cached: ${u.cachedInputTokens}`,
+      };
+    },
   },
   {
     name: "init",

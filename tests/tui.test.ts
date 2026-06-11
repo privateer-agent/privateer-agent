@@ -7,8 +7,10 @@ import React from "react";
 import { render } from "ink-testing-library";
 import { App } from "../src/components/App.tsx";
 import { TodoPanel } from "../src/components/TodoPanel.tsx";
-import { EntryView } from "../src/components/Transcript.tsx";
+import { EntryView, groupRows } from "../src/components/Transcript.tsx";
 import { ToolCallView } from "../src/components/ToolCallView.tsx";
+import { AgentGroupView } from "../src/components/AgentGroupView.tsx";
+import type { Entry, ToolEntry } from "../src/components/types.ts";
 import { StatusBar } from "../src/components/StatusBar.tsx";
 import { emptyUsage } from "../src/engine/events.ts";
 import { Config } from "../src/config/schema.ts";
@@ -106,6 +108,46 @@ test("StatusBar renders a custom status line when provided", () => {
   assert.match(custom.lastFrame() ?? "", /MY-STATUS-LINE/);
   assert.doesNotMatch(custom.lastFrame() ?? "", /privateer/);
   custom.unmount();
+});
+
+// Helper to build a finished `task` entry with metrics.
+const taskEntry = (id: string, description: string, toolUses: number, tokens: number): ToolEntry => ({
+  kind: "tool",
+  id,
+  name: "task",
+  input: { description },
+  status: "done",
+  output: "summary",
+  agent: { description, toolUses, tokens },
+});
+
+test("groupRows collapses 2+ consecutive task calls but leaves a lone one alone", () => {
+  const lone: Entry[] = [{ kind: "user", text: "hi" }, taskEntry("a", "one", 1, 1)];
+  const loneRows = groupRows(lone);
+  assert.equal(loneRows.length, 2);
+  assert.equal(loneRows[1].kind, "tool"); // single task not grouped
+
+  const fanned: Entry[] = [
+    { kind: "assistant", text: "kicking off" },
+    taskEntry("a", "first", 42, 50000),
+    taskEntry("b", "second", 25, 52400),
+    { kind: "assistant", text: "done" },
+  ];
+  const rows = groupRows(fanned);
+  assert.equal(rows.length, 3);
+  assert.equal(rows[1].kind, "agent-group");
+  assert.equal(rows[1].kind === "agent-group" && rows[1].agents.length, 2);
+});
+
+test("AgentGroupView renders the N-agents header with per-agent metrics", () => {
+  const agents = [taskEntry("a", "Find request construction", 42, 50000), taskEntry("b", "Find caching", 25, 52400)];
+  const { lastFrame, unmount } = render(React.createElement(AgentGroupView, { agents, collapsed: true }));
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /2 Explore agents finished/);
+  assert.match(frame, /Find request construction · 42 tool uses · 50k tokens/);
+  assert.match(frame, /Find caching · 25 tool uses · 52.4k tokens/);
+  assert.match(frame, /ctrl\+o to expand/);
+  unmount();
 });
 
 test("TodoPanel hides when empty and lists tasks when populated", () => {

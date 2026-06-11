@@ -13,6 +13,7 @@ function ctx(over: Partial<Parameters<typeof runCommand>[1]> = {}) {
     modelSpec: "anthropic:claude-opus-4-8",
     mode: "default" as const,
     usage: { ...emptyUsage(), inputTokens: 120, outputTokens: 80, totalTokens: 200 },
+    context: { used: 200, budget: 1000 },
     cwd: process.cwd(),
     todos: [],
     ...over,
