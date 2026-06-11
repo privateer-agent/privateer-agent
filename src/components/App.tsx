@@ -47,6 +47,7 @@ import {
   type SessionMeta,
 } from "../memory/store.ts";
 import { theme } from "./theme.ts";
+import { DOWN } from "./figures.ts";
 import { randomVerb } from "./spinnerVerbs.ts";
 
 interface PendingApproval {
@@ -999,7 +1000,7 @@ export function App({
               {verb}…
             </Text>
             <Text color={theme.dim} wrap="truncate-end">
-              (esc to interrupt · {elapsed}s · {formatTokens(turnUsage.totalTokens)} tokens this turn)
+              (esc to interrupt · {elapsed}s · {DOWN} {formatTokens(turnUsage.outputTokens)} tokens)
             </Text>
           </Box>
         )}

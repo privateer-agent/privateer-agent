@@ -10,3 +10,4 @@ export const POINTER = "❯"; // selection pointer in menus and the prompt caret
 export const FAST_FORWARD = "⏵⏵"; // marks an "on" permission mode below the prompt
 export const PAUSE = "⏸"; // marks plan mode (paused execution) below the prompt
 export const SHIELD = "⛉"; // U+26C9 — OpenRouter ZDR posture marker in the status bar
+export const DOWN = "↓"; // U+2193 — output tokens streaming down from the model (spinner)

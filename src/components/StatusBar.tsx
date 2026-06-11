@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import { theme, POSTURE_COLOR } from "./theme.ts";
 import { SHIELD } from "./figures.ts";
 import { useTerminalWidth } from "./useTerminalWidth.ts";
-import { effectiveTokens, type UsageTotals } from "../engine/events.ts";
+import { type UsageTotals } from "../engine/events.ts";
 import type { ZdrState } from "./useZdrShield.ts";
 
 // OpenRouter ZDR shield: a colored "⛉ ZDR" segment summarizing the selected model's
@@ -34,10 +34,11 @@ export function formatTokens(n: number): string {
 
 // The footer line rendered directly under the prompt box. The headline is a
 // Claude-Code-style context-window gauge ("how full is the window right now"),
-// not the cumulative billed total — a one-word message barely moves it. We pack
-// the diagnostics (context %, cache hits, last-turn cost) into a leading bracket
-// so they survive right-edge truncation; model · cwd · session follow and clip
-// first. The active permission mode is shown separately by <ModeHint>.
+// not the cumulative billed total — a one-word message barely moves it. The gauge
+// sits in a leading bracket so it survives right-edge truncation; model · cwd
+// follow and clip first. Cost accounting (cache hits, last-turn / session totals)
+// is intentionally not here — it lives in `/context`. The active permission mode
+// is shown separately by <ModeHint>.
 //
 // Both sides truncate (never wrap) and the row is bounded a few columns short of
 // the terminal so it always stays a single physical line — see useTerminalWidth.
@@ -73,21 +74,20 @@ export function StatusBar(props: {
       </Box>
     );
   }
-  // Diagnostics, billed-weighted so cache hits show their real (discounted) cost
-  // rather than the raw re-sent total. See effectiveTokens.
-  const cached = formatTokens(props.usage.cachedInputTokens ?? 0);
-  const lastTurn = props.lastTurn ? formatTokens(effectiveTokens(props.lastTurn)) : "0";
-  const session = formatTokens(effectiveTokens(props.usage));
-  const diag = `${formatContext(props.context)} · cached ${cached} · +${lastTurn} last`;
+  // The bar carries only the context-window gauge ("how full is the window right
+  // now") plus model · cwd. The cumulative cost accounting — cache hits, last-turn
+  // and session billed totals — lives in `/context`, so the always-on line stays
+  // quiet and the live output count belongs to the spinner. See effectiveTokens.
+  const diag = formatContext(props.context);
   return (
     <Box marginTop={1} width={width}>
       <Text wrap="truncate-end">
         <ZdrBadge zdr={props.zdr} />
         <Text color={theme.accent}>⚓ privateer</Text>
-        <Text color={theme.dim}>{` [${diag}]`}</Text>
+        {diag ? <Text color={theme.dim}>{` [${diag}]`}</Text> : null}
         <Text color={theme.dim}> (shift+tab to cycle)</Text>
         <Text color={theme.dim}>
-          {` · ${props.modelSpec} · ${basename(props.cwd) || props.cwd} · ${session} session`}
+          {` · ${props.modelSpec} · ${basename(props.cwd) || props.cwd}`}
         </Text>
       </Text>
     </Box>
