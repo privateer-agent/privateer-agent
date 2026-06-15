@@ -12,6 +12,9 @@ import { PromptInput } from "./PromptInput.tsx";
 import { PlanConfirm } from "./PlanConfirm.tsx";
 import { ModeHint } from "./ModeHint.tsx";
 import { useZdrShield } from "./useZdrShield.ts";
+import { useTeeShield } from "./useTeeShield.ts";
+import { parseModelSpec } from "../providers/resolve.ts";
+import { fetchAttestation, teePosture } from "../providers/attestation.ts";
 import { RewindPicker } from "./RewindPicker.tsx";
 import { SessionPicker } from "./SessionPicker.tsx";
 import { CheckpointStore, type RewindScope } from "../memory/checkpoints.ts";
@@ -109,6 +112,7 @@ export function App({
   const [busy, setBusy] = useState(false);
   const [modelSpec, setModelSpec] = useState(model);
   const zdr = useZdrShield(modelSpec, config);
+  const tee = useTeeShield(modelSpec, config);
   // OpenRouter ZDR enforcement (set via /zdr); rebuilds the session when toggled so
   // the provider preference (provider.zdr) rides on the next turn's requests.
   const zdrEnforced = Boolean(config.providers.openrouter?.enforceZdr);
@@ -477,6 +481,36 @@ export function App({
             ? "ZDR enforcement on — OpenRouter requests pinned to zero-data-retention endpoints. Models without one will be rejected."
             : "ZDR enforcement off — OpenRouter may route to endpoints that retain prompts.",
         });
+        break;
+      }
+      case "verify": {
+        const cfg = config.providers.nearai ?? {};
+        const { modelId } = parseModelSpec(modelSpec);
+        append({ kind: "notice", text: `Fetching TEE attestation for ${modelId}…` });
+        void fetchAttestation(cfg, modelId)
+          .then((att) => {
+            const verdict =
+              teePosture(att) === "green"
+                ? "✓ Verified — confidential inference in a genuine TEE"
+                : teePosture(att) === "yellow"
+                  ? "~ Attested, but couldn't fully confirm here (see verifier)"
+                  : "✗ No attestation material returned";
+            const lines = [
+              `NEAR AI TEE attestation — ${modelId}`,
+              `  ${verdict}`,
+              `  Hardware:       ${att.hardware.length ? att.hardware.join(" + ") : "none detected"}`,
+              `  Signing key:    ${att.signingAddress ?? "not present"}`,
+              `  Nonce (fresh):  ${att.nonceEchoed ? "yes" : "not echoed"} · ${att.nonce.slice(0, 16)}…`,
+              "",
+              "Your prompts are encrypted into the enclave (TLS terminates inside the TEE);",
+              "no infra/model provider — or NEAR — can read them. Full quote verification:",
+              "github.com/nearai/cloud-verifier",
+            ];
+            append({ kind: "notice", text: lines.join("\n") });
+          })
+          .catch((err) => {
+            append({ kind: "notice", tone: "error", text: `Attestation failed: ${String(err)}` });
+          });
         break;
       }
       case "toggleVerbose": {
@@ -1022,6 +1056,7 @@ export function App({
           lastTurn={lastTurnUsage}
           custom={statusText || undefined}
           zdr={zdr}
+          tee={tee}
         />
 
         {picking ? (

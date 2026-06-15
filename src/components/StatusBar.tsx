@@ -6,6 +6,7 @@ import { SHIELD } from "./figures.ts";
 import { useTerminalWidth } from "./useTerminalWidth.ts";
 import { type UsageTotals } from "../engine/events.ts";
 import type { ZdrState } from "./useZdrShield.ts";
+import type { TeeState } from "./useTeeShield.ts";
 
 // OpenRouter ZDR shield: a colored "⛉ ZDR" segment summarizing the selected model's
 // zero-data-retention posture. Dim "⛉ ZDR?" while loading or when the posture is
@@ -16,6 +17,17 @@ function ZdrBadge({ zdr }: { zdr?: ZdrState }) {
     return <Text color={POSTURE_COLOR[zdr.posture]}>{`${SHIELD} ZDR · `}</Text>;
   }
   return <Text color={theme.dim}>{`${SHIELD} ZDR? · `}</Text>;
+}
+
+// NEAR AI TEE shield: a colored "⛉ TEE" segment summarizing whether the selected
+// model's confidential-inference enclave attested successfully. Dim "⛉ TEE?" while
+// loading or when unknown (no key / fetch error); nothing for non-NEAR models.
+function TeeBadge({ tee }: { tee?: TeeState }) {
+  if (!tee || tee.kind === "hidden") return null;
+  if (tee.kind === "ready") {
+    return <Text color={POSTURE_COLOR[tee.posture]}>{`${SHIELD} TEE · `}</Text>;
+  }
+  return <Text color={theme.dim}>{`${SHIELD} TEE? · `}</Text>;
 }
 
 // Compact token count: 100, 1k, 1m, 1b — one decimal place above 1k, trimmed of
@@ -73,6 +85,7 @@ export function StatusBar(props: {
   lastTurn?: UsageTotals;
   custom?: string; // settings-driven status line; overrides the default when set
   zdr?: ZdrState; // OpenRouter ZDR posture for the selected model (default line only)
+  tee?: TeeState; // NEAR AI TEE attestation posture for the selected model (default line only)
 }) {
   // Stay clear of the right edge (parent paddingX={1} plus a 2-col safety gap) so
   // the line never reaches the final column and the terminal never reflows it.
@@ -95,6 +108,7 @@ export function StatusBar(props: {
     <Box marginTop={1} width={width}>
       <Text wrap="truncate-end">
         <ZdrBadge zdr={props.zdr} />
+        <TeeBadge tee={props.tee} />
         <Text color={theme.accent}>⚓ privateer</Text>
         {diag ? <Text color={theme.dim}>{` [${diag}]`}</Text> : null}
         <Text color={theme.dim}> (shift+tab to cycle)</Text>

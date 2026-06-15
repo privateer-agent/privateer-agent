@@ -27,6 +27,7 @@ export const Config = z.object({
       anthropic: ProviderConfig.optional(),
       openai: ProviderConfig.optional(),
       ollama: ProviderConfig.optional(),
+      nearai: ProviderConfig.optional(),
     })
     .default({}),
   // Bash command prefixes that are auto-approved (e.g. "git status", "ls").
@@ -81,5 +82,5 @@ export const Config = z.object({
   .catchall(z.unknown());
 export type Config = z.infer<typeof Config>;
 
-export const KNOWN_PROVIDERS = ["openrouter", "anthropic", "openai", "ollama"] as const;
+export const KNOWN_PROVIDERS = ["openrouter", "anthropic", "openai", "ollama", "nearai"] as const;
 export type ProviderName = (typeof KNOWN_PROVIDERS)[number];

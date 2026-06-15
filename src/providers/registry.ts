@@ -5,6 +5,13 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createOllama } from "ollama-ai-provider-v2";
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
 
+// NEAR AI Cloud's OpenAI-compatible gateway. Every model behind it runs inside a
+// Trusted Execution Environment (TEE), so requests are confidential and each one
+// can be cryptographically attested (see ./attestation.ts). It only implements the
+// Chat Completions API, so the factory below pins `.chat()` rather than the SDK's
+// default Responses transport, and supplies this base when the user hasn't set one.
+export const NEARAI_BASE_URL = "https://cloud-api.near.ai/v1";
+
 // Each factory turns provider credentials + a model id into an AI SDK LanguageModel.
 // This is the single seam that makes Privateer provider-agnostic: the agent loop,
 // tools, and UI never know or care which provider is behind the model.
@@ -16,6 +23,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   anthropic: true,
   openai: true,
   ollama: false,
+  nearai: true,
 };
 
 const FACTORIES: Record<ProviderName, Factory> = {
@@ -32,6 +40,10 @@ const FACTORIES: Record<ProviderName, Factory> = {
     createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   ollama: (cfg, modelId) =>
     createOllama({ baseURL: cfg.baseURL })(modelId),
+  nearai: (cfg, modelId) =>
+    // OpenAI-compatible, but Chat-Completions-only — `.chat()` avoids the SDK's
+    // default Responses transport, which NEAR's TEE endpoints don't implement.
+    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? NEARAI_BASE_URL }).chat(modelId),
 };
 
 export function providerRequiresKey(name: ProviderName): boolean {

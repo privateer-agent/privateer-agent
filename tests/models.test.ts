@@ -72,6 +72,21 @@ test("ollama listing reads local tags off the configured base URL", async () => 
   assert.match(calls[0].url, /localhost:11434\/api\/tags$/);
 });
 
+test("nearai listing hits the OpenAI-compatible models endpoint with a bearer token", async () => {
+  const calls = mockFetch({ data: [{ id: "Qwen/Qwen3.5-122B" }, { id: "zai-org/GLM-5.1-FP8" }] });
+  const models = await listModels("nearai", { apiKey: "near-key" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["Qwen/Qwen3.5-122B", "zai-org/GLM-5.1-FP8"],
+  );
+  assert.match(calls[0].url, /cloud-api\.near\.ai\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer near-key");
+});
+
+test("nearai listing requires a key", async () => {
+  await assert.rejects(() => listModels("nearai", {}), /no API key/);
+});
+
 test("a non-OK response throws with the status", async () => {
   mockFetch({ error: "bad key" }, 401);
   await assert.rejects(() => listModels("anthropic", { apiKey: "nope" }), /401/);

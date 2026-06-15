@@ -22,7 +22,14 @@ export function collectSecrets(providers?: Record<string, { apiKey?: string } | 
     if (v && v.trim().length >= 8) out.add(v.trim());
   };
   if (providers) for (const p of Object.values(providers)) add(p?.apiKey);
-  for (const k of ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]) add(process.env[k]);
+  for (const k of [
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "NEAR_AI_API_KEY",
+    "NEARAI_API_KEY",
+  ])
+    add(process.env[k]);
   return [...out];
 }
 

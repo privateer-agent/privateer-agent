@@ -77,6 +77,7 @@ function applyEnv(cfg: ConfigT): ConfigT {
   set("anthropic", "apiKey", process.env.ANTHROPIC_API_KEY);
   set("openai", "apiKey", process.env.OPENAI_API_KEY);
   set("ollama", "baseURL", process.env.OLLAMA_BASE_URL);
+  set("nearai", "apiKey", process.env.NEAR_AI_API_KEY ?? process.env.NEARAI_API_KEY);
   return cfg;
 }
 

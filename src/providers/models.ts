@@ -1,4 +1,5 @@
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
+import { NEARAI_BASE_URL } from "./registry.ts";
 
 // A model offered by a provider, as surfaced in the picker. `id` is the bare model
 // id (no "provider:" prefix); `label` is an optional human-friendly name.
@@ -19,6 +20,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   openai: "https://api.openai.com/v1",
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://localhost:11434/api",
+  nearai: NEARAI_BASE_URL,
 };
 
 function baseFor(name: ProviderName, cfg: ProviderConfig): string {
@@ -90,6 +92,17 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
         models?: { name: string }[];
       };
       return (json.models ?? []).map((m) => ({ id: m.name }));
+    }
+    case "nearai": {
+      // OpenAI-compatible model list. Every NEAR model runs in a TEE, so there's
+      // no per-model capability to surface here beyond the id itself.
+      if (!cfg.apiKey) throw new Error("no API key");
+      const json = (await getJson(`${base}/models`, {
+        authorization: `Bearer ${cfg.apiKey}`,
+      })) as { data?: { id: string }[] };
+      return (json.data ?? [])
+        .map((m) => ({ id: m.id }))
+        .sort((a, b) => a.id.localeCompare(b.id));
     }
   }
 }

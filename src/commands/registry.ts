@@ -32,6 +32,8 @@ export type CommandResult =
   | { type: "toggleVim" }
   // Toggle OpenRouter Zero-Data-Retention enforcement (pins requests to ZDR endpoints).
   | { type: "toggleZdr" }
+  // Fetch + display the NEAR AI TEE attestation for the current model (resolved by the App).
+  | { type: "verify" }
   // Toggle full vs truncated tool output in the transcript.
   | { type: "toggleVerbose" }
   // Switch the active output style (persona); null resets to default.
@@ -359,6 +361,33 @@ const COMMANDS: CommandDef[] = [
         };
       }
       return { type: "toggleZdr" };
+    },
+  },
+  {
+    name: "verify",
+    summary: "show the NEAR AI TEE attestation proving the current model runs privately",
+    run: (_args, ctx) => {
+      let provider = "";
+      try {
+        ({ provider } = parseModelSpec(ctx.modelSpec));
+      } catch {
+        /* malformed model spec → handled below */
+      }
+      if (provider !== "nearai") {
+        return {
+          type: "notice",
+          tone: "error",
+          text: "/verify attests NEAR AI models. Switch to a nearai:* model with /model first.",
+        };
+      }
+      if (!ctx.config.providers.nearai?.apiKey) {
+        return {
+          type: "notice",
+          tone: "error",
+          text: "No NEAR AI key. Add one with /login (or set NEAR_AI_API_KEY) to fetch an attestation.",
+        };
+      }
+      return { type: "verify" };
     },
   },
   {

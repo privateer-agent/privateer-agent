@@ -24,6 +24,7 @@ const HOST_LABELS: Record<string, string> = {
   "openrouter.ai": "OpenRouter",
   "api.anthropic.com": "Anthropic",
   "api.openai.com": "OpenAI",
+  "cloud-api.near.ai": "NEAR AI",
 };
 
 // Pull structured fields off an unknown error without trusting any one shape.

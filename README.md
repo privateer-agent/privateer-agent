@@ -14,13 +14,13 @@
   </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
-  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Ollama-5b8def" alt="Providers" />
+  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Ollama%20·%20NEAR%20AI-5b8def" alt="Providers" />
   <img src="https://img.shields.io/badge/built%20on-Vercel%20AI%20SDK-black" alt="Vercel AI SDK" />
 </p>
 
-Switch between **OpenRouter**, **Anthropic**, **OpenAI**, and local **Ollama** with one
-command. Built on the Vercel AI SDK, so tool-calling and streaming work identically across
-every provider — no model lock-in, no separate code paths.
+Switch between **OpenRouter**, **Anthropic**, **OpenAI**, local **Ollama**, and **NEAR AI**
+(private, attestable inference) with one command. Built on the Vercel AI SDK, so tool-calling
+and streaming work identically across every provider — no model lock-in, no separate code paths.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="Privateer running in the terminal" width="820" />
@@ -49,6 +49,10 @@ every provider — no model lock-in, no separate code paths.
   lifecycle **hooks**, and **custom sub-agents**
 - Background shells, bounded parallel sub-agents, thinking display, structured compaction,
   and image attachment for vision-capable models
+- **Zero-Data-Retention surfacing** for OpenRouter: a status-bar shield colors the selected
+  model's retention posture, and `/zdr` pins routing to zero-retention endpoints
+- **Private, verifiable inference** via NEAR AI: every model runs in a TEE, a `⛉ TEE` status
+  shield reflects the live attestation, and `/verify` fetches the cryptographic proof
 
 ## Quickstart
 
@@ -64,7 +68,7 @@ First run walks you through picking a provider and default model. From there, ju
 
 ## Contents
 
-- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Model routing](#model-routing) · [Usage](#usage)
+- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Model routing](#model-routing) · [Data retention (ZDR)](#data-retention-zdr) · [Private inference (NEAR AI)](#private-inference-near-ai) · [Usage](#usage)
 - [The prompt](#the-prompt) · [Slash commands](#slash-commands) · [Tools](#tools)
 - [Customize & extend](#customize--extend) · [Permission modes](#permission-modes) · [Project context](#project-context)
 - [Develop](#develop) · [Caveats](#caveats) · [Docs](#docs) · [License](#license)
@@ -100,6 +104,7 @@ export OPENROUTER_API_KEY=sk-or-...      # gateway to ~everything
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
 export OLLAMA_BASE_URL=http://localhost:11434/api   # optional; defaults to this
+export NEAR_AI_API_KEY=...               # private TEE inference (cloud.near.ai)
 ```
 
 **Config file** — `~/.privateer/config.json` (global) and/or `./.privateer/config.json` (per project):
@@ -174,6 +179,65 @@ auto-selects a capable model from a configured provider. Set the route explicitl
 control exactly which model is used, or `"auto": false` to disable it (you'll get a
 one-line warning when nothing can handle the modality).
 
+## Data retention (ZDR)
+
+When you route through **OpenRouter**, where your prompts end up depends on which upstream
+endpoint serves the request — some retain data, some don't. Privateer surfaces that for the
+**selected model** so you can see the posture before you send, and optionally enforce it.
+
+**The status-bar shield.** A `⛉ ZDR` badge sits in the status line, colored against the
+model you have selected:
+
+| Badge | Meaning |
+|---|---|
+| 🟢 `⛉ ZDR` | The model has a zero-retention endpoint **and** enforcement is on — the request is pinned to it, so prompts can't be retained. |
+| 🟡 `⛉ ZDR` | A zero-retention endpoint exists, but enforcement is off — a request *may* still land on an endpoint that retains prompts. |
+| 🔴 `⛉ ZDR` | No zero-retention endpoint for this model, or it's blocked by your account's privacy settings — under enforcement the request is rejected outright. |
+| `⛉ ZDR?` (dim) | Posture unknown — no OpenRouter key yet, still loading, or the lookup failed. |
+
+The badge only appears for OpenRouter models; other providers show nothing. The posture is
+derived from two authenticated OpenRouter endpoints — `/endpoints/zdr` (models with at least
+one zero-retention endpoint) and `/models/user` (models your account's privacy settings
+actually permit) — fetched once per account and re-evaluated synchronously as you switch
+models. The same colors annotate every row in the `/model` picker, with a legend explaining
+them.
+
+**Enforcement.** Run **`/zdr`** to toggle enforcement (persisted as
+`providers.openrouter.enforceZdr`). With it on, Privateer pins routing to zero-retention
+endpoints (`provider.zdr` on every request), so yellow models go green — and any model
+*without* a zero-retention endpoint is rejected rather than silently retained. Toggle it off
+to let OpenRouter route freely. Enforcement applies to OpenRouter only; add an OpenRouter key
+with `/login` first.
+
+## Private inference (NEAR AI)
+
+**NEAR AI Cloud** runs every model inside a **Trusted Execution Environment** — an Intel TDX
+confidential VM paired with an NVIDIA confidential-computing GPU. Your prompts are encrypted
+all the way into the enclave (TLS terminates *inside* the TEE, not at a load balancer), so
+the model's inputs, weights, and outputs are invisible to the infrastructure provider, the
+model provider, and NEAR itself. And it's not "trust us": each request can produce a
+**cryptographic attestation** proving the inference happened on genuine TEE hardware, signed
+by a key that never leaves the enclave and bound to a nonce you supply.
+
+It's a drop-in OpenAI-compatible provider — pick a `nearai:*` model with `/model` (e.g.
+`nearai:zai-org/GLM-5.1-FP8`) and everything else works as usual.
+
+**The status-bar shield.** A `⛉ TEE` badge appears whenever a NEAR AI model is selected,
+colored by the live attestation for that model:
+
+| Badge | Meaning |
+|---|---|
+| 🟢 `⛉ TEE` | A fresh attestation came back bound to our nonce, with a TEE signing key and NVIDIA + Intel hardware evidence — confidential **and** verifiable. |
+| 🟡 `⛉ TEE` | A report returned but couldn't be fully confirmed here (missing signing key, hardware marker, or nonce echo). |
+| 🔴 `⛉ TEE` | No attestation material returned. |
+| `⛉ TEE?` (dim) | Unknown — no NEAR AI key yet, still loading, or the lookup failed. |
+
+**`/verify`.** Run it on a NEAR AI model to fetch the attestation on demand and print the
+verdict, detected hardware, the enclave's signing address, and the nonce. Privateer does a
+pragmatic freshness + presence check suited to a terminal; for full validation of the raw
+NVIDIA/Intel quote chains, take the printed report to the
+[NEAR AI Cloud Verifier](https://github.com/nearai/cloud-verifier).
+
 ## Usage
 
 ```bash
@@ -233,6 +297,8 @@ Built-ins (plus any custom commands you add):
 | `/init` `/memory` | write/show `PRIVATEER.md` |
 | `/agents` `/mcp [logout]` `/hooks` | inspect sub-agents; MCP status / clear OAuth; hooks |
 | `/output-style [name]` `/vim` `/verbose` | persona, modal editing, full tool output |
+| `/zdr` | toggle OpenRouter zero-data-retention enforcement (see [Data retention](#data-retention-zdr)) |
+| `/verify` | fetch the NEAR AI TEE attestation for the current model (see [Private inference](#private-inference-near-ai)) |
 | `/rewind` `/compact` `/clear` `/export` | restore a checkpoint, compact, clear, save transcript |
 | `/exit` | quit |
 

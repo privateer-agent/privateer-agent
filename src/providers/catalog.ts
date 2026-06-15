@@ -43,6 +43,13 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     keyHint: "runs locally — no key needed",
     baseURLDefault: "http://localhost:11434/api",
   },
+  nearai: {
+    name: "nearai",
+    label: "NEAR AI (private TEE inference)",
+    requiresKey: providerRequiresKey("nearai"),
+    defaultModel: "nearai:zai-org/GLM-5.1-FP8",
+    keyHint: "cloud.near.ai → API Keys",
+  },
 };
 
 // Provider metadata in display order.
