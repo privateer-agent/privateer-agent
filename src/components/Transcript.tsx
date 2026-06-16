@@ -76,7 +76,7 @@ export function EntryView({
             <Box marginTop={1}>
               <Text color={theme.dim}>{"  "}</Text>
               <Box flexGrow={1}>
-                <Text color={theme.dim} dimColor>
+                <Text color="white">
                   {recap}
                 </Text>
               </Box>
