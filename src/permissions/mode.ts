@@ -28,6 +28,9 @@ export function decideAuto(
   // above bypass and the allowlist so an injected command can't run silently.
   if (req.kind === "bash" && isDangerousCommand(req.detail, denylist)) return "ask";
   if (mode === "bypass") return "allow";
+  // Access outside the working directory always confirms (the user has to explicitly
+  // allow leaving cwd), even under acceptEdits or the allowlist.
+  if (req.outside) return "ask";
   // Guarded files always surface a prompt, even under acceptEdits or the allowlist.
   if (req.protected) return "ask";
   if (req.kind === "bash" && isAllowlisted(req.detail, allowlist)) return "allow";

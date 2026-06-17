@@ -3,7 +3,7 @@ import picomatch from "picomatch";
 import { tool } from "ai";
 import { z } from "zod";
 import type { ToolContext } from "./context.ts";
-import { resolveInCwd } from "./context.ts";
+import { resolveInCwd, guardScope } from "./context.ts";
 import { walkFiles } from "./walk.ts";
 
 // Pure-Node glob: walk the tree and match relative paths with picomatch. No
@@ -19,6 +19,8 @@ export function globTool(ctx: ToolContext) {
     }),
     execute: async ({ pattern, path }) => {
       const root = path ? resolveInCwd(ctx, path) : ctx.cwd;
+      const blocked = await guardScope(ctx, root, { kind: "read", title: "Search outside working directory" });
+      if (blocked) return blocked;
       try {
         if (!statSync(root).isDirectory()) return `Error: ${path} is not a directory.`;
       } catch {

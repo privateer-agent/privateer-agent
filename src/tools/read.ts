@@ -2,7 +2,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { tool } from "ai";
 import { z } from "zod";
 import type { ToolContext } from "./context.ts";
-import { resolveInCwd, displayPath } from "./context.ts";
+import { resolveInCwd, displayPath, guardScope } from "./context.ts";
 
 const MAX_LINES = 2000;
 const MAX_LINE_LEN = 2000;
@@ -19,6 +19,8 @@ export function readTool(ctx: ToolContext) {
     }),
     execute: async ({ path, offset, limit }) => {
       const abs = resolveInCwd(ctx, path);
+      const blocked = await guardScope(ctx, abs, { kind: "read", title: "Read outside working directory" });
+      if (blocked) return blocked;
       if (!existsSync(abs)) return `Error: file not found: ${displayPath(ctx, abs)}`;
       if (statSync(abs).isDirectory()) return `Error: ${displayPath(ctx, abs)} is a directory.`;
 

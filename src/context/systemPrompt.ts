@@ -131,9 +131,11 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
     `- platform: ${process.platform}`,
     `- date: ${new Date().toISOString().slice(0, 10)}`,
     `\nTreat cwd as the project scope: interpret relative paths from it and keep your ` +
-      `exploration and edits inside it by default. You may read or write outside cwd when the ` +
-      `user clearly asks (e.g. an absolute path or a sibling directory) — it's a soft boundary, ` +
-      `not a wall — but don't wander outside it on your own.`,
+      `exploration, searches, and edits inside it. The file tools are confined to cwd — a path ` +
+      `that resolves outside it (an absolute path elsewhere, a sibling directory, or a '../' ` +
+      `escape) is blocked unless the user has explicitly asked you to work there, in which case ` +
+      `they'll be prompted to approve it. Don't reach outside cwd on your own; if a task seems to ` +
+      `need a file outside it, ask the user rather than guessing.`,
   ];
 
   const git = gitStatus(opts.cwd);

@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { tool } from "ai";
 import { z } from "zod";
 import type { ToolContext } from "./context.ts";
-import { resolveInCwd, displayPath } from "./context.ts";
+import { resolveInCwd, displayPath, isOutsideScope } from "./context.ts";
 import { PermissionDeniedError } from "../permissions/gate.ts";
 import { isProtectedPath } from "../permissions/protected.ts";
 
@@ -31,12 +31,15 @@ export function saveAttachmentTool(ctx: ToolContext) {
           : `No attachment #${ref}: nothing has been attached this session.`;
       }
       const abs = resolveInCwd(ctx, path);
+      const outside = isOutsideScope(ctx, abs);
       const decision = await ctx.gate.request({
         tool: "save_attachment",
         kind: "write",
-        title: "Save attachment",
-        detail: `[#${ref}] → ${displayPath(ctx, abs)} (${entry.mediaType})`,
+        title: outside ? "Save attachment outside working directory" : "Save attachment",
+        detail: `[#${ref}] → ${outside ? abs : displayPath(ctx, abs)} (${entry.mediaType})`,
         protected: isProtectedPath(abs),
+        outside,
+        path: abs,
       });
       if (decision === "deny") throw new PermissionDeniedError("save_attachment");
 

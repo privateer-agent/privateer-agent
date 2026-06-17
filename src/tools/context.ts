@@ -1,5 +1,5 @@
-import { resolve, isAbsolute, relative } from "node:path";
-import type { PermissionGate } from "../permissions/gate.ts";
+import { resolve, isAbsolute, relative, sep } from "node:path";
+import type { PermissionGate, PermissionKind } from "../permissions/gate.ts";
 import type { TodoStore } from "./todoStore.ts";
 import type { AgentDefinition } from "../agents/loader.ts";
 import type { ProcessRegistry } from "./processRegistry.ts";
@@ -28,6 +28,16 @@ export type SubAgentRunner = (input: {
 export interface ToolContext {
   cwd: string;
   gate: PermissionGate;
+  // When true (the default), the tools confine file access to `cwd`: a path that
+  // resolves outside it (an absolute path elsewhere, or a `../` escape) is only
+  // touched after the user explicitly approves it via the gate. Set false to let the
+  // agent roam (e.g. the user launched with --no-confine / set confineToCwd:false).
+  confineToCwd?: boolean;
+  // Out-of-cwd directories the user has approved this session ("always" on an outside
+  // prompt). A shared array, also held by the gate, so an approved sibling directory
+  // isn't re-prompted on every file inside it. Paths under any of these count as
+  // in-scope.
+  allowedOutsideRoots?: string[];
   todos?: TodoStore; // session todo list, for the `todo` tool + TUI panel
   runSubAgent?: SubAgentRunner; // spawns a `task` sub-agent
   // Reports a finished `task` sub-agent's run metrics, keyed by the originating
@@ -56,4 +66,49 @@ export function resolveInCwd(ctx: ToolContext, p: string): string {
 export function displayPath(ctx: ToolContext, abs: string): string {
   const rel = relative(ctx.cwd, abs);
   return rel === "" ? "." : rel;
+}
+
+// Is `abs` the directory `root` itself, or contained within it? Uses the resolved
+// relative path so `..` escapes are caught regardless of how the path was written.
+export function isInsideDir(root: string, abs: string): boolean {
+  if (abs === root) return true;
+  const rel = relative(root, abs);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+// Does this path fall outside the agent's working-directory scope? True only when
+// confinement is on and the path is neither inside cwd nor inside a directory the
+// user already approved this session.
+export function isOutsideScope(ctx: ToolContext, abs: string): boolean {
+  if (ctx.confineToCwd === false) return false;
+  if (isInsideDir(ctx.cwd, abs)) return false;
+  return !(ctx.allowedOutsideRoots ?? []).some((root) => isInsideDir(root, abs));
+}
+
+// Gate access to a path that may sit outside cwd. Returns null when the path is in
+// scope or the user approves the out-of-scope access; returns an error string (for the
+// tool to hand back to the model) when confinement blocks it. In-scope paths never
+// prompt, so ordinary work inside cwd is untouched.
+export async function guardScope(
+  ctx: ToolContext,
+  abs: string,
+  opts: { kind: PermissionKind; title: string },
+): Promise<string | null> {
+  if (!isOutsideScope(ctx, abs)) return null;
+  const decision = await ctx.gate.request({
+    tool: opts.kind,
+    kind: opts.kind,
+    title: opts.title,
+    detail: abs,
+    path: abs,
+    outside: true,
+  });
+  if (decision === "deny") {
+    return (
+      `Error: ${abs} is outside the working directory (${ctx.cwd}). ` +
+      `By default I stay within the working directory; access here was declined. ` +
+      `Ask me explicitly to work in this location to allow it.`
+    );
+  }
+  return null;
 }

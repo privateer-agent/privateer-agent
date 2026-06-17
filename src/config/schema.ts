@@ -30,6 +30,10 @@ export const Config = z.object({
       nearai: ProviderConfig.optional(),
     })
     .default({}),
+  // Confine file access to the working directory. When true (the default), the agent
+  // reads/searches/edits only within cwd; reaching outside (an absolute path or `../`
+  // escape) requires explicit per-location approval. Set false to let it roam freely.
+  confineToCwd: z.boolean().default(true),
   // Bash command prefixes that are auto-approved (e.g. "git status", "ls").
   allowlist: z.array(z.string()).default([]),
   // Regex sources for commands that ALWAYS require confirmation, even under

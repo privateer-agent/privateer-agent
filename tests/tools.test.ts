@@ -71,20 +71,83 @@ test("bash runs a command and reports exit code", async () => {
   }
 });
 
-test("cwd is a soft anchor: relative paths resolve from it, escapes are allowed", async () => {
-  const { run, cwd, cleanup } = setup();
+test("confinement blocks reads outside cwd when the gate denies them", async () => {
+  const seen: PermissionRequest[] = [];
+  const denyGate = {
+    async request(req: PermissionRequest) {
+      seen.push(req);
+      return "deny" as const;
+    },
+  };
+  const cwd = mkdtempSync(join(tmpdir(), "privateer-test-"));
+  const tools: any = createTools({ cwd, gate: denyGate });
+  const run = (name: string, args: any) => tools[name].execute(args, { toolCallId: "t", messages: [] });
+  const outside = join(cwd, "..", `privateer-confine-${process.pid}.txt`);
+  writeFileSync(outside, "secret");
   try {
-    // A sibling file outside cwd is reachable (soft boundary, not a wall).
-    const outside = join(cwd, "..", `privateer-soft-${process.pid}.txt`);
-    writeFileSync(outside, "reachable");
-    try {
-      const out = await run("read", { path: `../${basename(outside)}` });
-      assert.match(out, /reachable/);
-    } finally {
-      rmSync(outside, { force: true });
-    }
+    const out = await run("read", { path: `../${basename(outside)}` });
+    assert.match(out, /outside the working directory/);
+    assert.equal(seen.length, 1, "outside read should prompt the gate");
+    assert.equal(seen[0].outside, true);
+    // A read inside cwd never prompts.
+    writeFileSync(join(cwd, "in.txt"), "ok");
+    const inOut = await run("read", { path: "in.txt" });
+    assert.match(inOut, /ok/);
+    assert.equal(seen.length, 1, "in-cwd read should not prompt");
   } finally {
-    cleanup();
+    rmSync(outside, { force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("confineToCwd:false lets the agent read outside cwd without prompting", async () => {
+  const seen: PermissionRequest[] = [];
+  const gate = {
+    async request(req: PermissionRequest) {
+      seen.push(req);
+      return "allow" as const;
+    },
+  };
+  const cwd = mkdtempSync(join(tmpdir(), "privateer-test-"));
+  const tools: any = createTools({ cwd, gate, confineToCwd: false });
+  const run = (name: string, args: any) => tools[name].execute(args, { toolCallId: "t", messages: [] });
+  const outside = join(cwd, "..", `privateer-roam-${process.pid}.txt`);
+  writeFileSync(outside, "reachable");
+  try {
+    const out = await run("read", { path: `../${basename(outside)}` });
+    assert.match(out, /reachable/);
+    assert.equal(seen.length, 0, "no prompt when confinement is off");
+  } finally {
+    rmSync(outside, { force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("write outside cwd is flagged outside; approved roots stop re-prompting", async () => {
+  const seen: PermissionRequest[] = [];
+  const allowedOutsideRoots: string[] = [];
+  const gate = {
+    async request(req: PermissionRequest) {
+      seen.push(req);
+      return "allow" as const;
+    },
+  };
+  const cwd = mkdtempSync(join(tmpdir(), "privateer-test-"));
+  const sibling = mkdtempSync(join(tmpdir(), "privateer-sibling-"));
+  const tools: any = createTools({ cwd, gate, allowedOutsideRoots });
+  const run = (name: string, args: any) => tools[name].execute(args, { toolCallId: "t", messages: [] });
+  try {
+    const out = await run("write", { path: join(sibling, "a.txt"), content: "hi\n" });
+    assert.match(out, /Wrote|Created/);
+    assert.equal(seen[0].outside, true);
+    assert.equal(seen[0].path, join(sibling, "a.txt"));
+    // Simulate the gate remembering the approved directory.
+    allowedOutsideRoots.push(sibling);
+    await run("write", { path: join(sibling, "b.txt"), content: "yo\n" });
+    assert.notEqual(seen[1].outside, true, "approved root should not re-flag as outside");
+  } finally {
+    rmSync(sibling, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 

@@ -6,7 +6,7 @@
 
 export type PermissionDecision = "allow" | "deny";
 
-export type PermissionKind = "write" | "edit" | "bash" | "fetch";
+export type PermissionKind = "write" | "edit" | "bash" | "fetch" | "read";
 
 export interface PermissionRequest {
   tool: string;
@@ -14,6 +14,10 @@ export interface PermissionRequest {
   title: string; // short action label, e.g. "Run command"
   detail: string; // the command, or file path + change preview
   protected?: boolean; // target is a guarded file: never auto-approve, always prompt
+  // Target resolves outside the working directory: never auto-approve (unless bypass),
+  // always prompt. `path` carries the absolute target so "always" can remember its dir.
+  outside?: boolean;
+  path?: string;
 }
 
 export interface PermissionGate {

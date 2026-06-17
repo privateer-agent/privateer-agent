@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { tool } from "ai";
 import { z } from "zod";
 import type { ToolContext } from "./context.ts";
-import { resolveInCwd, displayPath } from "./context.ts";
+import { resolveInCwd, displayPath, isOutsideScope } from "./context.ts";
 import { PermissionDeniedError } from "../permissions/gate.ts";
 import { isProtectedPath } from "../permissions/protected.ts";
 
@@ -19,12 +19,15 @@ export function writeTool(ctx: ToolContext) {
     execute: async ({ path, content }) => {
       const abs = resolveInCwd(ctx, path);
       const exists = existsSync(abs);
+      const outside = isOutsideScope(ctx, abs);
       const decision = await ctx.gate.request({
         tool: "write",
         kind: "write",
-        title: exists ? "Overwrite file" : "Create file",
-        detail: `${displayPath(ctx, abs)} (${content.split("\n").length} lines)`,
+        title: outside ? "Write outside working directory" : exists ? "Overwrite file" : "Create file",
+        detail: `${outside ? abs : displayPath(ctx, abs)} (${content.split("\n").length} lines)`,
         protected: isProtectedPath(abs),
+        outside,
+        path: abs,
       });
       if (decision === "deny") throw new PermissionDeniedError("write");
 

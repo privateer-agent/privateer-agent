@@ -40,20 +40,29 @@ test("fetch is a network read: allowed-with-prompt in plan, asks otherwise", () 
   assert.equal(decideAuto(fetchReq, "bypass", []), "allow");
 });
 
+test("outside-cwd access always prompts, except under bypass", () => {
+  const outsideReq: PermissionRequest = { ...edit, detail: "/elsewhere/a.ts", outside: true, path: "/elsewhere/a.ts" };
+  assert.equal(decideAuto(outsideReq, "acceptEdits", []), "ask"); // not auto-approved by acceptEdits
+  assert.equal(decideAuto(outsideReq, "default", []), "ask");
+  assert.equal(decideAuto(outsideReq, "bypass", []), "allow"); // bypass means no prompts
+});
+
 function makeGate(initialMode: PermissionMode, answer: AskOutcome) {
   let mode = initialMode;
   const allowlist: string[] = [];
+  const allowedOutsideRoots: string[] = [];
   let asks = 0;
   const gate = new ModeGate({
     getMode: () => mode,
     setMode: (m) => (mode = m),
     allowlist,
+    allowedOutsideRoots,
     ask: async () => {
       asks++;
       return answer;
     },
   });
-  return { gate, allowlist, asks: () => asks, mode: () => mode };
+  return { gate, allowlist, allowedOutsideRoots, asks: () => asks, mode: () => mode };
 }
 
 test("gate auto-allows in bypass without asking", async () => {
@@ -87,4 +96,14 @@ test("'always' on edit switches to acceptEdits", async () => {
   const g = makeGate("default", "always");
   assert.equal(await g.gate.request(edit), "allow");
   assert.equal(g.mode(), "acceptEdits");
+});
+
+test("'always' on outside access remembers the directory, not the edit mode", async () => {
+  const g = makeGate("default", "always");
+  const outsideReq: PermissionRequest = {
+    tool: "edit", kind: "edit", title: "Edit outside", detail: "/repo/b/a.ts", outside: true, path: "/repo/b/a.ts",
+  };
+  assert.equal(await g.gate.request(outsideReq), "allow");
+  assert.deepEqual(g.allowedOutsideRoots, ["/repo/b"]); // remembers the containing dir
+  assert.equal(g.mode(), "default"); // does NOT relax to acceptEdits
 });

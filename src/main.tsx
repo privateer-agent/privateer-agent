@@ -34,6 +34,8 @@ interface CliOptions {
   continue?: boolean;
   resume?: string;
   onboard?: boolean;
+  // Commander negatable boolean: `confine` is true by default, false with --no-confine.
+  confine?: boolean;
 }
 
 const DEFAULT_MODEL = "anthropic:claude-opus-4-8";
@@ -49,6 +51,7 @@ async function main() {
     .option("-p, --print", "print mode: run headless and write the answer to stdout")
     .option("-m, --model <provider:model>", "model to use, e.g. openrouter:anthropic/claude-opus-4.8")
     .option("-C, --cwd <dir>", "working directory")
+    .option("--no-confine", "let the agent read/edit outside the working directory without prompting")
     .option("--dangerously-skip-permissions", "auto-approve all tool actions (bypass mode)")
     .option("--no-quarter", "auto-approve all tool actions, taking no prisoners (bypass mode)")
     .option("-c, --continue", "resume the most recent session in this directory")
@@ -60,6 +63,8 @@ async function main() {
         const config = loadConfig();
         if (options.dangerouslySkipPermissions || options.quarter === false)
           config.permissionMode = "bypass";
+        // --no-confine turns off the working-directory boundary for this run.
+        if (options.confine === false) config.confineToCwd = false;
         // --resume <id> loads a specific session (the id printed on a prior exit);
         // --continue loads the most recent one.
         const resume = options.resume
@@ -73,7 +78,7 @@ async function main() {
         const modelSpec = options.model ?? resume?.modelSpec ?? config.defaultModel ?? DEFAULT_MODEL;
 
         if (options.print) {
-          await runPrint(modelSpec, promptParts.join(" ").trim());
+          await runPrint(modelSpec, promptParts.join(" ").trim(), config.confineToCwd);
           return;
         }
 
@@ -115,13 +120,13 @@ async function main() {
 }
 
 // Headless one-shot: stream the answer to stdout, surfacing tool activity on stderr.
-async function runPrint(modelSpec: string, prompt: string) {
+async function runPrint(modelSpec: string, prompt: string, confineToCwd: boolean) {
   if (!prompt) {
     process.stderr.write("No prompt provided.\n");
     process.exitCode = 1;
     return;
   }
-  const session = createSession({ config: loadConfig(), modelSpec, cwd: process.cwd() });
+  const session = createSession({ config: loadConfig(), modelSpec, cwd: process.cwd(), confineToCwd });
   for await (const ev of session.engine.send(prompt)) {
     switch (ev.type) {
       case "text":

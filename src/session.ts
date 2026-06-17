@@ -21,6 +21,11 @@ export interface SessionOptions {
   modelSpec: string;
   cwd: string;
   gate?: PermissionGate;
+  // Confine file tools to cwd (default true). False lets the agent read/edit anywhere.
+  confineToCwd?: boolean;
+  // Out-of-cwd directories approved this session; shared with the gate so an approved
+  // location stops re-prompting. Pass the same array instance the gate holds.
+  allowedOutsideRoots?: string[];
   // Active output style name (persona); resolved against .privateer/output-styles.
   outputStyle?: string;
   // When true, the system prompt instructs the model to plan, not implement.
@@ -54,6 +59,8 @@ export interface Session {
 export function createSession(opts: SessionOptions): Session {
   const resolved = resolveModel(opts.modelSpec, opts.config);
   const gate = opts.gate ?? autoApproveGate;
+  const confineToCwd = opts.confineToCwd ?? true;
+  const allowedOutsideRoots = opts.allowedOutsideRoots ?? [];
   const todos = new TodoStore();
   const attachments = opts.attachments ?? new AttachmentStore();
   const cache = isAnthropicFamily(resolved.provider, resolved.modelId);
@@ -82,8 +89,8 @@ export function createSession(opts: SessionOptions): Session {
       ? buildAgentPrompt({ cwd: opts.cwd, model: opts.modelSpec, description, instructions: agent.prompt })
       : buildSubAgentPrompt({ cwd: opts.cwd, model: opts.modelSpec, description });
     const tools = agent
-      ? createToolSubset({ cwd: opts.cwd, gate }, agent.tools)
-      : createReadOnlyTools({ cwd: opts.cwd, gate: autoApproveGate });
+      ? createToolSubset({ cwd: opts.cwd, gate, confineToCwd, allowedOutsideRoots }, agent.tools)
+      : createReadOnlyTools({ cwd: opts.cwd, gate: autoApproveGate, confineToCwd, allowedOutsideRoots });
 
     const child = new QueryEngine({
       routes: singleRouteSet(agent?.model ?? opts.modelSpec, model, childCache),
@@ -112,6 +119,8 @@ export function createSession(opts: SessionOptions): Session {
       ...createTools({
         cwd: opts.cwd,
         gate,
+        confineToCwd,
+        allowedOutsideRoots,
         todos,
         runSubAgent,
         onSubAgentMetrics: opts.onSubAgentMetrics,

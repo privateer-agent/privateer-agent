@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import type { PermissionMode } from "../config/schema.ts";
 import type { PermissionGate, PermissionRequest, PermissionDecision } from "./gate.ts";
 import { decideAuto } from "./mode.ts";
@@ -13,6 +14,10 @@ export interface ModeGateDeps {
   setMode: (mode: PermissionMode) => void;
   allowlist: string[]; // session-scoped, mutated in place on "always"
   denylist?: string[]; // dangerous-command patterns that always require a prompt
+  // Out-of-cwd directories approved this session ("always" on an outside prompt),
+  // mutated in place. Shared with the tool context so approved locations stop
+  // re-prompting. The same array instance must be handed to the tools.
+  allowedOutsideRoots?: string[];
   ask: Asker;
 }
 
@@ -34,7 +39,14 @@ export class ModeGate implements PermissionGate {
     const outcome = await this.deps.ask(req);
     if (outcome === "deny") return "deny";
     if (outcome === "always" && !dangerous) {
-      if (req.kind === "bash") {
+      if (req.outside) {
+        // Remember the approved location's directory, so further access under it (a
+        // sibling repo the user pointed us at) doesn't re-prompt. Deliberately does
+        // NOT relax the edit mode — leaving cwd stays a per-location decision.
+        const roots = this.deps.allowedOutsideRoots;
+        const root = req.path ? dirname(req.path) : undefined;
+        if (roots && root && !roots.includes(root)) roots.push(root);
+      } else if (req.kind === "bash") {
         if (!this.deps.allowlist.includes(req.detail)) this.deps.allowlist.push(req.detail);
       } else {
         this.deps.setMode("acceptEdits");

@@ -192,6 +192,10 @@ export function App({
     modeRef.current = mode;
   }, [mode]);
   const allowlistRef = useRef<string[]>([...config.allowlist]);
+  // Out-of-cwd directories the user approves this session ("always" on an outside
+  // prompt). Shared between the gate (which appends) and the tools (which read), so an
+  // approved sibling location stops re-prompting.
+  const allowedOutsideRootsRef = useRef<string[]>([]);
 
   // Custom slash commands from .privateer/commands, plus the merged autocomplete list.
   const customCommands = useMemo(() => loadCustomCommands(cwd), [cwd]);
@@ -205,6 +209,7 @@ export function App({
         getMode: () => modeRef.current,
         setMode: (m) => setMode(m),
         allowlist: allowlistRef.current,
+        allowedOutsideRoots: allowedOutsideRootsRef.current,
         denylist: config.denylist,
         ask: (req) => new Promise<AskOutcome>((resolve) => setPending({ req, resolve })),
       }),
@@ -222,6 +227,8 @@ export function App({
         modelSpec,
         cwd,
         gate,
+        confineToCwd: config.confineToCwd,
+        allowedOutsideRoots: allowedOutsideRootsRef.current,
         outputStyle: outputStyle ?? undefined,
         planMode: mode === "plan",
         checkpoints: checkpointsRef.current,

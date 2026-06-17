@@ -4,7 +4,7 @@ import picomatch from "picomatch";
 import { tool } from "ai";
 import { z } from "zod";
 import type { ToolContext } from "./context.ts";
-import { resolveInCwd } from "./context.ts";
+import { resolveInCwd, guardScope } from "./context.ts";
 import { walkFiles } from "./walk.ts";
 
 const MAX_MATCHES = 200;
@@ -40,6 +40,8 @@ export function grepTool(ctx: ToolContext) {
       }
 
       const root = path ? resolveInCwd(ctx, path) : ctx.cwd;
+      const blocked = await guardScope(ctx, root, { kind: "read", title: "Search outside working directory" });
+      if (blocked) return blocked;
       let files: string[];
       let baseDir: string;
       try {

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tool } from "ai";
 import { z } from "zod";
 import type { ToolContext } from "./context.ts";
-import { resolveInCwd, displayPath } from "./context.ts";
+import { resolveInCwd, displayPath, isOutsideScope } from "./context.ts";
 import { PermissionDeniedError } from "../permissions/gate.ts";
 import { isProtectedPath } from "../permissions/protected.ts";
 
@@ -47,12 +47,15 @@ export function editTool(ctx: ToolContext) {
 
       const removed = old_string.split("\n").length;
       const added = new_string.split("\n").length;
+      const outside = isOutsideScope(ctx, abs);
       const decision = await ctx.gate.request({
         tool: "edit",
         kind: "edit",
-        title: "Edit file",
-        detail: `${displayPath(ctx, abs)} (${replace_all ? occ + "×, " : ""}-${removed} +${added})`,
+        title: outside ? "Edit outside working directory" : "Edit file",
+        detail: `${outside ? abs : displayPath(ctx, abs)} (${replace_all ? occ + "×, " : ""}-${removed} +${added})`,
         protected: isProtectedPath(abs),
+        outside,
+        path: abs,
       });
       if (decision === "deny") throw new PermissionDeniedError("edit");
 
