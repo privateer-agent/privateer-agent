@@ -227,10 +227,16 @@ export async function authedFetch(input: Parameters<typeof fetch>[0], init: Requ
   if (!creds) throw new Error("Not logged in to Privateer. Run /login.");
 
   const bodyBuf = init.body; // AI SDK passes a string body; safe to resend.
-  const withAuth = (token: string): RequestInit => ({
-    ...init,
-    headers: { ...(init.headers as Record<string, string>), Authorization: `Bearer ${token}` },
-  });
+  // Use a Headers object and `.set` (case-insensitive) so OUR bearer replaces any
+  // Authorization the caller already set. The AI SDK lowercases its headers and
+  // sends `authorization: Bearer <placeholder apiKey>`; a plain spread that adds an
+  // `Authorization` key would leave BOTH, which undici combines into
+  // "Bearer placeholder, Bearer <real>" → the server rejects it as Invalid token.
+  const withAuth = (token: string): RequestInit => {
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+    return { ...init, headers };
+  };
 
   let res = await fetch(input, withAuth(creds.accessToken));
   if (res.status === 401) {

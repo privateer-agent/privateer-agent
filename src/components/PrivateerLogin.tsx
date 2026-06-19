@@ -87,18 +87,18 @@ export function PrivateerLogin({
               </Text>
             ) : null}
           </Text>
-          <Text color={theme.dim}>3. Enter this code:</Text>
+          <Text color={theme.dim}>3. Enter this code (or just open the link above):</Text>
           <Box marginY={1} borderStyle="round" borderColor={theme.accent} paddingX={2}>
             <Text bold color={theme.accent}>
               {code.user_code}
             </Text>
           </Box>
+          {/* Deliberately NOT an animated spinner here: ink-spinner re-renders the
+              whole frame ~12×/s, which wipes any text selection on the code above
+              and makes it almost impossible to copy. A static line keeps the code
+              selectable; this view only re-renders on a real state change. */}
           <Box>
-            <Text color={theme.accent}>
-              <Spinner type="dots" />
-            </Text>
             <Text color={theme.dim}>
-              {" "}
               Waiting for approval…{slow ? " (slowing down)" : ""}  ·  Esc to cancel
             </Text>
           </Box>
