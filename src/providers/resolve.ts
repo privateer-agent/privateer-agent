@@ -2,6 +2,13 @@ import type { LanguageModel } from "ai";
 import type { Config } from "../config/schema.ts";
 import { KNOWN_PROVIDERS, type ProviderName } from "../config/schema.ts";
 import { buildModel, providerRequiresKey } from "./registry.ts";
+import { hasCredentials } from "../auth/privateer.ts";
+
+// Privateer's readiness is session-based, not key-based: ready iff logged in.
+function providerReady(name: ProviderName, cfg: { apiKey?: string }): boolean {
+  if (name === "privateer") return hasCredentials();
+  return providerRequiresKey(name) ? Boolean(cfg.apiKey) : true;
+}
 
 export interface ResolvedModel {
   spec: string; // original "provider:model" string
@@ -39,7 +46,10 @@ export function resolveModel(spec: string, config: Config): ResolvedModel {
   if (!modelId) throw new Error(`Missing model id in "${spec}".`);
 
   const cfg = config.providers[provider] ?? {};
-  if (providerRequiresKey(provider) && !cfg.apiKey) {
+  if (provider === "privateer" && !hasCredentials()) {
+    throw new Error(`Not signed in to your Privateer account. Run /login first.`);
+  }
+  if (provider !== "privateer" && providerRequiresKey(provider) && !cfg.apiKey) {
     throw new Error(
       `No API key for "${provider}". Set ${provider.toUpperCase()}_API_KEY or add it to ~/.privateer/config.json.`,
     );
@@ -52,7 +62,6 @@ export function resolveModel(spec: string, config: Config): ResolvedModel {
 export function configuredProviders(config: Config): { name: ProviderName; ready: boolean }[] {
   return KNOWN_PROVIDERS.map((name) => {
     const cfg = config.providers[name] ?? {};
-    const ready = providerRequiresKey(name) ? Boolean(cfg.apiKey) : true;
-    return { name, ready };
+    return { name, ready: providerReady(name, cfg) };
   });
 }

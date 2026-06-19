@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ProviderConfig } from "../config/schema.ts";
 import { NEARAI_BASE_URL } from "./registry.ts";
+import { authedFetch, serverBaseUrl } from "../auth/privateer.ts";
 
 // ── NEAR AI TEE attestation ──────────────────────────────────────────────────
 // Every NEAR AI Cloud model runs inside a Trusted Execution Environment (Intel TDX
@@ -89,6 +90,12 @@ export async function fetchAttestation(cfg: ProviderConfig, modelId: string): Pr
     clearTimeout(timer);
   }
 
+  return interpretReport(modelId, nonce, raw);
+}
+
+// Turn a raw NEAR attestation report into our Attestation posture, independent of
+// how it was fetched (direct nearai gateway, or via the Privateer server proxy).
+function interpretReport(modelId: string, nonce: string, raw: unknown): Attestation {
   const signingAddress = deepFindString(raw, ["signing_address", "signingAddress", "address"]);
   // Hardware evidence is detected by scanning the serialized report for the quote
   // markers each vendor uses — robust to the exact response shape.
@@ -99,6 +106,36 @@ export async function fetchAttestation(cfg: ProviderConfig, modelId: string): Pr
   const nonceEchoed = blob.includes(nonce.toLowerCase());
 
   return { model: modelId, nonce, signingAddress, nonceEchoed, hardware, raw };
+}
+
+// Fetch attestation for an account-billed `privateer:near/...` model through the
+// Privateer server proxy (the NEAR key stays server-side). The server generates
+// the nonce and returns { model, nonce, report, has* booleans }; we interpret the
+// report exactly like the direct path so /verify renders identically. `modelId`
+// is the bare id, still `near/`-prefixed (the server strips it upstream).
+export async function fetchAttestationViaServer(modelId: string): Promise<Attestation> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  try {
+    const res = await authedFetch(
+      `${serverBaseUrl()}/api/models/near/attestation?model=${encodeURIComponent(modelId)}`,
+      { signal: ac.signal },
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      const hint = body.slice(0, 200).trim();
+      throw new Error(`HTTP ${res.status} ${res.statusText}${hint ? ` — ${hint}` : ""}`);
+    }
+    const data = (await res.json()) as { nonce?: string; report?: unknown };
+    return interpretReport(modelId, data.nonce ?? "", data.report ?? {});
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`timed out after ${TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Map an attestation to a status color. GREEN: fresh report bound to our nonce with

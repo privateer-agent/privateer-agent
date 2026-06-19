@@ -50,6 +50,16 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "nearai:zai-org/GLM-5.1-FP8",
     keyHint: "cloud.near.ai → API Keys",
   },
+  privateer: {
+    name: "privateer",
+    // Default to a NEAR confidential-compute (TEE) model: it's the strongest
+    // privacy guarantee, runs through the same billed agent endpoint, and was
+    // verified to pass agent tool_calls. Switch to any listed model with /model.
+    label: "Privateer account (billed to your subscription)",
+    requiresKey: providerRequiresKey("privateer"),
+    defaultModel: "privateer:near/deepseek-ai/DeepSeek-V4-Flash",
+    keyHint: "sign in with /login — no API key needed",
+  },
 };
 
 // Provider metadata in display order.

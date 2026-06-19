@@ -238,6 +238,37 @@ pragmatic freshness + presence check suited to a terminal; for full validation o
 NVIDIA/Intel quote chains, take the printed report to the
 [NEAR AI Cloud Verifier](https://github.com/nearai/cloud-verifier).
 
+## Privateer account (billed inference) — what it sees
+
+Instead of bringing your own provider key, run **`/login`** to sign into a Privateer account
+(an app-brokered device flow — you approve a short code in the Privateer app/web, so wallet
+and email accounts work identically and no password or wallet key ever touches the terminal).
+Inference then runs on Privateer's server and is billed to your subscription.
+
+What that means for your data, precisely:
+
+- **The server proxies your prompts; it does not store them.** Like the Privateer apps, the
+  account path sends your prompt to the server, which forwards it to the model provider and
+  streams the reply back. The only thing written server-side is **billing metadata** — model
+  id, token counts, cost — never prompt or response text, and nothing is logged in plaintext.
+- **Same privacy guarantee as the apps: ZDR / TEE, not in-transit E2EE.** The server has to
+  read your prompt to run inference (true of every product, every path). The guarantee isn't
+  "nobody sees it" — it's "nobody *retains* it": OpenRouter routes are pinned to zero-retention
+  endpoints, and the account default is a **NEAR TEE** model where even the provider can't read
+  the prompt. Run **`/verify`** to cryptographically confirm the TEE.
+- **Your local transcript is plaintext on your machine.** Privateer's end-to-end encryption
+  protects data **at rest in Privateer's storage** — it does not (and cannot) encrypt the
+  conversation files this CLI keeps on your own disk under `~/.privateer/`. Treat them like any
+  local shell history.
+- **Your session token lives at `~/.privateer/credentials.json`** (`0600`). It's a scoped
+  session — not your password or keys — and it rotates on refresh with reuse detection; revoke
+  it any time from the app (**Settings → Linked terminals**) or with **`/logout`**.
+
+> **Only approve a code you generated yourself.** The login code authorizes *this* terminal to
+> spend on your account. If someone sends you a code and asks you to approve it ("paste this to
+> activate…"), **don't** — approving it hands *them* a billed session on *your* account. A code
+> you didn't just create in your own terminal is an attack, not a convenience.
+
 ## Usage
 
 ```bash

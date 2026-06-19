@@ -8,6 +8,7 @@ import { loadOutputStyles } from "../context/outputStyles.ts";
 import { loadAgents } from "../agents/loader.ts";
 import { loadHooks } from "../hooks/engine.ts";
 import { configuredProviders, parseModelSpec } from "../providers/resolve.ts";
+import { currentUser, serverBaseUrl } from "../auth/privateer.ts";
 import { effectiveTokens } from "../engine/events.ts";
 import { KNOWN_PROVIDERS } from "../config/schema.ts";
 import type { UsageTotals } from "../engine/events.ts";
@@ -49,7 +50,11 @@ export type CommandResult =
   // Clear saved OAuth credentials for one MCP server, or all when omitted.
   | { type: "mcpLogout"; server?: string }
   // Re-enter the provider/key onboarding flow.
-  | { type: "onboarding" };
+  | { type: "onboarding" }
+  // Sign in to a Privateer account (device flow) for billed inference.
+  | { type: "privateerLogin" }
+  // Sign out of the Privateer account on this terminal.
+  | { type: "privateerLogout" };
 
 export interface CommandContext {
   config: Config;
@@ -115,7 +120,17 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: "login",
-    summary: "add or change providers and API keys",
+    summary: "sign in to your Privateer account (inference billed to your subscription)",
+    run: () => ({ type: "privateerLogin" }),
+  },
+  {
+    name: "logout",
+    summary: "sign out of your Privateer account on this terminal",
+    run: () => ({ type: "privateerLogout" }),
+  },
+  {
+    name: "keys",
+    summary: "add or change provider API keys (bring your own)",
     run: () => ({ type: "onboarding" }),
   },
   {
@@ -191,6 +206,10 @@ const COMMANDS: CommandDef[] = [
       const layers = configLayers()
         .map((l) => `    ${l.present ? "✓" : "·"} ${l.label} — ${l.path}`)
         .join("\n");
+      const user = currentUser();
+      const account = user
+        ? `${user.email || user.solanaPublicKey || user.id} @ ${serverBaseUrl()}`
+        : "not signed in (use /login)";
       return {
         type: "notice",
         text:
@@ -199,6 +218,7 @@ const COMMANDS: CommandDef[] = [
           `  cwd: ${ctx.cwd}\n` +
           `  model: ${ctx.modelSpec}\n` +
           `  mode: ${ctx.mode}\n` +
+          `  account: ${account}\n` +
           `  providers: ${provs}\n` +
           `  config layers (low→high):\n${layers}`,
       };
@@ -368,19 +388,26 @@ const COMMANDS: CommandDef[] = [
     summary: "show the NEAR AI TEE attestation proving the current model runs privately",
     run: (_args, ctx) => {
       let provider = "";
+      let modelId = "";
       try {
-        ({ provider } = parseModelSpec(ctx.modelSpec));
+        ({ provider, modelId } = parseModelSpec(ctx.modelSpec));
       } catch {
         /* malformed model spec → handled below */
       }
-      if (provider !== "nearai") {
+      // NEAR models reachable two ways: BYO key (`nearai:*`) or account-billed
+      // through the Privateer server (`privateer:near/*`). Both are TEE-attestable.
+      const isNearai = provider === "nearai";
+      const isPrivateerNear = provider === "privateer" && modelId.startsWith("near/");
+      if (!isNearai && !isPrivateerNear) {
         return {
           type: "notice",
           tone: "error",
-          text: "/verify attests NEAR AI models. Switch to a nearai:* model with /model first.",
+          text: "/verify attests NEAR AI TEE models. Switch to a nearai:* or privateer:near/* model with /model first.",
         };
       }
-      if (!ctx.config.providers.nearai?.apiKey) {
+      // BYO path needs a local key; the account path uses your Privateer session
+      // (the server holds the NEAR key), so the server call surfaces any auth error.
+      if (isNearai && !ctx.config.providers.nearai?.apiKey) {
         return {
           type: "notice",
           tone: "error",
