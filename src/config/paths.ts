@@ -12,6 +12,13 @@ export function projectDir(cwd: string = process.cwd()): string {
   return join(cwd, ".privateer");
 }
 
+// Privateer-account session credentials (JWT access/refresh + user). Kept in a
+// SEPARATE file from config.json: these are session tokens, not BYO provider
+// keys, and have a different lifecycle (rotated on refresh, cleared on logout).
+export function credentialsPath(): string {
+  return join(globalDir(), "credentials.json");
+}
+
 // Optional enterprise-managed settings file (highest precedence). Opt-in via env
 // so it stays out of the way for individuals and tests.
 export function managedSettingsPath(): string | undefined {

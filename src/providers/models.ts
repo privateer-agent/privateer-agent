@@ -1,5 +1,6 @@
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
 import { NEARAI_BASE_URL } from "./registry.ts";
+import { authedFetch, serverBaseUrl, DEFAULT_SERVER_URL } from "../auth/privateer.ts";
 
 // A model offered by a provider, as surfaced in the picker. `id` is the bare model
 // id (no "provider:" prefix); `label` is an optional human-friendly name.
@@ -21,6 +22,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://localhost:11434/api",
   nearai: NEARAI_BASE_URL,
+  privateer: DEFAULT_SERVER_URL, // unused by the privateer branch (authed endpoint), kept for type completeness
 };
 
 function baseFor(name: ProviderName, cfg: ProviderConfig): string {
@@ -102,6 +104,19 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
       })) as { data?: { id: string }[] };
       return (json.data ?? [])
         .map((m) => ({ id: m.id }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+    case "privateer": {
+      // The server proxies OpenRouter and bills to the account; list what the
+      // account can use via the authed models endpoint (the JWT is injected by
+      // authedFetch — no API key ever touches the client).
+      const res = await authedFetch(`${serverBaseUrl()}/api/models/openrouter`);
+      if (!res.ok) throw new Error(`HTTP ${res.status} listing account models`);
+      const json = (await res.json()) as {
+        models?: { id: string; name?: string; inputModalities?: string[]; architecture?: { input_modalities?: string[] } }[];
+      };
+      return (json.models ?? [])
+        .map((m) => ({ id: m.id, label: m.name, inputModalities: m.inputModalities ?? m.architecture?.input_modalities }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
   }

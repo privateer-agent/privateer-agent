@@ -14,7 +14,7 @@ import { ModeHint } from "./ModeHint.tsx";
 import { useZdrShield } from "./useZdrShield.ts";
 import { useTeeShield } from "./useTeeShield.ts";
 import { parseModelSpec } from "../providers/resolve.ts";
-import { fetchAttestation, teePosture } from "../providers/attestation.ts";
+import { fetchAttestation, fetchAttestationViaServer, teePosture } from "../providers/attestation.ts";
 import { RewindPicker } from "./RewindPicker.tsx";
 import { SessionPicker } from "./SessionPicker.tsx";
 import { CheckpointStore, type RewindScope } from "../memory/checkpoints.ts";
@@ -38,6 +38,7 @@ import { runCommand, commandList } from "../commands/registry.ts";
 import { isSlashCommand } from "./promptModel.ts";
 import { loadCustomCommands } from "../commands/custom.ts";
 import { saveGlobalConfig } from "../config/load.ts";
+import { logout as privateerLogout } from "../auth/privateer.ts";
 import { ModeGate, type AskOutcome } from "../permissions/uiGate.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import {
@@ -92,12 +93,14 @@ export function App({
   cwd,
   resume,
   onLogin,
+  onPrivateerLogin,
 }: {
   model: string;
   config: Config;
   cwd: string;
   resume?: SessionData | null;
   onLogin?: () => void;
+  onPrivateerLogin?: () => void;
 }) {
   // Config is state, not just a prop, so runtime toggles that change request
   // behavior (e.g. /zdr) can update it and trigger a session rebuild.
@@ -491,10 +494,15 @@ export function App({
         break;
       }
       case "verify": {
-        const cfg = config.providers.nearai ?? {};
-        const { modelId } = parseModelSpec(modelSpec);
+        const { provider, modelId } = parseModelSpec(modelSpec);
         append({ kind: "notice", text: `Fetching TEE attestation for ${modelId}…` });
-        void fetchAttestation(cfg, modelId)
+        // Account-billed NEAR models attest through the Privateer server proxy
+        // (NEAR key stays server-side); BYO nearai:* hits the gateway directly.
+        const attest =
+          provider === "privateer"
+            ? fetchAttestationViaServer(modelId)
+            : fetchAttestation(config.providers.nearai ?? {}, modelId);
+        void attest
           .then((att) => {
             const verdict =
               teePosture(att) === "green"
@@ -612,6 +620,18 @@ export function App({
       }
       case "onboarding":
         onLogin?.();
+        break;
+      case "privateerLogin":
+        onPrivateerLogin?.();
+        break;
+      case "privateerLogout":
+        // logout() revokes this terminal's session server-side then clears local
+        // creds; fire-and-forget so the dispatch stays sync, report when done.
+        privateerLogout()
+          .then(() => append({ kind: "notice", text: "Signed out of your Privateer account on this terminal." }))
+          .catch((err) =>
+            append({ kind: "notice", tone: "error", text: `Sign-out problem: ${err instanceof Error ? err.message : String(err)}` }),
+          );
         break;
       case "notice":
         append({ kind: "notice", text: res.text, tone: res.tone });

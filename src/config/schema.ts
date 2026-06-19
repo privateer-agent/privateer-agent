@@ -28,6 +28,10 @@ export const Config = z.object({
       openai: ProviderConfig.optional(),
       ollama: ProviderConfig.optional(),
       nearai: ProviderConfig.optional(),
+      // Privateer account: inference billed to the user's account, no API key.
+      // Auth lives in ~/.privateer/credentials.json (see src/auth/privateer.ts),
+      // not here; this entry only carries an optional server baseURL override.
+      privateer: ProviderConfig.optional(),
     })
     .default({}),
   // Confine file access to the working directory. When true (the default), the agent
@@ -86,5 +90,5 @@ export const Config = z.object({
   .catchall(z.unknown());
 export type Config = z.infer<typeof Config>;
 
-export const KNOWN_PROVIDERS = ["openrouter", "anthropic", "openai", "ollama", "nearai"] as const;
+export const KNOWN_PROVIDERS = ["openrouter", "anthropic", "openai", "ollama", "nearai", "privateer"] as const;
 export type ProviderName = (typeof KNOWN_PROVIDERS)[number];
