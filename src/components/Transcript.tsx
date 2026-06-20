@@ -4,7 +4,35 @@ import type { Entry, Row, ToolEntry } from "./types.ts";
 import { ToolCallView } from "./ToolCallView.tsx";
 import { AgentGroupView } from "./AgentGroupView.tsx";
 import { theme } from "./theme.ts";
+import { Markdown } from "./Markdown.tsx";
 import { BULLET, WELCOME } from "./figures.ts";
+
+// Visual height of `text` once wrapped to `cols` columns — `\n`-lines plus the
+// extra rows each long line wraps onto.
+export function visualRows(text: string, cols: number): number {
+  let rows = 0;
+  for (const ln of text.split("\n")) rows += Math.max(1, Math.ceil(ln.length / Math.max(1, cols)));
+  return rows;
+}
+
+// Trim a still-streaming block to roughly its last `maxRows` wrapped rows so the live
+// region stays within the terminal. The hidden prefix isn't lost: the full text is
+// what gets committed to <Static> when the turn ends, so it lands intact in
+// scrollback. Returns the text unchanged when it already fits.
+export function clampStreamingText(text: string, maxRows: number, cols: number): string {
+  const lines = text.split("\n");
+  const width = Math.max(1, cols);
+  let rows = 0;
+  let i = lines.length;
+  while (i > 0) {
+    const r = Math.max(1, Math.ceil(lines[i - 1].length / width));
+    if (rows + r > maxRows - 1) break; // reserve one row for the "…hidden" marker
+    rows += r;
+    i--;
+  }
+  if (i === 0) return text;
+  return `⋮ ${i} earlier line${i === 1 ? "" : "s"} hidden — shown in full when complete\n${lines.slice(i).join("\n")}`;
+}
 
 // Collapse runs of two-or-more consecutive `task` tool entries (sub-agents the model
 // fanned out in one turn) into a single grouped row, leaving everything else as-is. A
@@ -69,7 +97,7 @@ export function EntryView({
           <Box>
             <Text color={theme.accent}>{BULLET} </Text>
             <Box flexGrow={1}>
-              <Text>{body}</Text>
+              <Markdown text={body} />
             </Box>
           </Box>
           {recap && (

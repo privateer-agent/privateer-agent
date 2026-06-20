@@ -33,6 +33,17 @@ export function parseModelSpec(spec: string): { provider: string; modelId: strin
   return { provider: spec.slice(0, idx).trim(), modelId: spec.slice(idx + 1).trim() };
 }
 
+// A Privateer account model is served over one of two privacy channels: NEAR's
+// confidential-compute TEE (model ids prefixed "near/", cryptographically
+// attestable) or the account's zero-data-retention OpenRouter proxy (every other
+// id, pinned to ZDR endpoints server-side). The picker and the status-bar shield
+// both surface this so the active privacy channel is always visible.
+export type PrivateerChannel = "tee" | "zdr";
+
+export function privateerChannel(modelId: string): PrivateerChannel {
+  return modelId.startsWith("near/") ? "tee" : "zdr";
+}
+
 // Turn a model spec + config into a ready-to-use AI SDK model, validating that the
 // provider is known and configured. Construction does not hit the network.
 export function resolveModel(spec: string, config: Config): ResolvedModel {

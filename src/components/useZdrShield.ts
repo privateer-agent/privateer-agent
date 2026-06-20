@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import type { Config, ProviderName } from "../config/schema.ts";
-import { parseModelSpec } from "../providers/resolve.ts";
+import { parseModelSpec, privateerChannel } from "../providers/resolve.ts";
 import { fetchZdrAccount, zdrPosture, type ZdrAccountData, type ZdrPosture } from "../providers/models.ts";
 
 // What the status-bar shield should render. Distinct from posture so we can show a
 // dim "needs a key / unknown" affordance without ever implying a colored verdict.
 export type ZdrState =
-  | { kind: "hidden" } // not OpenRouter — no badge
+  | { kind: "hidden" } // not a ZDR-backed model — no badge
   | { kind: "no-key" } // OpenRouter selected but no API key to query with
   | { kind: "loading" } // fetching the account snapshot
   | { kind: "error" } // network / timeout / HTTP failure
@@ -44,14 +44,24 @@ export function useZdrShield(modelSpec: string, config: Config): ZdrState {
     modelId = "";
   }
   const cfg = config.providers.openrouter ?? {};
-  const apiKey = provider === "openrouter" ? cfg.apiKey : undefined;
+  const isOpenRouter = provider === "openrouter";
+  // Account-billed Privateer models that aren't NEAR/TEE route through the server's
+  // ZDR-pinned OpenRouter proxy — zero retention is guaranteed server-side.
+  const isPrivateerZdr = provider === "privateer" && privateerChannel(modelId) === "zdr";
+  const apiKey = isOpenRouter ? cfg.apiKey : undefined;
   const baseURL = cfg.baseURL;
   const enforced = Boolean(cfg.enforceZdr);
 
   const [state, setState] = useState<ZdrState>({ kind: "hidden" });
 
   useEffect(() => {
-    if (provider !== "openrouter") {
+    if (isPrivateerZdr) {
+      // The proxy always pins ZDR endpoints, so the posture is green without a
+      // client-side account query (there's no OpenRouter key on this side).
+      setState({ kind: "ready", posture: "green" });
+      return;
+    }
+    if (!isOpenRouter) {
       setState({ kind: "hidden" });
       return;
     }
@@ -71,7 +81,7 @@ export function useZdrShield(modelSpec: string, config: Config): ZdrState {
     return () => {
       ignore = true;
     };
-  }, [provider, apiKey, baseURL, modelId, enforced]);
+  }, [isOpenRouter, isPrivateerZdr, apiKey, baseURL, modelId, enforced]);
 
   return state;
 }

@@ -1,13 +1,19 @@
 import { useEffect, useState } from "react";
 import type { Config } from "../config/schema.ts";
-import { parseModelSpec } from "../providers/resolve.ts";
-import { fetchAttestation, teePosture, type Attestation, type TeePosture } from "../providers/attestation.ts";
+import { parseModelSpec, privateerChannel } from "../providers/resolve.ts";
+import {
+  fetchAttestation,
+  fetchAttestationViaServer,
+  teePosture,
+  type Attestation,
+  type TeePosture,
+} from "../providers/attestation.ts";
 
-// What the status-bar shield should render for NEAR AI's TEE attestation. Distinct
-// from posture so a dim "needs a key / unknown" affordance never implies a verdict.
+// What the status-bar shield should render for a TEE attestation. Distinct from
+// posture so a dim "needs a key / unknown" affordance never implies a verdict.
 export type TeeState =
-  | { kind: "hidden" } // not a NEAR AI model — no badge
-  | { kind: "no-key" } // NEAR AI selected but no API key to attest with
+  | { kind: "hidden" } // not a TEE-backed model — no badge
+  | { kind: "no-key" } // NEAR AI (BYO key) selected but no API key to attest with
   | { kind: "loading" } // fetching the attestation report
   | { kind: "error" } // network / timeout / HTTP failure
   | { kind: "ready"; posture: TeePosture; attestation: Attestation };
@@ -31,8 +37,26 @@ function loadAttestation(apiKey: string, baseURL: string | undefined, modelId: s
   return pending;
 }
 
-// Resolve the TEE shield state for the currently selected model. Only NEAR AI
-// models trigger a fetch; everything else returns "hidden" before touching the network.
+// Account-billed `privateer:near/*` models attest through the Privateer server
+// proxy (the NEAR key stays server-side), so they cache by model id alone.
+const serverCache = new Map<string, Promise<Attestation>>();
+
+function loadServerAttestation(modelId: string): Promise<Attestation> {
+  let pending = serverCache.get(modelId);
+  if (!pending) {
+    pending = fetchAttestationViaServer(modelId).catch((err) => {
+      serverCache.delete(modelId);
+      throw err;
+    });
+    serverCache.set(modelId, pending);
+  }
+  return pending;
+}
+
+// Resolve the TEE shield state for the currently selected model. Two paths trigger
+// a fetch: BYO `nearai:*` models (direct gateway, needs a key) and account-billed
+// `privateer:near/*` models (server proxy, uses the logged-in session). Everything
+// else returns "hidden" before touching the network.
 export function useTeeShield(modelSpec: string, config: Config): TeeState {
   let provider = "";
   let modelId = "";
@@ -43,23 +67,28 @@ export function useTeeShield(modelSpec: string, config: Config): TeeState {
     modelId = "";
   }
   const cfg = config.providers.nearai ?? {};
-  const apiKey = provider === "nearai" ? cfg.apiKey : undefined;
+  const isNearai = provider === "nearai";
+  const isPrivateerTee = provider === "privateer" && privateerChannel(modelId) === "tee";
+  const apiKey = isNearai ? cfg.apiKey : undefined;
   const baseURL = cfg.baseURL;
 
   const [state, setState] = useState<TeeState>({ kind: "hidden" });
 
   useEffect(() => {
-    if (provider !== "nearai") {
+    if (!isNearai && !isPrivateerTee) {
       setState({ kind: "hidden" });
       return;
     }
-    if (!apiKey) {
+    if (isNearai && !apiKey) {
       setState({ kind: "no-key" });
       return;
     }
     let ignore = false;
     setState({ kind: "loading" });
-    loadAttestation(apiKey, baseURL, modelId)
+    const pending = isPrivateerTee
+      ? loadServerAttestation(modelId)
+      : loadAttestation(apiKey!, baseURL, modelId);
+    pending
       .then((attestation) => {
         if (!ignore) setState({ kind: "ready", posture: teePosture(attestation), attestation });
       })
@@ -69,7 +98,7 @@ export function useTeeShield(modelSpec: string, config: Config): TeeState {
     return () => {
       ignore = true;
     };
-  }, [provider, apiKey, baseURL, modelId]);
+  }, [isNearai, isPrivateerTee, apiKey, baseURL, modelId]);
 
   return state;
 }
