@@ -45,6 +45,46 @@ test("classifies auth and rate-limit statuses", () => {
   assert.match(rate.message, /Rate limited/);
 });
 
+test("surfaces a Privateer account cap (flat body + code) and does not retry", () => {
+  // The Privateer backend returns a flat `{ message, code }` body, not the nested
+  // `{ error: { message } }` shape — and a daily cap must not be retried.
+  const err = new Error("Too Many Requests") as Error & Record<string, unknown>;
+  err.statusCode = 429;
+  err.url = "http://localhost:5000/api/agent/v1/chat/completions";
+  err.responseBody = JSON.stringify({
+    message: "Daily message limit of 25 reached. Upgrade or top up to continue.",
+    code: "DAILY_CAP_HIT",
+    effectiveTier: "free",
+    cap: 25,
+    kind: "message",
+  });
+  const d = describeError(err);
+  assert.match(d.message, /Daily message limit of 25 reached/);
+  assert.doesNotMatch(d.message, /\(429\)/); // not the generic "Rate limited (429)"
+  assert.notEqual(d.retryable, true);
+  assert.match(d.hint ?? "", /top up|\/provider/);
+});
+
+test("unwraps an AI_RetryError to reach the cap on its lastError", () => {
+  // What the SDK actually throws once retries are exhausted: a wrapper whose own
+  // message is the bare "Too Many Requests" and whose useful fields live on
+  // `lastError`. describeError must peel it to surface the cap message.
+  const apiErr = new Error("Too Many Requests") as Error & Record<string, unknown>;
+  apiErr.statusCode = 429;
+  apiErr.url = "http://localhost:5000/api/agent/v1/chat/completions";
+  apiErr.responseBody = JSON.stringify({
+    message: "Daily message limit of 25 reached. Upgrade or top up to continue.",
+    code: "DAILY_CAP_HIT",
+  });
+  const retryErr = new Error("Failed after 3 attempts. Last error: Too Many Requests") as Error &
+    Record<string, unknown>;
+  retryErr.lastError = apiErr;
+
+  const d = describeError(retryErr);
+  assert.match(d.message, /Daily message limit of 25 reached/);
+  assert.notEqual(d.retryable, true);
+});
+
 test("falls back to the provider message for unrecognized errors", () => {
   const d = describeError(
     apiError({ statusCode: 400, message: "wrapper", providerMessage: "invalid 'temperature'" }),

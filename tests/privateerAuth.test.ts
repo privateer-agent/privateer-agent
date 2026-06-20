@@ -19,6 +19,7 @@ const {
   serverBaseUrl,
   DEFAULT_SERVER_URL,
   defaultDeviceLabel,
+  authedFetch,
 } = await import("../src/auth/privateer.ts");
 
 const creds = {
@@ -64,6 +65,41 @@ test("serverBaseUrl: env override beats stored beats default", () => {
 test("defaultDeviceLabel is a non-empty user@host string", () => {
   const label = defaultDeviceLabel();
   assert.ok(label.length > 0);
+});
+
+test("authedFetch downgrades a hard-cap 429 to a non-retryable 402", async () => {
+  saveCredentials(creds);
+  const capBody = JSON.stringify({
+    message: "Daily message limit of 25 reached. Upgrade or top up to continue.",
+    code: "DAILY_CAP_HIT",
+  });
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(capBody, { status: 429, headers: { "content-type": "application/json" } })) as typeof fetch;
+  try {
+    const res = await authedFetch("https://example.test/api/agent/v1/chat/completions", { body: "{}" });
+    // 402 isn't in the SDK's retryable set, so the cap won't burn the retry budget…
+    assert.equal(res.status, 402);
+    // …and the body survives so describeError can still show the backend's message.
+    assert.equal(await res.text(), capBody);
+  } finally {
+    globalThis.fetch = orig;
+    clearCredentials();
+  }
+});
+
+test("authedFetch leaves a transient 429 (no cap code) retryable", async () => {
+  saveCredentials(creds);
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ error: { message: "slow down" } }), { status: 429 })) as typeof fetch;
+  try {
+    const res = await authedFetch("https://example.test/x", {});
+    assert.equal(res.status, 429);
+  } finally {
+    globalThis.fetch = orig;
+    clearCredentials();
+  }
 });
 
 test.after(() => rmSync(home, { recursive: true, force: true }));

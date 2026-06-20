@@ -15,6 +15,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { globalDir, credentialsPath } from "../config/paths.ts";
+import { isAccountCapCode } from "../engine/errors.ts";
 
 // Default Privateer API host. NOTE: this is still the legacy "helix" Render
 // hostname the mobile/web client also points at (client/config/environment.ts);
@@ -243,7 +244,29 @@ export async function authedFetch(input: Parameters<typeof fetch>[0], init: Requ
     const refreshed = await refreshTokens();
     res = await fetch(input, { ...withAuth(refreshed.accessToken), body: bodyBuf });
   }
-  return res;
+  return await defuseRetryableCap(res);
+}
+
+// A hard account cap (daily/monthly limit reached, balance exhausted) comes back
+// as a 429, which the AI SDK treats as retryable — so it burns its whole retry
+// budget waiting on a limit that won't clear, then surfaces a generic "Too Many
+// Requests". Detect the cap by the backend's machine `code` and rewrite the status
+// to 402 (Payment Required), which the SDK does NOT retry, while preserving the
+// body and headers so describeError still shows the backend's own message. Only a
+// 429 is inspected, and only its (small, non-streaming) error body is buffered;
+// transient 429s without a cap code pass through untouched and stay retryable.
+async function defuseRetryableCap(res: Response): Promise<Response> {
+  if (res.status !== 429) return res;
+  const body = await res.text();
+  let code: unknown;
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown; error?: { code?: unknown } };
+    code = parsed.code ?? parsed.error?.code;
+  } catch {
+    /* non-JSON body — can't be a structured cap, leave it retryable */
+  }
+  const status = isAccountCapCode(typeof code === "string" ? code : undefined) ? 402 : 429;
+  return new Response(body, { status, statusText: res.statusText, headers: res.headers });
 }
 
 /** Authenticated JSON request against the Privateer API (relative path). */

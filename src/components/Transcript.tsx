@@ -6,6 +6,14 @@ import { AgentGroupView } from "./AgentGroupView.tsx";
 import { theme } from "./theme.ts";
 import { Markdown } from "./Markdown.tsx";
 import { BULLET, WELCOME } from "./figures.ts";
+import { useTerminalWidth } from "./useTerminalWidth.ts";
+
+// Width of the marker gutter ("⏺ ", "✻ ", or two-space indent) that sits left of a
+// wrapped body. Subtracting it from the terminal width gives the body a *definite*
+// column count, which is what keeps wrapping on word boundaries: a flex body with no
+// fixed width lets Yoga measure the text's intrinsic size and then shrink the box
+// below a word's length, at which point Ink falls back to breaking mid-word.
+const GUTTER = 2;
 
 // Visual height of `text` once wrapped to `cols` columns — `\n`-lines plus the
 // extra rows each long line wraps onto.
@@ -79,6 +87,9 @@ export function EntryView({
   verbose?: boolean;
   collapsed?: boolean;
 }) {
+  const cols = useTerminalWidth();
+  // Definite body width so wrapped text breaks on word boundaries (see GUTTER).
+  const bodyWidth = Math.max(20, cols - GUTTER);
   switch (entry.kind) {
     case "user":
       return (
@@ -96,14 +107,14 @@ export function EntryView({
         <Box marginTop={1} flexDirection="column">
           <Box>
             <Text color={theme.accent}>{BULLET} </Text>
-            <Box flexGrow={1}>
+            <Box width={bodyWidth}>
               <Markdown text={body} />
             </Box>
           </Box>
           {recap && (
             <Box marginTop={1}>
               <Text color={theme.dim}>{"  "}</Text>
-              <Box flexGrow={1}>
+              <Box width={bodyWidth}>
                 <Text color="white">
                   {recap}
                 </Text>
@@ -129,7 +140,7 @@ export function EntryView({
       return (
         <Box marginTop={1}>
           <Text color={theme.dim}>{WELCOME} </Text>
-          <Box flexGrow={1}>
+          <Box width={bodyWidth}>
             <Text color={theme.dim} dimColor>
               {entry.text}
             </Text>
