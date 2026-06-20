@@ -5,7 +5,7 @@ import { Box, Text, Static, useApp, useInput, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import { Banner } from "./Banner.tsx";
 import { StatusBar, formatTokens, formatDuration } from "./StatusBar.tsx";
-import { RowView, groupRows } from "./Transcript.tsx";
+import { RowView, groupRows, visualRows, clampStreamingText } from "./Transcript.tsx";
 import { ApprovalPrompt } from "./ApprovalPrompt.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { PromptInput } from "./PromptInput.tsx";
@@ -63,6 +63,23 @@ const BANNER = "__banner__";
 
 function asText(output: unknown): string {
   return typeof output === "string" ? output : JSON.stringify(output);
+}
+
+// Rows of fixed chrome below the live transcript (spinner, todo, status bar, the
+// bordered input + mode hint) that the streaming text must leave room for, so the
+// dynamic region never outgrows the viewport and tips Ink into full-screen repaint.
+const LIVE_CHROME_ROWS = 10;
+
+// Cap the live tail's tall streaming blocks (assistant/thinking) to the viewport.
+// Display-only: the underlying entries keep their full text for the final commit.
+function clampLiveForViewport(tail: Entry[]): Entry[] {
+  const cols = Math.max(20, (process.stdout.columns || 80) - 2); // paddingX={1}
+  const maxRows = Math.max(6, (process.stdout.rows || 24) - LIVE_CHROME_ROWS);
+  return tail.map((e) =>
+    (e.kind === "assistant" || e.kind === "thinking") && visualRows(e.text, cols) > maxRows
+      ? { ...e, text: clampStreamingText(e.text, maxRows, cols) }
+      : e,
+  );
 }
 
 // Fold a finished sub-agent's run metrics into the entry's existing agent info
@@ -676,7 +693,32 @@ export function App({
     }
   }
 
+  // When the user starts a new turn after a task list has run to completion, fold the
+  // finished list into the static transcript as a one-time record and clear the live
+  // store. Otherwise TodoPanel keeps re-rendering the done plan above the status bar on
+  // every later prompt, long after the user has moved on to unrelated work.
+  function logCompletedTodos() {
+    const items = todosRef.current?.get() ?? [];
+    if (items.length === 0 || !items.every((t) => t.status === "completed")) return;
+    const lines = items.map((t) => `  ✔ ${t.content}`);
+    append({
+      kind: "notice",
+      text: [`Completed ${items.length} task${items.length === 1 ? "" : "s"}:`, ...lines].join("\n"),
+    });
+    todosRef.current?.set([]);
+  }
+
   async function runTurn(text: string, opts?: { hideInput?: boolean; skipPlanConfirm?: boolean }) {
+    // A finished plan — every task completed — has served its purpose. Once the user
+    // prompts again they've moved on, so drop the all-done task panel here rather than
+    // letting the completed plan keep rendering above every subsequent turn. The todos
+    // live on in the transcript/message history; only the live panel is cleared.
+    const todoStore = todosRef.current;
+    const priorTodos = todoStore?.get() ?? [];
+    if (priorTodos.length > 0 && priorTodos.every((t) => t.status === "completed")) {
+      todoStore?.set([]);
+    }
+
     // Claim any attachments the input already resolved live (drag-drop/paste): their
     // chips are in `text`, so pull their base64 out of the pending list. Filtering by
     // surviving chip drops ones the user edited away and is queue-safe (each turn
@@ -705,6 +747,7 @@ export function App({
         label: text,
       });
     }
+    logCompletedTodos();
     if (!opts?.hideInput) append({ kind: "user", text });
     const engine = engineRef.current;
     if (!engine) {
@@ -725,17 +768,48 @@ export function App({
     let liveEntries: Entry[] = [];
     let assistantIdx = -1;
     let thinkingIdx = -1;
+    // How many leading `liveEntries` have already been promoted into the committed
+    // (<Static>) transcript. Everything from here on is what the repainting dynamic
+    // region actually shows.
+    let flushedThrough = 0;
+    // The dynamic region is redrawn whole on every spinner tick (~12×/s). If the
+    // turn's output is allowed to pile up there until the turn ends, a long turn —
+    // e.g. plan mode, which streams a big reasoning block plus a long plan with no
+    // tool calls to break it up — grows taller than the terminal, at which point
+    // Ink repaints the entire screen each frame: everything flickers and scrollback
+    // is clobbered. To avoid that we promote *settled* entries (anything no longer
+    // being streamed into) to <Static> as the turn runs, keeping the dynamic region
+    // short. The boundary is the first entry that may still change: the actively
+    // streaming assistant/thinking block, or a running tool. Concurrent `task` rows
+    // are held back too so groupRows can still merge the fan-out as one block.
+    const settledBoundary = (): number => {
+      let bound = liveEntries.length;
+      if (assistantIdx >= 0) bound = Math.min(bound, assistantIdx);
+      if (thinkingIdx >= 0) bound = Math.min(bound, thinkingIdx);
+      for (let i = flushedThrough; i < bound; i++) {
+        const e = liveEntries[i];
+        if (e.kind === "tool" && (e.status === "running" || e.name === "task")) return i;
+      }
+      return bound;
+    };
     // Coalesce streaming re-renders. Pushing every token delta to state repaints
     // the entire dynamic region per token, which thrashes the CPU and makes any
     // in-progress text selection flicker. Throttle to a trailing flush (~30fps);
     // the finally block clears the timer and does the final commit, so nothing is
-    // lost. setLive reads the current `liveEntries` at flush time.
+    // lost. Each flush also drains any newly-settled prefix into <Static> (batched
+    // with setLive, so no intermediate frame) and shows only the unsettled tail.
     let syncTimer: ReturnType<typeof setTimeout> | undefined;
     const sync = () => {
       if (syncTimer) return;
       syncTimer = setTimeout(() => {
         syncTimer = undefined;
-        setLive(liveEntries);
+        const bound = settledBoundary();
+        if (bound > flushedThrough) {
+          const promoted = liveEntries.slice(flushedThrough, bound);
+          flushedThrough = bound;
+          setCommitted((c) => [...c, ...promoted]);
+        }
+        setLive(clampLiveForViewport(liveEntries.slice(flushedThrough)));
       }, 33);
     };
     const pushLive = (e: Entry) => {
@@ -869,8 +943,9 @@ export function App({
       // Close out the turn with how long the agent took to process the request to
       // completion — the live spinner's running timer, frozen as a total.
       const took = Date.now() - turnStart;
+      // Only the tail that streaming hasn't already promoted into <Static> remains.
       const finalEntries: Entry[] = [
-        ...liveEntries,
+        ...liveEntries.slice(flushedThrough),
         { kind: "notice", text: `⏱ ${formatDuration(took)} total` },
       ];
       setLive([]);
@@ -879,10 +954,12 @@ export function App({
       persist();
       if (hooks.has("Stop")) void hooks.stop();
       // In plan mode, once the agent has presented a plan, offer to leave plan mode.
+      // Inspect the whole turn (some of it may have already been promoted to
+      // <Static>), not just the tail still in finalEntries.
       if (
         !opts?.skipPlanConfirm &&
         modeRef.current === "plan" &&
-        finalEntries.some((e) => e.kind === "assistant" && e.text.trim().length > 0)
+        liveEntries.some((e) => e.kind === "assistant" && e.text.trim().length > 0)
       ) {
         setPlanReady(true);
       }
@@ -894,6 +971,13 @@ export function App({
     setMode("default");
     trySave({ ...config, permissionMode: "default" });
     append({ kind: "notice", text: "Plan approved — exited plan mode. Tell me to proceed." });
+  }
+
+  // Dismiss the confirmation and return to the prompt while staying in plan mode, so
+  // the user can ask questions about the plan without it reading as approval.
+  function chatAboutPlan() {
+    setPlanReady(false);
+    append({ kind: "notice", text: "Still in plan mode — ask about the plan or refine it." });
   }
 
   function restoreCheckpoint(id: string, scope: RewindScope) {
@@ -1116,7 +1200,11 @@ export function App({
             onCancel={() => setSessionsPicking(false)}
           />
         ) : planReady ? (
-          <PlanConfirm onApprove={approvePlan} onKeep={() => setPlanReady(false)} />
+          <PlanConfirm
+            onApprove={approvePlan}
+            onChat={chatAboutPlan}
+            onKeep={() => setPlanReady(false)}
+          />
         ) : (
           <>
             <PromptInput

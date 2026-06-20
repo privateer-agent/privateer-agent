@@ -7,13 +7,14 @@ import React from "react";
 import { render } from "ink-testing-library";
 import { App } from "../src/components/App.tsx";
 import { TodoPanel } from "../src/components/TodoPanel.tsx";
-import { EntryView, groupRows } from "../src/components/Transcript.tsx";
+import { EntryView, groupRows, visualRows, clampStreamingText } from "../src/components/Transcript.tsx";
 import { ToolCallView } from "../src/components/ToolCallView.tsx";
 import { AgentGroupView } from "../src/components/AgentGroupView.tsx";
 import type { Entry, ToolEntry } from "../src/components/types.ts";
 import { StatusBar } from "../src/components/StatusBar.tsx";
 import { emptyUsage } from "../src/engine/events.ts";
 import { Config } from "../src/config/schema.ts";
+import { privateerChannel } from "../src/providers/resolve.ts";
 
 // Smoke test: the App renders its full component tree (banner, status bar, input)
 // without crashing when a provider is configured. No network — session construction
@@ -71,6 +72,34 @@ test("EntryView renders a thinking block", () => {
   unmount();
 });
 
+test("EntryView renders assistant markdown: heading, list, code, inline", () => {
+  const md = [
+    "# Plan",
+    "",
+    "Here is some `inline code` and **bold** text.",
+    "",
+    "- first item",
+    "- second item",
+    "",
+    "```",
+    "const x = 1;",
+    "```",
+  ].join("\n");
+  const { lastFrame, unmount } = render(
+    React.createElement(EntryView, { entry: { kind: "assistant", text: md } }),
+  );
+  const frame = lastFrame() ?? "";
+  // Heading text survives, markers are stripped, list bullets and code are present.
+  assert.match(frame, /Plan/);
+  assert.doesNotMatch(frame, /# Plan/); // ATX marker consumed
+  assert.match(frame, /inline code/);
+  assert.doesNotMatch(frame, /`inline code`/); // backticks consumed
+  assert.match(frame, /•/); // unordered list bullet
+  assert.match(frame, /first item/);
+  assert.match(frame, /const x = 1;/);
+  unmount();
+});
+
 test("ToolCallView truncates output unless verbose", () => {
   const entry = {
     kind: "tool" as const,
@@ -110,6 +139,40 @@ test("StatusBar renders a custom status line when provided", () => {
   custom.unmount();
 });
 
+// Privateer surfaces a privacy channel for every model: NEAR `near/*` ids run in a
+// TEE, everything else routes through the account's ZDR proxy. The status bar must
+// always show one shield or the other for a Privateer model.
+test("privateerChannel classifies near/* as TEE, else ZDR", () => {
+  assert.equal(privateerChannel("near/deepseek-ai/DeepSeek-V4-Flash"), "tee");
+  assert.equal(privateerChannel("anthropic/claude-opus-4.8"), "zdr");
+});
+
+test("StatusBar shows the TEE shield for an attested Privateer model", () => {
+  const tee = render(
+    React.createElement(StatusBar, {
+      modelSpec: "privateer:near/deepseek-ai/DeepSeek-V4-Flash",
+      cwd: "/x",
+      usage: emptyUsage(),
+      tee: { kind: "ready", posture: "green", attestation: {} as any },
+    }),
+  );
+  assert.match(tee.lastFrame() ?? "", /⛉ TEE/);
+  tee.unmount();
+});
+
+test("StatusBar shows the ZDR shield for a Privateer ZDR model", () => {
+  const zdr = render(
+    React.createElement(StatusBar, {
+      modelSpec: "privateer:anthropic/claude-opus-4.8",
+      cwd: "/x",
+      usage: emptyUsage(),
+      zdr: { kind: "ready", posture: "green" },
+    }),
+  );
+  assert.match(zdr.lastFrame() ?? "", /⛉ ZDR/);
+  zdr.unmount();
+});
+
 // Helper to build a finished `task` entry with metrics.
 const taskEntry = (id: string, description: string, toolUses: number, tokens: number): ToolEntry => ({
   kind: "tool",
@@ -137,6 +200,25 @@ test("groupRows collapses 2+ consecutive task calls but leaves a lone one alone"
   assert.equal(rows.length, 3);
   assert.equal(rows[1].kind, "agent-group");
   assert.equal(rows[1].kind === "agent-group" && rows[1].agents.length, 2);
+});
+
+test("visualRows counts wrapped rows, not just newlines", () => {
+  assert.equal(visualRows("one\ntwo\nthree", 80), 3); // three short lines
+  assert.equal(visualRows("", 80), 1); // empty still occupies a row
+  assert.equal(visualRows("x".repeat(25), 10), 3); // 25 cols / 10 wide → 3 rows
+  assert.equal(visualRows("ab\n" + "y".repeat(20), 10), 3); // 1 + 2 wrapped
+});
+
+test("clampStreamingText keeps the tail and flags hidden lines when it overflows", () => {
+  const text = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+  // Fits: returned unchanged.
+  assert.equal(clampStreamingText(text, 50, 80), text);
+  // Overflows a 5-row budget: marker + a trimmed tail that fits the budget.
+  const clamped = clampStreamingText(text, 5, 80);
+  assert.match(clamped, /earlier lines hidden — shown in full when complete/);
+  assert.match(clamped, /line 20$/); // newest line is still the last shown
+  assert.ok(!clamped.includes("line 1\n")); // oldest lines dropped
+  assert.ok(visualRows(clamped, 80) <= 5); // never taller than the budget
 });
 
 test("AgentGroupView renders the N-agents header with per-agent metrics", () => {

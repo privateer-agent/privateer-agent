@@ -3,7 +3,7 @@ import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import type { Config, ProviderName } from "../config/schema.ts";
-import { configuredProviders } from "../providers/resolve.ts";
+import { configuredProviders, privateerChannel } from "../providers/resolve.ts";
 import { PROVIDER_META } from "../providers/catalog.ts";
 import { listModels, zdrPosture, type ModelInfo } from "../providers/models.ts";
 import { theme, POSTURE_COLOR } from "./theme.ts";
@@ -112,6 +112,9 @@ function ModelStage({
   // OpenRouter only: the account's ZDR snapshot, used to color a per-model badge.
   const zdrAccount = useZdrAccount(provider, config);
   const zdrEnforced = Boolean(config.providers.openrouter?.enforceZdr);
+  // Privateer: every model carries a privacy channel (TEE or ZDR) derived from its
+  // id, surfaced as a per-row badge so the channel is visible before you pick.
+  const isPrivateer = provider === "privateer";
 
   useEffect(() => {
     let alive = true;
@@ -186,7 +189,7 @@ function ModelStage({
         <Text color={theme.accent}>↑↓</Text> move, <Text color={theme.accent}>enter</Text> select
         {onBack ? ", esc back" : onCancel ? ", esc cancel" : ""}.
       </Text>
-      <ZdrLegend state={zdrAccount} enforced={zdrEnforced} />
+      {isPrivateer ? <PrivateerLegend /> : <ZdrLegend state={zdrAccount} enforced={zdrEnforced} />}
       <Box marginTop={1} borderStyle="round" borderColor={theme.accent} paddingX={1}>
         <Text color={theme.accent}>{"/ "}</Text>
         <TextInput value={filter} onChange={setFilter} placeholder="filter models…" />
@@ -198,14 +201,21 @@ function ModelStage({
           view.map((m, i) => {
             const idx = start + i;
             const active = idx === cursor;
+            // Privateer: label the privacy channel (TEE/ZDR) from the model id.
+            // OpenRouter: color a bare shield by the account's per-model ZDR posture.
+            const channel = isPrivateer ? privateerChannel(m.id) : null;
             const posture =
-              zdrAccount.kind === "ready"
+              !isPrivateer && zdrAccount.kind === "ready"
                 ? zdrPosture(m.id, zdrAccount.account, zdrEnforced)
                 : null;
             return (
               <Text key={m.id} color={active ? theme.accent : undefined}>
                 {active ? "❯ " : "  "}
-                {posture ? <Text color={POSTURE_COLOR[posture]}>{`${SHIELD} `}</Text> : null}
+                {channel ? (
+                  <Text color={theme.success}>{`${SHIELD} ${channel === "tee" ? "TEE" : "ZDR"}  `}</Text>
+                ) : posture ? (
+                  <Text color={POSTURE_COLOR[posture]}>{`${SHIELD} `}</Text>
+                ) : null}
                 {m.id}
                 {m.label && m.label !== m.id ? <Text color={theme.dim}> — {m.label}</Text> : null}
               </Text>
@@ -222,6 +232,18 @@ function ModelStage({
 // silent rather than imply a verdict — the rows simply render without a badge.
 // With enforcement off, ZDR-capable models read yellow; /zdr flips it on so they
 // go green (and non-ZDR models become red/unusable).
+// One-line key for the Privateer ⛉ TEE/ZDR badges. Both channels keep your prompts
+// private — TEE runs the model in a confidential enclave (attestable via /verify),
+// ZDR routes through zero-data-retention endpoints — so both render green.
+function PrivateerLegend() {
+  return (
+    <Text color={theme.dim}>
+      <Text color={POSTURE_COLOR.green}>{`${SHIELD} TEE`}</Text> confidential enclave (attestable){"  "}
+      <Text color={POSTURE_COLOR.green}>{`${SHIELD} ZDR`}</Text> zero data retention
+    </Text>
+  );
+}
+
 function ZdrLegend({ state, enforced }: { state: ZdrAccountState; enforced: boolean }) {
   if (state.kind === "idle" || state.kind === "error") return null;
   if (state.kind === "loading") {
