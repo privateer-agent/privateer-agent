@@ -38,7 +38,8 @@ import { runCommand, commandList } from "../commands/registry.ts";
 import { isSlashCommand } from "./promptModel.ts";
 import { loadCustomCommands } from "../commands/custom.ts";
 import { saveGlobalConfig } from "../config/load.ts";
-import { logout as privateerLogout } from "../auth/privateer.ts";
+import { logout as privateerLogout, hasCredentials } from "../auth/privateer.ts";
+import { RelayClient } from "../remote/relayClient.ts";
 import { ModeGate, type AskOutcome } from "../permissions/uiGate.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import {
@@ -90,6 +91,20 @@ function mergeAgentMetrics(
 ): ToolEntry["agent"] {
   if (!agent) return agent;
   return { ...agent, toolUses: m?.toolUses, tokens: m?.tokens };
+}
+
+// Project the committed transcript into structured feed items for a remote
+// controller's catch-up snapshot, mirroring the live event kinds the app renders.
+function snapshotEntries(entries: Entry[]): { kind: string; text: string }[] {
+  const out: { kind: string; text: string }[] = [];
+  for (const e of entries) {
+    if (e.kind === "user") out.push({ kind: "you", text: e.text });
+    else if (e.kind === "assistant") out.push({ kind: "assistant", text: e.text });
+    else if (e.kind === "thinking") out.push({ kind: "reasoning", text: e.text });
+    else if (e.kind === "tool") out.push({ kind: "tool", text: `▸ ${e.name} — ${e.status}` });
+    else if (e.kind === "notice") out.push({ kind: "notice", text: e.text });
+  }
+  return out;
 }
 
 // Render the committed transcript as markdown for /export.
@@ -177,8 +192,10 @@ export function App({
   const seededRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   // Input history (↑/↓) and the type-ahead queue for messages entered while busy.
+  // Queue items carry whether they were injected by a remote controller, so the
+  // remote flag is correct when the item eventually drains (not stale from a ref).
   const historyRef = useRef<string[]>([]);
-  const queueRef = useRef<string[]>([]);
+  const queueRef = useRef<{ value: string; remote?: boolean }[]>([]);
   const drainingRef = useRef(false);
   // Monotonic counter for "[Image #n]" reference chips, shared across the session.
   const imageSeqRef = useRef(0);
@@ -205,6 +222,20 @@ export function App({
   // result already re-renders.
   const subAgentMetricsRef = useRef<Map<string, { toolUses: number; tokens: number }>>(new Map());
 
+  // ── Remote access (/remote-access): the Privateer app drives this terminal ───
+  const [remoteEnabled, setRemoteEnabled] = useState(false);
+  const relayRef = useRef<RelayClient | null>(null);
+  // True only while the active turn was injected by a remote controller. Read by
+  // the gate (policy) and by `ask` (route to the app, not the local prompt).
+  const currentTurnRemoteRef = useRef(false);
+  // Relayed tool approvals awaiting the app's Allow/Deny, keyed by request id.
+  // The original request is kept so a re-attaching controller can be re-sent any
+  // approvals it missed while detached (e.g. the app navigated away).
+  const pendingApprovalsRef = useRef<Map<string, { req: PermissionRequest; resolve: (o: AskOutcome) => void }>>(new Map());
+  // Always points at the latest handleInput so the relay effect (captured once)
+  // never dispatches with a stale `busy`.
+  const handleInputRef = useRef<(value: string, opts?: { remote?: boolean }) => void>(() => {});
+
   // The gate reads the live mode via a ref (so changing mode doesn't require
   // rebuilding the session/tools) and surfaces approvals through React state.
   const modeRef = useRef(mode);
@@ -223,6 +254,32 @@ export function App({
   // Lifecycle hooks (UserPromptSubmit / Stop) configured in settings.
   const hooks = useMemo(() => new HookRunner(loadHooks((config as any).hooks), cwd), [cwd]);
 
+  // Relay a tool-approval request to the app and await its Allow/Deny. Parks the
+  // resolver by id; resolves on the matching response, on a 120s timeout (→deny),
+  // or when the relay drops (the lifecycle effect drains pending → deny). Only
+  // refs are touched, so the gate's once-captured closure stays correct.
+  function relayAsk(req: PermissionRequest): Promise<AskOutcome> {
+    const client = relayRef.current;
+    if (!client) return Promise.resolve("deny"); // no controller to ask → fail safe
+    const id = `ap-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise<AskOutcome>((resolve) => {
+      const timeout = setTimeout(() => {
+        if (pendingApprovalsRef.current.delete(id)) {
+          append({ kind: "notice", tone: "error", text: "Remote approval timed out — denied." });
+          resolve("deny");
+        }
+      }, 120_000);
+      pendingApprovalsRef.current.set(id, {
+        req,
+        resolve: (o) => {
+          clearTimeout(timeout);
+          resolve(o);
+        },
+      });
+      client.requestApproval(id, req);
+    });
+  }
+
   const gate = useMemo(
     () =>
       new ModeGate({
@@ -231,7 +288,12 @@ export function App({
         allowlist: allowlistRef.current,
         allowedOutsideRoots: allowedOutsideRootsRef.current,
         denylist: config.denylist,
-        ask: (req) => new Promise<AskOutcome>((resolve) => setPending({ req, resolve })),
+        // Remote turns relay approvals to the app; local turns prompt in-terminal.
+        ask: (req) =>
+          currentTurnRemoteRef.current
+            ? relayAsk(req)
+            : new Promise<AskOutcome>((resolve) => setPending({ req, resolve })),
+        getRemote: () => currentTurnRemoteRef.current,
       }),
     [],
   );
@@ -390,6 +452,47 @@ export function App({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd]);
+
+  // Keep the relay's prompt entry point pointing at the freshest handleInput so a
+  // remote prompt queues/dispatches against the current `busy`, never a stale one.
+  handleInputRef.current = (value, opts) => handleInput(value, opts);
+
+  // Open/close the relay when /remote-access is toggled. The client is owned here
+  // (mirrors mcpRef) and torn down on disable/unmount. On teardown we resolve any
+  // parked approvals to "deny" so a dropped controller can't wedge a turn.
+  useEffect(() => {
+    if (!remoteEnabled) return;
+    const client = new RelayClient({
+      onPrompt: (text) => handleInputRef.current(text, { remote: true }),
+      onInterrupt: () => abortRef.current?.abort(),
+      onApprovalResponse: (id, decision) => {
+        const entry = pendingApprovalsRef.current.get(id);
+        if (entry) {
+          pendingApprovalsRef.current.delete(id);
+          entry.resolve(decision);
+        }
+      },
+      onControllerAttached: () => {
+        const client = relayRef.current;
+        if (!client) return;
+        client.sendSnapshot(snapshotEntries(committedRef.current));
+        // Re-surface approvals the controller missed while it was detached.
+        for (const [id, entry] of pendingApprovalsRef.current) client.requestApproval(id, entry.req);
+      },
+      onStatus: (text) => append({ kind: "notice", text }),
+    });
+    relayRef.current = client;
+    void client.start();
+    return () => {
+      client.stop();
+      relayRef.current = null;
+      for (const [id, entry] of pendingApprovalsRef.current) {
+        pendingApprovalsRef.current.delete(id);
+        entry.resolve("deny");
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remoteEnabled]);
 
   function persist() {
     const eng = engineRef.current;
@@ -650,6 +753,31 @@ export function App({
             append({ kind: "notice", tone: "error", text: `Sign-out problem: ${err instanceof Error ? err.message : String(err)}` }),
           );
         break;
+      case "remoteAccess": {
+        if (!hasCredentials()) {
+          append({ kind: "notice", tone: "error", text: "Sign in first with /login to enable remote access." });
+          break;
+        }
+        if (res.on === true) {
+          if (remoteEnabled) append({ kind: "notice", text: "Remote access is already on." });
+          else {
+            setRemoteEnabled(true);
+            append({
+              kind: "notice",
+              text: "Enabling remote access — open the Privateer app → Linked terminals → Drive. Tool actions will ask for your approval there.",
+            });
+          }
+        } else if (res.on === false) {
+          if (!remoteEnabled) append({ kind: "notice", text: "Remote access is already off." });
+          else {
+            setRemoteEnabled(false);
+            append({ kind: "notice", text: "Remote access disabled." });
+          }
+        } else {
+          append({ kind: "notice", text: remoteEnabled ? "Remote access is ON." : "Remote access is OFF. Use /remote-access on." });
+        }
+        break;
+      }
       case "notice":
         append({ kind: "notice", text: res.text, tone: res.tone });
         break;
@@ -708,7 +836,7 @@ export function App({
     todosRef.current?.set([]);
   }
 
-  async function runTurn(text: string, opts?: { hideInput?: boolean; skipPlanConfirm?: boolean }) {
+  async function runTurn(text: string, opts?: { hideInput?: boolean; skipPlanConfirm?: boolean; remote?: boolean }) {
     // A finished plan — every task completed — has served its purpose. Once the user
     // prompts again they've moved on, so drop the all-done task panel here rather than
     // letting the completed plan keep rendering above every subsequent turn. The todos
@@ -759,6 +887,9 @@ export function App({
       return;
     }
 
+    // Mark whether this turn is remote-driven BEFORE any tool runs, so the gate
+    // routes approvals to the app and never auto-approves off bypass/allowlist.
+    currentTurnRemoteRef.current = !!opts?.remote;
     setVerb(randomVerb());
     setBusy(true);
     setTurnUsage(emptyUsage());
@@ -932,11 +1063,19 @@ export function App({
             pushLive({ kind: "notice", tone: "error", text: ev.error, hint: ev.hint });
             break;
         }
+        // Mirror the live stream to any attached controller (no-op when remote is off).
+        relayRef.current?.sendEvent(ev);
       }
     } catch (err) {
-      pushLive({ kind: "notice", tone: "error", text: err instanceof Error ? err.message : String(err) });
+      const msg = err instanceof Error ? err.message : String(err);
+      pushLive({ kind: "notice", tone: "error", text: msg });
+      // A throw escapes the for-await before the per-event tee, so relay it
+      // explicitly — otherwise a driven turn that fails (e.g. no inference key)
+      // looks like silence on the controller.
+      relayRef.current?.sendEvent({ type: "error", error: msg });
     } finally {
       abortRef.current = null;
+      currentTurnRemoteRef.current = false;
       // Cancel any pending throttled flush so it can't re-emit these entries into
       // the live region after we've moved them into the committed transcript.
       clearTimeout(syncTimer);
@@ -1025,20 +1164,26 @@ export function App({
 
   // Entry point from the prompt input. While a turn is running, messages are
   // queued and drained in order when it finishes.
-  function handleInput(value: string) {
+  function handleInput(value: string, opts?: { remote?: boolean }) {
     const text = value.trim();
     if (!text) return;
     if (busy || drainingRef.current) {
-      queueRef.current.push(value);
+      queueRef.current.push({ value, remote: opts?.remote });
       setQueued(queueRef.current.length);
       append({ kind: "notice", text: `Queued (${queueRef.current.length}) — runs after the current turn.` });
       return;
     }
-    void dispatchInput(value);
+    void dispatchInput(value, opts?.remote);
   }
 
-  async function dispatchInput(value: string) {
+  async function dispatchInput(value: string, remote?: boolean) {
     const text = value.trim();
+    // Remote-driven input is ALWAYS a model turn: never interpret `!bash`, `#memory`
+    // or slash commands from the app (a `!` shortcut would bypass the gate entirely).
+    if (remote) {
+      await runTurn(text, { remote: true });
+      return;
+    }
     if (isSlashCommand(text)) {
       handleCommand(text);
       return;
@@ -1063,7 +1208,7 @@ export function App({
       while (queueRef.current.length > 0) {
         const next = queueRef.current.shift()!;
         setQueued(queueRef.current.length);
-        await dispatchInput(next);
+        await dispatchInput(next.value, next.remote);
       }
     } finally {
       drainingRef.current = false;

@@ -57,6 +57,14 @@ export function defaultDeviceLabel(): string {
 
 let _cache: Credentials | null | undefined;
 
+// Per-terminal child session (see spawnChildSession). Held in memory ONLY — it
+// is never written to the shared credentials file, so each running terminal
+// rotates its own refresh token in isolation.
+interface ChildSession { accessToken: string; refreshToken: string; }
+let _child: ChildSession | null = null;
+let _spawnInFlight: Promise<ChildSession> | null = null;
+let _refreshInFlight: Promise<ChildSession> | null = null;
+
 export function loadCredentials(): Credentials | null {
   if (_cache !== undefined) return _cache;
   const path = credentialsPath();
@@ -86,6 +94,7 @@ export function clearCredentials(): void {
     /* nothing to remove */
   }
   _cache = null;
+  _child = null;
 }
 
 export function hasCredentials(): boolean {
@@ -203,30 +212,66 @@ export async function runDeviceLogin(opts: {
 
 // ── Session token use + refresh ──────────────────────────────────────────────
 
-async function refreshTokens(): Promise<Credentials> {
-  const creds = loadCredentials();
-  if (!creds) throw new Error("Not logged in.");
-  const res = await postJson(creds.serverBaseUrl, "/auth/refresh", { refreshToken: creds.refreshToken });
+/**
+ * Spawn THIS terminal's own session from the machine login (parent) refresh
+ * token. The parent token is only VALIDATED here — never rotated — so any number
+ * of terminals can spawn concurrently without colliding. The resulting child
+ * pair lives in memory only; the terminal then rotates its own refresh token in
+ * isolation, so two terminals never fight over one rotating token (which would
+ * trip the server's reuse-detection and revoke every session).
+ */
+async function spawnChildSession(): Promise<ChildSession> {
+  const parent = loadCredentials();
+  if (!parent) throw new Error("Not logged in to Privateer. Run /login.");
+  const res = await postJson(parent.serverBaseUrl, "/auth/session/spawn", {
+    refreshToken: parent.refreshToken,
+    deviceLabel: defaultDeviceLabel(),
+  });
   if (!res.ok) {
-    // TOKEN_REUSE / invalid refresh → the session is gone; force a fresh login.
-    clearCredentials();
+    // Parent refresh token invalid/expired → the machine login is gone.
+    if (res.status === 401) clearCredentials();
     throw new Error("Your Privateer session expired. Run /login to sign in again.");
   }
-  const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
-  const next: Credentials = { ...creds, accessToken, refreshToken };
-  saveCredentials(next); // persist the ROTATED pair — old refresh token is now dead
-  return next;
+  const { accessToken, refreshToken } = (await res.json()) as ChildSession;
+  _child = { accessToken, refreshToken };
+  return _child;
+}
+
+// Ensure a child session exists, de-duping concurrent spawns within this process.
+function ensureChildSession(): Promise<ChildSession> {
+  if (_child) return Promise.resolve(_child);
+  if (!_spawnInFlight) {
+    _spawnInFlight = spawnChildSession().finally(() => { _spawnInFlight = null; });
+  }
+  return _spawnInFlight;
+}
+
+// Rotate this terminal's own refresh token; if it's gone, spawn a fresh child.
+// Single-flighted so concurrent 401s don't double-rotate (which would reuse-trip
+// the child's own token).
+function refreshChildSession(): Promise<ChildSession> {
+  if (_refreshInFlight) return _refreshInFlight;
+  _refreshInFlight = (async (): Promise<ChildSession> => {
+    if (_child) {
+      const res = await postJson(serverBaseUrl(), "/auth/refresh", { refreshToken: _child.refreshToken });
+      if (res.ok) {
+        const { accessToken, refreshToken } = (await res.json()) as ChildSession;
+        _child = { accessToken, refreshToken };
+        return _child;
+      }
+    }
+    _child = null; // child rotation failed (expired/reused) — get a new one
+    return spawnChildSession();
+  })().finally(() => { _refreshInFlight = null; });
+  return _refreshInFlight;
 }
 
 /**
  * fetch wrapper matching the global `fetch` signature, for use as the AI SDK
- * provider's `fetch`. Injects the bearer token and, on a 401, refreshes once
- * and retries. The body is buffered so the retry can resend it.
+ * provider's `fetch`. Authenticates with THIS terminal's child session and, on a
+ * 401, refreshes once and retries. The body is buffered so the retry can resend.
  */
 export async function authedFetch(input: Parameters<typeof fetch>[0], init: RequestInit = {}): Promise<Response> {
-  const creds = loadCredentials();
-  if (!creds) throw new Error("Not logged in to Privateer. Run /login.");
-
   const bodyBuf = init.body; // AI SDK passes a string body; safe to resend.
   // Use a Headers object and `.set` (case-insensitive) so OUR bearer replaces any
   // Authorization the caller already set. The AI SDK lowercases its headers and
@@ -239,10 +284,11 @@ export async function authedFetch(input: Parameters<typeof fetch>[0], init: Requ
     return { ...init, headers };
   };
 
-  let res = await fetch(input, withAuth(creds.accessToken));
+  let child = await ensureChildSession();
+  let res = await fetch(input, withAuth(child.accessToken));
   if (res.status === 401) {
-    const refreshed = await refreshTokens();
-    res = await fetch(input, { ...withAuth(refreshed.accessToken), body: bodyBuf });
+    child = await refreshChildSession();
+    res = await fetch(input, { ...withAuth(child.accessToken), body: bodyBuf });
   }
   return await defuseRetryableCap(res);
 }

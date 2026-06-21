@@ -47,7 +47,7 @@ test("outside-cwd access always prompts, except under bypass", () => {
   assert.equal(decideAuto(outsideReq, "bypass", []), "allow"); // bypass means no prompts
 });
 
-function makeGate(initialMode: PermissionMode, answer: AskOutcome) {
+function makeGate(initialMode: PermissionMode, answer: AskOutcome, remote = false) {
   let mode = initialMode;
   const allowlist: string[] = [];
   const allowedOutsideRoots: string[] = [];
@@ -61,6 +61,7 @@ function makeGate(initialMode: PermissionMode, answer: AskOutcome) {
       asks++;
       return answer;
     },
+    getRemote: () => remote,
   });
   return { gate, allowlist, allowedOutsideRoots, asks: () => asks, mode: () => mode };
 }
@@ -96,6 +97,40 @@ test("'always' on edit switches to acceptEdits", async () => {
   const g = makeGate("default", "always");
   assert.equal(await g.gate.request(edit), "allow");
   assert.equal(g.mode(), "acceptEdits");
+});
+
+// ── Remote-driven turns (/remote-access): never auto-approve; relay every action ──
+
+test("remote turn relays the decision even under bypass (no silent auto-run)", async () => {
+  const g = makeGate("bypass", "allow", true);
+  assert.equal(await g.gate.request(bash("rm -rf node_modules")), "allow");
+  assert.equal(g.asks(), 1); // bypass would normally skip ask — remote forces it
+});
+
+test("remote turn ignores the allowlist and still relays", async () => {
+  const g = makeGate("default", "allow", true);
+  g.allowlist.push("npm test");
+  assert.equal(await g.gate.request(bash("npm test")), "allow");
+  assert.equal(g.asks(), 1); // allowlisted locally, but a remote operator must confirm
+});
+
+test("remote turn honors the app's deny", async () => {
+  const g = makeGate("bypass", "deny", true);
+  assert.equal(await g.gate.request(edit), "deny");
+  assert.equal(g.asks(), 1);
+});
+
+test("remote turn never remembers 'always' (no allowlist/mode mutation)", async () => {
+  const g = makeGate("default", "always", true);
+  assert.equal(await g.gate.request(bash("npm test")), "allow");
+  assert.deepEqual(g.allowlist, []); // not remembered for a remote operator
+  assert.equal(g.mode(), "default");
+});
+
+test("remote turn still respects a hard plan-mode deny without asking", async () => {
+  const g = makeGate("plan", "allow", true);
+  assert.equal(await g.gate.request(bash("rm -rf /")), "deny");
+  assert.equal(g.asks(), 0); // read-only stance can't be talked around remotely
 });
 
 test("'always' on outside access remembers the directory, not the edit mode", async () => {

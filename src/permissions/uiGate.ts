@@ -19,6 +19,12 @@ export interface ModeGateDeps {
   // re-prompting. The same array instance must be handed to the tools.
   allowedOutsideRoots?: string[];
   ask: Asker;
+  // True while the active turn was injected by a remote controller (the app, via
+  // /remote-access). Remote turns NEVER auto-approve off bypass-mode/allowlist/
+  // acceptEdits — every would-be action is relayed to the app for Allow/Deny, so
+  // an unattended terminal can't silently run a remote party's bash or edits.
+  // Hard denies (e.g. plan mode) are still honored without bothering the phone.
+  getRemote?: () => boolean;
 }
 
 // The permission gate used by the live TUI. It first applies the mode/allowlist
@@ -30,6 +36,16 @@ export class ModeGate implements PermissionGate {
   async request(req: PermissionRequest): Promise<PermissionDecision> {
     const denylist = this.deps.denylist ?? [];
     const auto = decideAuto(req, this.deps.getMode(), this.deps.allowlist, denylist);
+
+    // Remote-driven turn: skip every auto-allow (bypass/allowlist/acceptEdits) and
+    // relay the decision to the app. Still respect a hard "deny" (e.g. plan mode)
+    // so a read-only stance can't be talked around remotely. Outcomes are never
+    // remembered — we don't let a remote operator mutate local allowlist/mode.
+    if (this.deps.getRemote?.()) {
+      if (auto === "deny") return "deny";
+      return (await this.deps.ask(req)) === "deny" ? "deny" : "allow";
+    }
+
     if (auto !== "ask") return auto;
 
     // A dangerous command can be approved once, but is never remembered: adding

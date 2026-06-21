@@ -54,7 +54,9 @@ export type CommandResult =
   // Sign in to a Privateer account (device flow) for billed inference.
   | { type: "privateerLogin" }
   // Sign out of the Privateer account on this terminal.
-  | { type: "privateerLogout" };
+  | { type: "privateerLogout" }
+  // Toggle remote access (let the Privateer app drive this terminal). on=true/false; null=show status.
+  | { type: "remoteAccess"; on: boolean | null };
 
 export interface CommandContext {
   config: Config;
@@ -132,6 +134,16 @@ const COMMANDS: CommandDef[] = [
     name: "keys",
     summary: "add or change provider API keys (bring your own)",
     run: () => ({ type: "onboarding" }),
+  },
+  {
+    name: "remote-access",
+    summary: "let the Privateer app drive this terminal (on | off | status)",
+    run: (args) => {
+      const a = args.trim().toLowerCase();
+      if (a === "on" || a === "start" || a === "enable") return { type: "remoteAccess", on: true };
+      if (a === "off" || a === "stop" || a === "disable") return { type: "remoteAccess", on: false };
+      return { type: "remoteAccess", on: null };
+    },
   },
   {
     name: "permissions",

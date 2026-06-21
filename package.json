@@ -59,11 +59,13 @@
     "picomatch": "^4.0.4",
     "react": "^18.3.1",
     "tsx": "^4.16.0",
+    "ws": "^8.21.0",
     "zod": "^4.0.16"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
+    "@types/ws": "^8.18.1",
     "ink-testing-library": "^4.0.0",
     "typescript": "^5.5.0"
   }
