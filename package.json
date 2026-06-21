@@ -28,10 +28,12 @@
   "bin": {
     "privateer": "./bin/privateer.mjs"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "bin",
     "src",
-    "brand",
     "README.md",
     "LICENSE"
   ],
