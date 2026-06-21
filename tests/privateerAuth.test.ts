@@ -67,6 +67,44 @@ test("defaultDeviceLabel is a non-empty user@host string", () => {
   assert.ok(label.length > 0);
 });
 
+// authedFetch bootstraps a per-terminal child session (POST /auth/session/spawn)
+// before the real request, so test mocks must answer that URL with a child pair.
+const CHILD = JSON.stringify({ accessToken: "child-access", refreshToken: "child-refresh" });
+function spawnAware(forOthers: () => Response): typeof fetch {
+  return (async (input: any) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("/auth/session/spawn")) {
+      return new Response(CHILD, { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return forOthers();
+  }) as typeof fetch;
+}
+
+test("authedFetch spawns a per-terminal child session and auths with its token", async () => {
+  saveCredentials(creds);
+  const calls: { url: string; auth: string | null }[] = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (input: any, init: any) => {
+    const url = typeof input === "string" ? input : input.url;
+    calls.push({ url, auth: new Headers(init?.headers).get("authorization") });
+    if (url.includes("/auth/session/spawn")) {
+      return new Response(CHILD, { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("ok", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const res = await authedFetch("https://example.test/whoami", {});
+    assert.equal(res.status, 200);
+    assert.ok(calls.some((c) => c.url.includes("/auth/session/spawn")), "minted a child session");
+    const target = calls.find((c) => c.url.endsWith("/whoami"));
+    // The real request carries the CHILD token, never the parent's access token.
+    assert.equal(target?.auth, "Bearer child-access");
+  } finally {
+    globalThis.fetch = orig;
+    clearCredentials();
+  }
+});
+
 test("authedFetch downgrades a hard-cap 429 to a non-retryable 402", async () => {
   saveCredentials(creds);
   const capBody = JSON.stringify({
@@ -74,8 +112,8 @@ test("authedFetch downgrades a hard-cap 429 to a non-retryable 402", async () =>
     code: "DAILY_CAP_HIT",
   });
   const orig = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response(capBody, { status: 429, headers: { "content-type": "application/json" } })) as typeof fetch;
+  globalThis.fetch = spawnAware(() =>
+    new Response(capBody, { status: 429, headers: { "content-type": "application/json" } }));
   try {
     const res = await authedFetch("https://example.test/api/agent/v1/chat/completions", { body: "{}" });
     // 402 isn't in the SDK's retryable set, so the cap won't burn the retry budget…
@@ -91,8 +129,8 @@ test("authedFetch downgrades a hard-cap 429 to a non-retryable 402", async () =>
 test("authedFetch leaves a transient 429 (no cap code) retryable", async () => {
   saveCredentials(creds);
   const orig = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response(JSON.stringify({ error: { message: "slow down" } }), { status: 429 })) as typeof fetch;
+  globalThis.fetch = spawnAware(() =>
+    new Response(JSON.stringify({ error: { message: "slow down" } }), { status: 429 }));
   try {
     const res = await authedFetch("https://example.test/x", {});
     assert.equal(res.status, 429);
