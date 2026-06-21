@@ -58,11 +58,20 @@ and streaming work identically across every provider — no model lock-in, no se
 ## Quickstart
 
 ```bash
-git clone https://github.com/privateer-agent/privateer-agent.git
-cd privateer-agent
-npm install
-export OPENROUTER_API_KEY=sk-or-...     # one provider is enough
-npm start                               # launches the interactive TUI
+npx privateer-agent                     # zero-install, runs the latest
+```
+
+Or install the `privateer` command on your PATH:
+
+```bash
+npm install -g privateer-agent          # then just run: privateer
+# or, the one-liner installer (checks Node, then installs):
+curl -fsSL https://privateer.pro/install.sh | sh
+```
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...     # one provider is enough — or run /login
+privateer                               # launches the interactive TUI
 ```
 
 First run walks you through picking a provider and default model. From there, just type.
@@ -82,16 +91,21 @@ First run walks you through picking a provider and default model. From there, ju
 ## Install
 
 ```bash
-npm install        # install dependencies
-npm link           # optional: put `privateer` on your PATH
+npm install -g privateer-agent          # installs the `privateer` command
+# or run it without installing:
+npx privateer-agent
+# or the one-liner installer (verifies Node >= 20, then installs globally):
+curl -fsSL https://privateer.pro/install.sh | sh
 ```
 
-Or run directly without linking:
+**From source** (for hacking on Privateer):
 
 ```bash
-npm start          # launches the interactive TUI
-# or
-node bin/privateer.mjs
+git clone https://github.com/privateer-agent/privateer-agent.git
+cd privateer-agent
+npm install        # install dependencies
+npm start          # launches the interactive TUI (or: node bin/privateer.mjs)
+npm link           # optional: put your local `privateer` on PATH
 ```
 
 ## Configure a provider
