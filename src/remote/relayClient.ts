@@ -17,19 +17,36 @@
  */
 import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
-import { apiRequest, serverBaseUrl, defaultDeviceLabel } from "../auth/privateer.ts";
+import { apiRequest, serverBaseUrl } from "../auth/privateer.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 
-// Identity for THIS running terminal. Many terminals on one machine share a
-// single credential (one familyId), so the relay routes per-terminal on this
-// process-unique id — that's what makes each one independently drivable in the
-// app. The label (user@host · cwd) lets the user tell them apart.
+// Display label for THIS running terminal. Deliberately NON-PII: we do NOT send
+// username@hostname or the working-directory name to the server/controller (the
+// server is supposed to learn as little as possible). A short random tag lets the
+// user tell multiple terminals apart; they can rename it in the app.
 function terminalLabel(): string {
-  let cwd = "";
-  try { cwd = basename(process.cwd()); } catch { /* ignore */ }
-  return cwd ? `${defaultDeviceLabel()} · ${cwd}` : defaultDeviceLabel();
+  return `terminal-${randomUUID().slice(0, 4)}`;
+}
+
+// Best-effort redaction of secret-looking content before it crosses the relay to
+// the controller/server. This is a SAFETY NET, not a guarantee — truncation
+// bounds size, this bounds obvious secret leakage (bearer tokens, API keys, env
+// secrets, PEM private keys). The "output may contain secrets" warning still
+// stands; a determined leak (unusual formats) can slip through.
+function redactSecrets(s: string): string {
+  if (!s) return s;
+  return s
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]")
+    .replace(/\b(bearer)\s+[A-Za-z0-9._\-]{12,}/gi, "$1 [redacted]")
+    .replace(/\b(sk|rk|pk|ghp|gho|ghs|github_pat|AKIA|ASIA)[-_][A-Za-z0-9]{8,}/g, "[redacted key]")
+    .replace(/\b([A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE)[A-Z0-9_]*)\s*[:=]\s*['"]?[^\s'"]{6,}/gi, "$1=[redacted]");
+}
+
+// Redact then clip: redaction runs on full text so a secret near the cut isn't
+// missed, then we bound the wire size.
+function safe(s: string, max: number): string {
+  return clip(redactSecrets(s), max);
 }
 
 export interface RelayCallbacks {
@@ -64,11 +81,11 @@ function asText(output: unknown): string {
 function projectEvent(ev: EngineEvent): Record<string, unknown> {
   switch (ev.type) {
     case "tool-call":
-      return { type: "tool-call", id: ev.id, name: ev.name, input: clip(asText(ev.input), 2000) };
+      return { type: "tool-call", id: ev.id, name: ev.name, input: safe(asText(ev.input), 2000) };
     case "tool-result":
-      return { type: "tool-result", id: ev.id, name: ev.name, output: clip(asText(ev.output), 4000) };
+      return { type: "tool-result", id: ev.id, name: ev.name, output: safe(asText(ev.output), 4000) };
     case "tool-error":
-      return { type: "tool-error", id: ev.id, name: ev.name, error: clip(ev.error, 2000) };
+      return { type: "tool-error", id: ev.id, name: ev.name, error: safe(ev.error, 2000) };
     case "usage":
       return { type: "usage", usage: ev.usage, turn: ev.turn };
     case "finish":
@@ -231,7 +248,7 @@ export class RelayClient {
   // the app renders it with the same styling as the live feed. Bounded: last 80
   // entries, each clipped.
   sendSnapshot(entries: { kind: string; text: string }[]): void {
-    const trimmed = entries.slice(-80).map((e) => ({ kind: e.kind, text: clip(String(e.text ?? ""), 4000) }));
+    const trimmed = entries.slice(-80).map((e) => ({ kind: e.kind, text: safe(String(e.text ?? ""), 4000) }));
     this.rawSend({ type: "snapshot", entries: trimmed });
   }
 
@@ -239,7 +256,7 @@ export class RelayClient {
     this.rawSend({
       type: "approval_request",
       id,
-      req: { tool: req.tool, kind: req.kind, title: req.title, detail: clip(req.detail, 4000), outside: !!req.outside },
+      req: { tool: req.tool, kind: req.kind, title: req.title, detail: safe(req.detail, 4000), outside: !!req.outside },
     });
   }
 

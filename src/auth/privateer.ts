@@ -36,11 +36,43 @@ export interface Credentials {
   serverBaseUrl: string;
 }
 
+// A server URL is safe only if it's https, OR http to a loopback host (dev).
+// Anything else (plain http to a remote host) would send the account bearer
+// token in cleartext and is rejected — a poisoned PRIVATEER_SERVER_URL must not
+// be able to redirect/downgrade the connection and exfiltrate the token.
+export function isSafeServerUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol === "https:") return true;
+  if (u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1")) {
+    return true;
+  }
+  return false;
+}
+
 // Resolved base URL: env override > stored (from a prior login) > default.
+// Both the override and the stored value are validated — never fall through to
+// an insecure host that could capture the session token.
 export function serverBaseUrl(): string {
   const env = process.env.PRIVATEER_SERVER_URL?.replace(/\/$/, "");
-  if (env) return env;
-  return (loadCredentials()?.serverBaseUrl || DEFAULT_SERVER_URL).replace(/\/$/, "");
+  if (env) {
+    if (!isSafeServerUrl(env)) {
+      throw new Error(
+        `Refusing PRIVATEER_SERVER_URL=${env}: must be https:// (http allowed only for localhost). ` +
+          `This protects your account token from being sent over an insecure or attacker-controlled connection.`,
+      );
+    }
+    return env;
+  }
+  const base = (loadCredentials()?.serverBaseUrl || DEFAULT_SERVER_URL).replace(/\/$/, "");
+  if (!isSafeServerUrl(base)) {
+    throw new Error(`Stored Privateer server URL is not https (${base}). Run /logout then /login again.`);
+  }
+  return base;
 }
 
 // A friendly default label so a linked session is recognizable in the app's
@@ -125,11 +157,14 @@ export interface DeviceCode {
 }
 
 async function postJson(base: string, path: string, body: unknown, init: RequestInit = {}): Promise<Response> {
+  // Spread init FIRST so method/headers/body below stay authoritative — otherwise
+  // a trailing `...init` clobbers the merged headers (dropping Content-Type when a
+  // caller passes its own headers, e.g. Authorization on /auth/session/spawn).
   return fetch(`${base}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...(init.headers || {}) },
-    body: JSON.stringify(body),
     ...init,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...((init.headers as Record<string, string>) || {}) },
+    body: JSON.stringify(body),
   });
 }
 
@@ -223,9 +258,16 @@ export async function runDeviceLogin(opts: {
 async function spawnChildSession(): Promise<ChildSession> {
   const parent = loadCredentials();
   if (!parent) throw new Error("Not logged in to Privateer. Run /login.");
-  const res = await postJson(parent.serverBaseUrl, "/auth/session/spawn", {
+  // Present the parent access token as a possession proof alongside the refresh
+  // token. The server allows this access token to be expired (the valid refresh
+  // token is the liveness proof) — so the parent file stays read-only and never
+  // needs rotating — but a refresh token WITHOUT a real signed access JWT can't
+  // spawn. Both are validated server-side against the same account.
+  const res = await postJson(serverBaseUrl(), "/auth/session/spawn", {
     refreshToken: parent.refreshToken,
     deviceLabel: defaultDeviceLabel(),
+  }, {
+    headers: { Authorization: `Bearer ${parent.accessToken}` },
   });
   if (!res.ok) {
     // Parent refresh token invalid/expired → the machine login is gone.

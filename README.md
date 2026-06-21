@@ -52,7 +52,8 @@ and streaming work identically across every provider — no model lock-in, no se
 - **Zero-Data-Retention surfacing** for OpenRouter: a status-bar shield colors the selected
   model's retention posture, and `/zdr` pins routing to zero-retention endpoints
 - **Private, verifiable inference** via NEAR AI: every model runs in a TEE, a `⛉ TEE` status
-  shield reflects the live attestation, and `/verify` fetches the cryptographic proof
+  shield reflects the live attestation, and `/verify` fetches the attestation report (validate
+  the raw quote chains with the NEAR Cloud Verifier for full cryptographic proof)
 
 ## Quickstart
 
@@ -216,8 +217,10 @@ confidential VM paired with an NVIDIA confidential-computing GPU. Your prompts a
 all the way into the enclave (TLS terminates *inside* the TEE, not at a load balancer), so
 the model's inputs, weights, and outputs are invisible to the infrastructure provider, the
 model provider, and NEAR itself. And it's not "trust us": each request can produce a
-**cryptographic attestation** proving the inference happened on genuine TEE hardware, signed
-by a key that never leaves the enclave and bound to a nonce you supply.
+**cryptographic attestation** attesting that the inference happened on genuine TEE hardware,
+signed by a key that never leaves the enclave and bound to a nonce you supply. (Privateer's
+`/verify` does a pragmatic check of that report; full validation of the quote chains is done
+with the NEAR Cloud Verifier — see `/verify` below.)
 
 It's a drop-in OpenAI-compatible provider — pick a `nearai:*` model with `/model` (e.g.
 `nearai:zai-org/GLM-5.1-FP8`) and everything else works as usual.
@@ -255,14 +258,26 @@ What that means for your data, precisely:
   read your prompt to run inference (true of every product, every path). The guarantee isn't
   "nobody sees it" — it's "nobody *retains* it": OpenRouter routes are pinned to zero-retention
   endpoints, and the account default is a **NEAR TEE** model where even the provider can't read
-  the prompt. Run **`/verify`** to cryptographically confirm the TEE.
+  the prompt. Run **`/verify`** to check the live attestation — a pragmatic freshness + presence
+  check (signing key + hardware markers + your nonce echoed); for full cryptographic validation
+  of the raw quote chains, take the printed report to the NEAR AI Cloud Verifier (see above).
 - **Your local transcript is plaintext on your machine.** Privateer's end-to-end encryption
   protects data **at rest in Privateer's storage** — it does not (and cannot) encrypt the
   conversation files this CLI keeps on your own disk under `~/.privateer/`. Treat them like any
   local shell history.
-- **Your session token lives at `~/.privateer/credentials.json`** (`0600`). It's a scoped
-  session — not your password or keys — and it rotates on refresh with reuse detection; revoke
-  it any time from the app (**Settings → Linked terminals**) or with **`/logout`**.
+- **Your session token is stored unencrypted on disk** at `~/.privateer/credentials.json`,
+  protected only by file permissions (`0600` — readable just by your user). It's a scoped
+  session — not your password or wallet/encryption keys — and it's long-lived: anyone who can
+  read that file (root, a backup, a compromised account) has a usable billed session until it's
+  revoked. It rotates on refresh with server-side reuse detection; revoke it any time from the
+  app (**Settings → Linked terminals**, which now lists individual terminals) or with **`/logout`**.
+- **`/remote-access` streams this terminal's activity to your phone.** When you turn it on, the
+  app can drive this terminal: prompts come down, and the agent's replies **and tool input/output**
+  go up through the Privateer server relay so you can watch and approve actions remotely. Output is
+  size-truncated and run through a best-effort secret redactor before it leaves, but that's a safety
+  net, not a guarantee — terminal output can contain whatever a command prints. The relay is
+  live-only (nothing is archived) and carries no keys; the terminal label sent is a non-PII random
+  tag (no username/host/path). It's **off** until you run `/remote-access on`.
 
 > **Only approve a code you generated yourself.** The login code authorizes *this* terminal to
 > spend on your account. If someone sends you a code and asks you to approve it ("paste this to

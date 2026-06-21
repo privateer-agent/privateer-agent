@@ -17,6 +17,7 @@ const {
   hasCredentials,
   currentUser,
   serverBaseUrl,
+  isSafeServerUrl,
   DEFAULT_SERVER_URL,
   defaultDeviceLabel,
   authedFetch,
@@ -67,6 +68,26 @@ test("defaultDeviceLabel is a non-empty user@host string", () => {
   assert.ok(label.length > 0);
 });
 
+test("isSafeServerUrl: https or loopback-http only", () => {
+  assert.equal(isSafeServerUrl("https://api.privateer.pro"), true);
+  assert.equal(isSafeServerUrl("http://localhost:5000"), true);
+  assert.equal(isSafeServerUrl("http://127.0.0.1:5000"), true);
+  assert.equal(isSafeServerUrl("http://evil.example"), false, "plain http to a remote host leaks the token");
+  assert.equal(isSafeServerUrl("ws://x"), false);
+  assert.equal(isSafeServerUrl("not a url"), false);
+});
+
+test("serverBaseUrl rejects an insecure override (would exfiltrate the bearer)", () => {
+  clearCredentials();
+  process.env.PRIVATEER_SERVER_URL = "https://safe.test";
+  assert.equal(serverBaseUrl(), "https://safe.test");
+  process.env.PRIVATEER_SERVER_URL = "http://localhost:5000";
+  assert.equal(serverBaseUrl(), "http://localhost:5000", "loopback http allowed for dev");
+  process.env.PRIVATEER_SERVER_URL = "http://evil.example";
+  assert.throws(() => serverBaseUrl(), /https/, "remote http override is refused");
+  delete process.env.PRIVATEER_SERVER_URL;
+});
+
 // authedFetch bootstraps a per-terminal child session (POST /auth/session/spawn)
 // before the real request, so test mocks must answer that URL with a child pair.
 const CHILD = JSON.stringify({ accessToken: "child-access", refreshToken: "child-refresh" });
@@ -99,6 +120,35 @@ test("authedFetch spawns a per-terminal child session and auths with its token",
     const target = calls.find((c) => c.url.endsWith("/whoami"));
     // The real request carries the CHILD token, never the parent's access token.
     assert.equal(target?.auth, "Bearer child-access");
+  } finally {
+    globalThis.fetch = orig;
+    clearCredentials();
+  }
+});
+
+test("session spawn presents the parent access token + JSON body", async () => {
+  saveCredentials(creds);
+  let spawnAuth: string | null = null;
+  let spawnCt: string | null = null;
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (input: any, init: any) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("/auth/session/spawn")) {
+      const h = new Headers(init?.headers);
+      spawnAuth = h.get("authorization");
+      spawnCt = h.get("content-type");
+      return new Response(CHILD, { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("ok", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await authedFetch("https://example.test/whoami", {});
+    // Possession proof: spawn carries the PARENT access token (server allows it to
+    // be expired but requires a real signed token bound to the account).
+    assert.equal(spawnAuth, "Bearer access-1");
+    // postJson must keep Content-Type when a caller passes its own headers,
+    // otherwise the server can't parse the refreshToken body (regression guard).
+    assert.equal(spawnCt, "application/json");
   } finally {
     globalThis.fetch = orig;
     clearCredentials();
