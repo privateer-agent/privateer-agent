@@ -58,11 +58,19 @@ export interface RelayCallbacks {
   onApprovalResponse: (id: string, decision: "allow" | "deny") => void;
   // A controller attached — push a transcript snapshot so it can catch up.
   onControllerAttached: () => void;
+  // A file finished transferring from the app (reassembled from chunks). Held to
+  // ride along with the next remote prompt.
+  onAttachment: (file: { name: string; mediaType: string; base64: string }) => void;
   // Surface a one-line status/notice in the TUI.
   onStatus?: (text: string) => void;
 }
 
 const RECONNECT_MS = 3000;
+// File-transfer ceilings for app→CLI attachments. The app enforces its own caps
+// before sending; these are a defensive backstop so a controller can't exhaust
+// memory with a lying `size` or a flood of concurrent transfers.
+const MAX_ATTACH_BYTES = 10 * 1024 * 1024; // 10 MB per file
+const MAX_INFLIGHT_ATTACH = 8; // simultaneous transfers
 // Coalesce streaming deltas so we don't emit one WS frame per token.
 const TEXT_FLUSH_MS = 60;
 
@@ -120,6 +128,12 @@ export class RelayClient {
   // Stable for this process so reconnects keep the same terminal identity.
   private readonly termId = randomUUID();
   private readonly label = terminalLabel();
+  // In-progress file transfers from the app, keyed by the controller's attachment
+  // id. Reassembled from attach_begin/chunk/end frames, then handed to onAttachment.
+  private readonly incoming = new Map<
+    string,
+    { name: string; mediaType: string; chunks: string[]; received: number }
+  >();
 
   constructor(private readonly cb: RelayCallbacks) {}
 
@@ -134,6 +148,7 @@ export class RelayClient {
     if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = undefined; }
     this.bufKind = null;
     this.buf = "";
+    this.incoming.clear();
     try { this.ws?.close(); } catch (_) { /* ignore */ }
     this.ws = null;
   }
@@ -205,7 +220,17 @@ export class RelayClient {
   }
 
   private handle(data: WebSocket.RawData): void {
-    let frame: { type?: string; text?: string; id?: string; decision?: string };
+    let frame: {
+      type?: string;
+      text?: string;
+      id?: string;
+      decision?: string;
+      name?: string;
+      mediaType?: string;
+      size?: number;
+      seq?: number;
+      data?: string;
+    };
     try {
       frame = JSON.parse(data.toString());
     } catch (_) {
@@ -214,7 +239,10 @@ export class RelayClient {
     this.debug(`recv ${frame.type}`);
     switch (frame.type) {
       case "prompt":
-        if (typeof frame.text === "string" && frame.text.trim()) this.cb.onPrompt(frame.text);
+        // Forward even an empty/whitespace prompt: a file-only send carries no text,
+        // and the app folds any pending attachments in on the prompt frame. App.tsx
+        // no-ops a blank prompt that has no attachments, so this stays safe.
+        if (typeof frame.text === "string") this.cb.onPrompt(frame.text);
         break;
       case "interrupt":
         this.cb.onInterrupt();
@@ -225,7 +253,62 @@ export class RelayClient {
       case "controller_attached":
         this.cb.onControllerAttached();
         break;
+      case "attach_begin":
+        this.beginAttachment(frame);
+        break;
+      case "attach_chunk":
+        this.appendAttachmentChunk(frame);
+        break;
+      case "attach_end":
+        this.endAttachment(frame);
+        break;
     }
+  }
+
+  // ── app → agent file transfer (chunked) ─────────────────────────────────────
+  // Files are streamed as attach_begin → attach_chunk* → attach_end so each WS
+  // frame stays under the relay's 256 KB cap. We reassemble here and hand the
+  // completed file up via onAttachment; App.tsx folds it into the next prompt.
+
+  private beginAttachment(frame: { id?: string; name?: string; mediaType?: string; size?: number }): void {
+    const { id } = frame;
+    if (!id || typeof frame.name !== "string" || typeof frame.mediaType !== "string") return;
+    if (this.incoming.size >= MAX_INFLIGHT_ATTACH) {
+      this.cb.onStatus?.(`Dropped attachment "${frame.name}" — too many transfers in flight.`);
+      return;
+    }
+    if (typeof frame.size === "number" && frame.size > MAX_ATTACH_BYTES) {
+      this.cb.onStatus?.(`Dropped attachment "${frame.name}" — exceeds ${Math.round(MAX_ATTACH_BYTES / (1024 * 1024))} MB.`);
+      return;
+    }
+    this.incoming.set(id, { name: frame.name, mediaType: frame.mediaType, chunks: [], received: 0 });
+  }
+
+  private appendAttachmentChunk(frame: { id?: string; data?: string }): void {
+    const { id } = frame;
+    if (!id || typeof frame.data !== "string") return;
+    const entry = this.incoming.get(id);
+    if (!entry) return; // begin was dropped or never seen
+    entry.received += frame.data.length;
+    // base64 inflates by ~4/3, so received*0.75 ≈ decoded bytes. Bound it in case
+    // `size` was absent or lied at begin time.
+    if (entry.received * 0.75 > MAX_ATTACH_BYTES + 64 * 1024) {
+      this.incoming.delete(id);
+      this.cb.onStatus?.(`Dropped attachment "${entry.name}" — stream exceeded size limit.`);
+      return;
+    }
+    entry.chunks.push(frame.data);
+  }
+
+  private endAttachment(frame: { id?: string }): void {
+    const { id } = frame;
+    if (!id) return;
+    const entry = this.incoming.get(id);
+    if (!entry) return;
+    this.incoming.delete(id);
+    const base64 = entry.chunks.join("");
+    if (!base64) return;
+    this.cb.onAttachment({ name: entry.name, mediaType: entry.mediaType, base64 });
   }
 
   private rawSend(frame: unknown): void {

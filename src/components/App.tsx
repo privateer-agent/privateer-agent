@@ -25,7 +25,7 @@ import { loadMcpServers, connectMcpServers, type McpConnection } from "../mcp/cl
 import { hasStoredAuth, clearStoredAuth } from "../mcp/oauth.ts";
 import { TodoPanel } from "./TodoPanel.tsx";
 import { exec } from "../tools/exec.ts";
-import { resolveAttachments, chipFor } from "../util/images.ts";
+import { resolveAttachments, chipFor, mediaModality } from "../util/images.ts";
 import type { Attachment } from "../util/images.ts";
 import { AttachmentStore } from "../util/attachmentStore.ts";
 import type { Entry, ToolEntry, Row } from "./types.ts";
@@ -203,6 +203,9 @@ export function App({
   // rewrote to chips in the buffer text. Each turn claims the ones whose chip
   // survives into its submitted text, so the base64 still rides along.
   const pendingImagesRef = useRef<Attachment[]>([]);
+  // Files received from the app over the relay, awaiting the next remote prompt to
+  // ride along with (mirrors how drag/paste stages into pendingImagesRef).
+  const pendingRemoteAttachmentsRef = useRef<{ name: string; mediaType: string; base64: string }[]>([]);
   // Session-lifetime checkpoint store (survives model/style switches) for /rewind,
   // plus a live mirror of the committed transcript length for checkpointing. Bound to
   // the session's on-disk checkpoint dir so /rewind survives a restart-and-resume; a
@@ -457,13 +460,53 @@ export function App({
   // remote prompt queues/dispatches against the current `busy`, never a stale one.
   handleInputRef.current = (value, opts) => handleInput(value, opts);
 
+  // Fold any files the app sent over the relay into a remote prompt. Binary kinds
+  // (image/pdf/…) become "[Kind #n]" chips backed by staged bytes that runTurn's
+  // liveAttachments filter then claims; text-like kinds are decoded and inlined as a
+  // fenced block. Returns the augmented prompt, or null when there's nothing to run
+  // (no text and no files). Mirrors the drag/paste staging into pendingImagesRef.
+  function consumeRemoteAttachments(text: string): string | null {
+    const files = pendingRemoteAttachmentsRef.current;
+    pendingRemoteAttachmentsRef.current = [];
+    if (files.length === 0) return text.trim() ? text : null;
+
+    const chips: string[] = [];
+    const inlined: string[] = [];
+    const maxInline = config.router?.inlineTextMaxBytes ?? 65_536;
+    for (const f of files) {
+      const modality = mediaModality(f.mediaType);
+      if (modality) {
+        const n = (imageSeqRef.current += 1);
+        const att: Attachment = { data: f.base64, mediaType: f.mediaType, modality, path: f.name, n };
+        pendingImagesRef.current.push(att);
+        chips.push(chipFor(att));
+      } else {
+        let body = "";
+        try { body = Buffer.from(f.base64, "base64").toString("utf8"); } catch { body = ""; }
+        if (body.length > maxInline) body = body.slice(0, maxInline) + `\n… (truncated, ${body.length - maxInline} more chars)`;
+        inlined.push(`\n\n${f.name}:\n\`\`\`\n${body}\n\`\`\``);
+      }
+    }
+    const head = text.trim();
+    const chipLine = chips.length ? (head ? " " : "") + chips.join(" ") : "";
+    const composed = `${head}${chipLine}${inlined.join("")}`.trim();
+    return composed.length ? composed : null;
+  }
+
   // Open/close the relay when /remote-access is toggled. The client is owned here
   // (mirrors mcpRef) and torn down on disable/unmount. On teardown we resolve any
   // parked approvals to "deny" so a dropped controller can't wedge a turn.
   useEffect(() => {
     if (!remoteEnabled) return;
     const client = new RelayClient({
-      onPrompt: (text) => handleInputRef.current(text, { remote: true }),
+      onPrompt: (text) => {
+        const merged = consumeRemoteAttachments(text);
+        if (merged) handleInputRef.current(merged, { remote: true });
+      },
+      onAttachment: (file) => {
+        pendingRemoteAttachmentsRef.current.push(file);
+        append({ kind: "notice", text: `📎 received ${file.name} from app` });
+      },
       onInterrupt: () => abortRef.current?.abort(),
       onApprovalResponse: (id, decision) => {
         const entry = pendingApprovalsRef.current.get(id);
@@ -1313,6 +1356,7 @@ export function App({
           custom={statusText || undefined}
           zdr={zdr}
           tee={tee}
+          remote={remoteEnabled}
         />
 
         {picking ? (

@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { basename } from "node:path";
 import { theme, POSTURE_COLOR } from "./theme.ts";
-import { SHIELD } from "./figures.ts";
+import { SHIELD, DOT } from "./figures.ts";
 import { useTerminalWidth } from "./useTerminalWidth.ts";
 import { type UsageTotals } from "../engine/events.ts";
 import type { ZdrState } from "./useZdrShield.ts";
@@ -28,6 +28,14 @@ function TeeBadge({ tee }: { tee?: TeeState }) {
     return <Text color={POSTURE_COLOR[tee.posture]}>{`${SHIELD} TEE · `}</Text>;
   }
   return <Text color={theme.dim}>{`${SHIELD} TEE? · `}</Text>;
+}
+
+// Remote-access badge: a green "● remote" segment shown while /remote-access is on,
+// signalling the Privateer app can drive this terminal (send prompts / approve its
+// tool calls). Nothing at all when remote access is off.
+function RemoteBadge({ remote }: { remote?: boolean }) {
+  if (!remote) return null;
+  return <Text color={theme.success}>{`${DOT} remote · `}</Text>;
 }
 
 // Compact token count: 100, 1k, 1m, 1b — one decimal place above 1k, trimmed of
@@ -86,6 +94,7 @@ export function StatusBar(props: {
   custom?: string; // settings-driven status line; overrides the default when set
   zdr?: ZdrState; // OpenRouter ZDR posture for the selected model (default line only)
   tee?: TeeState; // NEAR AI TEE attestation posture for the selected model (default line only)
+  remote?: boolean; // /remote-access is on — the app can drive this terminal (default line only)
 }) {
   // Stay clear of the right edge (parent paddingX={1} plus a 2-col safety gap) so
   // the line never reaches the final column and the terminal never reflows it.
@@ -109,6 +118,7 @@ export function StatusBar(props: {
       <Text wrap="truncate-end">
         <ZdrBadge zdr={props.zdr} />
         <TeeBadge tee={props.tee} />
+        <RemoteBadge remote={props.remote} />
         <Text color={theme.accent}>⚓ privateer</Text>
         {diag ? <Text color={theme.dim}>{` [${diag}]`}</Text> : null}
         <Text color={theme.dim}> (shift+tab to cycle)</Text>

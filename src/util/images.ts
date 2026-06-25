@@ -26,6 +26,19 @@ const MEDIA_TYPES: Record<string, { mediaType: string; modality: Modality }> = {
   ".mkv": { mediaType: "video/x-matroska", modality: "video" },
 };
 
+// Classify a media type into one of our binary modalities, or null when it's a
+// text-like file that should be inlined as plain text rather than attached. Used by
+// the relay path (App.tsx) to decide what to do with a file received from the app:
+// a null result means "decode and inline the text"; otherwise it's a binary
+// attachment the model reads directly.
+export function mediaModality(mediaType: string): Modality | null {
+  if (mediaType.startsWith("image/")) return "image";
+  if (mediaType === "application/pdf") return "document";
+  if (mediaType.startsWith("audio/")) return "audio";
+  if (mediaType.startsWith("video/")) return "video";
+  return null;
+}
+
 // Magic-byte checks per media type, used to reject placeholder/corrupt files at capture
 // time. The motivating case: macOS delivers a drag from a screenshot thumbnail as a
 // *file promise*, so the terminal's …/T/drop-XXXXXX/ file can be a 4-byte stub holding
