@@ -14,6 +14,11 @@ export interface PermissionRequest {
   title: string; // short action label, e.g. "Run command"
   detail: string; // the command, or file path + change preview
   protected?: boolean; // target is a guarded file: never auto-approve, always prompt
+  // Always require a human decision, ABOVE bypass mode and the allowlist (like a
+  // dangerous shell command). Set for MCP tools that declare themselves
+  // destructive (destructiveHint), so even a "take no prisoners" run can't fire
+  // an irreversible external action silently. The decision is never remembered.
+  alwaysAsk?: boolean;
   // Target resolves outside the working directory: never auto-approve (unless bypass),
   // always prompt. `path` carries the absolute target so "always" can remember its dir.
   outside?: boolean;

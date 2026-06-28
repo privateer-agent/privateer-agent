@@ -27,6 +27,10 @@ export function decideAuto(
   // Dangerous shell (destructive / secret-exfil) always confirms — this sits
   // above bypass and the allowlist so an injected command can't run silently.
   if (req.kind === "bash" && isDangerousCommand(req.detail, denylist)) return "ask";
+  // Explicitly destructive actions (e.g. an MCP tool that declares destructiveHint)
+  // always confirm too — also above bypass, so "skip permissions" can't fire them
+  // blind.
+  if (req.alwaysAsk) return "ask";
   if (mode === "bypass") return "allow";
   // Access outside the working directory always confirms (the user has to explicitly
   // allow leaving cwd), even under acceptEdits or the allowlist.

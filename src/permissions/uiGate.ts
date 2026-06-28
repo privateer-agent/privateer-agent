@@ -48,9 +48,10 @@ export class ModeGate implements PermissionGate {
 
     if (auto !== "ask") return auto;
 
-    // A dangerous command can be approved once, but is never remembered: adding
-    // it to the allowlist would let a later injected variant slip through.
-    const dangerous = req.kind === "bash" && isDangerousCommand(req.detail, denylist);
+    // A dangerous command (or an always-ask destructive action) can be approved
+    // once, but is never remembered: adding it to the allowlist or relaxing the
+    // mode would let a later variant slip through.
+    const dangerous = req.alwaysAsk === true || (req.kind === "bash" && isDangerousCommand(req.detail, denylist));
 
     const outcome = await this.deps.ask(req);
     if (outcome === "deny") return "deny";

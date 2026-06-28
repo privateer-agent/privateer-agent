@@ -23,6 +23,10 @@ export interface McpToolDef {
   name: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
+  // Standard MCP behavioral hints. We use `destructiveHint`/`readOnlyHint` to
+  // decide whether a tool may auto-approve: a tool that performs an irreversible
+  // external action marks itself destructive so it ALWAYS reaches the human.
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
 
 // Read mcp.json from project then user scope (project overrides). Accepts either a
@@ -148,7 +152,12 @@ export class McpClient {
   async listTools(): Promise<McpToolDef[]> {
     const res = await this.client!.listTools();
     return Array.isArray(res?.tools)
-      ? res.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema as Record<string, unknown> }))
+      ? res.tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema as Record<string, unknown>,
+          annotations: t.annotations as McpToolDef["annotations"],
+        }))
       : [];
   }
 
@@ -184,6 +193,11 @@ export function adaptMcpTools(
   const set: ToolSet = {};
   for (const d of defs) {
     const name = `${server}__${d.name}`;
+    // A mutating tool (e.g. send email, delete file) marks itself destructive. We
+    // map that to `alwaysAsk`, which the gate never auto-approves — so it always
+    // prompts the human (phone on remote turns, terminal otherwise) even under
+    // bypass mode or the allowlist. Read-only tools follow the normal policy.
+    const destructive = d.annotations?.destructiveHint === true && d.annotations?.readOnlyHint !== true;
     set[name] = tool({
       description: d.description ?? `${d.name} (MCP server: ${server})`,
       inputSchema: jsonSchema((d.inputSchema as any) ?? { type: "object", properties: {} }),
@@ -193,6 +207,7 @@ export function adaptMcpTools(
           kind: "fetch",
           title: `MCP ${server}: ${d.name}`,
           detail: JSON.stringify(args ?? {}).slice(0, 120),
+          alwaysAsk: destructive,
         });
         if (decision === "deny") throw new PermissionDeniedError(name);
         return client.callTool(d.name, args);
