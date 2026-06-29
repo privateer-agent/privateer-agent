@@ -9,6 +9,7 @@ import { findOutputStyle } from "./context/outputStyles.ts";
 import { QueryEngine } from "./engine/QueryEngine.ts";
 import { autoApproveGate, type PermissionGate } from "./permissions/gate.ts";
 import type { SubAgentRunner } from "./tools/context.ts";
+import type { UserAsker } from "./tools/askUser.ts";
 import { TodoStore } from "./tools/todoStore.ts";
 import type { CheckpointStore } from "./memory/checkpoints.ts";
 import type { ProcessRegistry } from "./tools/processRegistry.ts";
@@ -42,6 +43,9 @@ export interface SessionOptions {
   // Reports each finished `task` sub-agent's run metrics (tool uses + tokens) by
   // tool-call id, so the TUI can render the grouped agents view. Best-effort.
   onSubAgentMetrics?: (toolCallId: string, m: { toolUses: number; tokens: number }) => void;
+  // Surfaces an `ask_user` question to the live TUI and resolves with the choice.
+  // Omitted outside the interactive app, where ask_user reports it couldn't ask.
+  askUser?: UserAsker;
 }
 
 export interface Session {
@@ -127,6 +131,7 @@ export function createSession(opts: SessionOptions): Session {
         recordMutation: opts.checkpoints ? (abs) => opts.checkpoints!.recordMutation(abs) : undefined,
         processes: opts.processes,
         attachments,
+        askUser: opts.askUser,
       }),
       ...(opts.extraTools ?? {}),
     },

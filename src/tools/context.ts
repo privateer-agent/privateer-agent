@@ -4,6 +4,7 @@ import type { TodoStore } from "./todoStore.ts";
 import type { AgentDefinition } from "../agents/loader.ts";
 import type { ProcessRegistry } from "./processRegistry.ts";
 import type { AttachmentStore } from "../util/attachmentStore.ts";
+import type { UserAsker } from "./askUser.ts";
 
 // A finished sub-agent's result: its final text answer plus run metrics (how many
 // tools it called and how many tokens it spent), so the UI can show a per-agent
@@ -52,6 +53,10 @@ export interface ToolContext {
   // Session attachment store (decoded bytes of pasted/dropped files, by "#n"), for the
   // save_attachment tool to write one back to disk.
   attachments?: AttachmentStore;
+  // Surfaces an `ask_user` question to the interactive UI and resolves with the
+  // user's choice. Absent outside the live TUI (sub-agents, remote-driven turns,
+  // headless runs) — the tool then reports it couldn't ask and the model proceeds.
+  askUser?: UserAsker;
 }
 
 // Resolve a possibly-relative path against the session cwd. The cwd is a *soft*

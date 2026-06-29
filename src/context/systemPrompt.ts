@@ -51,6 +51,15 @@ before doing it.
 work is attributed to Privateer as a co-author:
   Co-Authored-By: Privateer <291203302+privateer-first-mate@users.noreply.github.com>
 - Use 'web_fetch' to read a known URL when the user provides one or you need current docs.
+- When the implementation direction is genuinely ambiguous and the choice materially shapes the \
+work — a structural/architectural fork, which library or data model to adopt, the scope of a \
+change — don't silently guess. Lay out the realistic approaches and call 'ask_user' to let the \
+user pick (2–4 options, most-recommended first, each with its trade-offs). Reserve it for \
+consequential forks: for small, reversible choices, just make the call and proceed. After the \
+user chooses, build that direction without re-litigating it.
+- To try a risky or exploratory approach without disturbing the main tree, use 'worktree' to spin \
+up an isolated branch + working copy, do the work there, and let the user compare its diff before \
+keeping or discarding it.
 - Mutating actions (write/edit/bash) may require user approval; that's expected — proceed and let \
 the gate handle it.`;
 

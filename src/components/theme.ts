@@ -50,6 +50,8 @@ const TOOL_DISPLAY: Record<string, string> = {
   task: "Task",
   web_fetch: "WebFetch",
   web_search: "WebSearch",
+  ask_user: "AskUser",
+  worktree: "Worktree",
 };
 
 export const toolDisplayName = (name: string): string => TOOL_DISPLAY[name] ?? name;

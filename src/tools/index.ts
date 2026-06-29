@@ -11,6 +11,8 @@ import { taskTool } from "./task.ts";
 import { webFetchTool, webSearchTool } from "./web.ts";
 import { saveAttachmentTool } from "./saveAttachment.ts";
 import { memoryTool } from "./memory.ts";
+import { askUserTool } from "./askUser.ts";
+import { worktreeTool } from "./worktree.ts";
 
 export type { ToolContext } from "./context.ts";
 
@@ -31,6 +33,8 @@ export function createTools(ctx: ToolContext): ToolSet {
     web_search: webSearchTool(ctx),
     save_attachment: saveAttachmentTool(ctx),
     memory: memoryTool(ctx),
+    ask_user: askUserTool(ctx),
+    worktree: worktreeTool(ctx),
   };
 }
 

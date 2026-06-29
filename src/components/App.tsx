@@ -7,6 +7,7 @@ import { Banner } from "./Banner.tsx";
 import { StatusBar, formatTokens, formatDuration } from "./StatusBar.tsx";
 import { RowView, groupRows, visualRows, clampStreamingText } from "./Transcript.tsx";
 import { ApprovalPrompt } from "./ApprovalPrompt.tsx";
+import { OptionPicker } from "./OptionPicker.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { PlanConfirm } from "./PlanConfirm.tsx";
@@ -42,6 +43,7 @@ import { logout as privateerLogout, hasCredentials } from "../auth/privateer.ts"
 import { RelayClient } from "../remote/relayClient.ts";
 import { ModeGate, type AskOutcome } from "../permissions/uiGate.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
+import type { UserQuestion, UserAnswer, UserAsker } from "../tools/askUser.ts";
 import {
   saveSession,
   loadSession,
@@ -58,6 +60,13 @@ import { randomVerb } from "./spinnerVerbs.ts";
 interface PendingApproval {
   req: PermissionRequest;
   resolve: (outcome: AskOutcome) => void;
+}
+
+// An `ask_user` question awaiting the user's choice in the TUI; mirrors how a
+// PendingApproval parks a tool blocked on the human.
+interface PendingQuestion {
+  q: UserQuestion;
+  resolve: (answer: UserAnswer) => void;
 }
 
 const BANNER = "__banner__";
@@ -162,6 +171,7 @@ export function App({
   const [lastTurnUsage, setLastTurnUsage] = useState<UsageTotals>(emptyUsage());
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingApproval | null>(null);
+  const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
   const [picking, setPicking] = useState(false);
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [verb, setVerb] = useState(randomVerb());
@@ -301,6 +311,18 @@ export function App({
     [],
   );
 
+  // Bridge the `ask_user` tool to the TUI: park the question's resolver in state so
+  // the OptionPicker can render and resolve it, exactly like the approval prompt. A
+  // remote-driven turn has no local human to ask, so it resolves as dismissed and the
+  // model falls back to its own judgment.
+  const askUser = useMemo<UserAsker>(
+    () => (q) =>
+      currentTurnRemoteRef.current
+        ? Promise.resolve({ kind: "dismissed" as const })
+        : new Promise<UserAnswer>((resolve) => setPendingQuestion({ q, resolve })),
+    [],
+  );
+
   // Build (and rebuild on model / output-style change) the agent session, carrying
   // history forward.
   useEffect(() => {
@@ -312,6 +334,7 @@ export function App({
         modelSpec,
         cwd,
         gate,
+        askUser,
         confineToCwd: config.confineToCwd,
         allowedOutsideRoots: allowedOutsideRootsRef.current,
         outputStyle: outputStyle ?? undefined,
@@ -563,8 +586,9 @@ export function App({
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") exit();
-    // Esc interrupts an in-flight turn (the run loop persists partial output).
-    if (key.escape && busy && abortRef.current) abortRef.current.abort();
+    // Esc interrupts an in-flight turn (the run loop persists partial output) — but
+    // not while a question picker owns input, where Esc means "dismiss the question".
+    if (key.escape && busy && !pendingQuestion && abortRef.current) abortRef.current.abort();
     // Ctrl+O toggles detail level for the whole transcript: it expands/collapses
     // both the model's reasoning blocks and full tool output together. (Reasoning
     // only exists when extended thinking is enabled, so without also flipping tool
@@ -579,7 +603,16 @@ export function App({
     }
     // Shift+Tab rotates the permission mode — but not while a modal overlay owns
     // input (it has its own keybindings).
-    if (key.tab && key.shift && !pending && !picking && !rewinding && !planReady && !sessionsPicking)
+    if (
+      key.tab &&
+      key.shift &&
+      !pending &&
+      !pendingQuestion &&
+      !picking &&
+      !rewinding &&
+      !planReady &&
+      !sessionsPicking
+    )
       cycleMode();
   });
 
@@ -1331,7 +1364,7 @@ export function App({
             no work to animate. Crucially, ink-spinner re-renders the whole dynamic
             region every frame; left running it would erase+redraw the bordered
             ApprovalPrompt below it ~10×/s, which reads as the box flickering. */}
-        {busy && !pending && (
+        {busy && !pending && !pendingQuestion && (
           <Box marginTop={1} gap={1}>
             <Text color={theme.accent}>
               <Spinner type="dots" />
@@ -1374,6 +1407,14 @@ export function App({
             onRespond={(outcome) => {
               pending.resolve(outcome);
               setPending(null);
+            }}
+          />
+        ) : pendingQuestion ? (
+          <OptionPicker
+            question={pendingQuestion.q}
+            onRespond={(answer) => {
+              pendingQuestion.resolve(answer);
+              setPendingQuestion(null);
             }}
           />
         ) : rewinding ? (
