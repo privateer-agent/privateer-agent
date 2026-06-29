@@ -20,18 +20,29 @@ export function ApprovalPrompt({
     else if (c === "n" || key.escape) onRespond("deny");
   });
 
+  // Quiet cue for elevated-stakes requests — stays in the blue theme, just flags
+  // that this one is weightier than a routine approval. Order = most severe first.
+  const badge = req.alwaysAsk
+    ? "destructive"
+    : req.protected
+      ? "guarded file"
+      : req.outside
+        ? "outside cwd"
+        : undefined;
+
   return (
-    <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.warning} paddingX={1}>
+    <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.accent} paddingX={1}>
       <Text>
-        <Text bold color={theme.warning}>
+        <Text bold color={theme.accent}>
           {req.title}
         </Text>
         <Text dimColor> ({req.tool})</Text>
+        {badge && <Text dimColor>  ⚠ {badge}</Text>}
       </Text>
       <Text>{req.detail}</Text>
       <Text dimColor>
-        <Text color={theme.success}>y</Text> allow · <Text color={theme.success}>a</Text> always ·{" "}
-        <Text color={theme.error}>n</Text> deny
+        <Text color={theme.accent}>y</Text> allow · <Text color={theme.accent}>a</Text> always ·{" "}
+        <Text color={theme.accentDim}>n</Text> deny
       </Text>
     </Box>
   );
