@@ -57,7 +57,9 @@ export function Banner({ model }: { model: string }) {
           <Text bold color={theme.accent}>
             {WELCOME} PRIVATEER
           </Text>
-          <Text color={theme.dim}>bring your own model · v{VERSION}</Text>
+          <Text color={theme.dim}>
+            bring your own model or connect to Privateer · v{VERSION}
+          </Text>
           {account && (
             <Text color={theme.dim}>
               connected as <Text color={theme.accent}>{account}</Text>
