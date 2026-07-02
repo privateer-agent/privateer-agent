@@ -17,6 +17,10 @@ import {
   routineOutputDir,
   addNotice,
   drainNotices,
+  addPendingRelay,
+  loadPendingRelay,
+  drainPendingRelay,
+  routineRelayId,
 } from "../src/routines/store.ts";
 
 test("cron: nextRun computes the next daily fire time", () => {
@@ -152,6 +156,42 @@ test("store: writeRoutineOutput writes latest.md + dated file", () => {
     assert.ok(existsSync(latest));
     assert.match(readFileSync(latest, "utf8"), /hello/);
     assert.equal(join(routineOutputDir("Morning News"), "latest.md"), latest);
+  } finally {
+    if (prev === undefined) delete process.env.PRIVATEER_HOME;
+    else process.env.PRIVATEER_HOME = prev;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("store: routineRelayId is stable, unique-format, and reused across calls", () => {
+  const home = mkdtempSync(join(tmpdir(), "priv-home-"));
+  const prev = process.env.PRIVATEER_HOME;
+  process.env.PRIVATEER_HOME = home;
+  try {
+    const id = routineRelayId();
+    assert.match(id, /^[A-Za-z0-9_-]{8,64}$/); // valid per server isValidTermId
+    assert.ok(id.startsWith("routines-"));
+    assert.equal(routineRelayId(), id); // persisted → same id on next call
+  } finally {
+    if (prev === undefined) delete process.env.PRIVATEER_HOME;
+    else process.env.PRIVATEER_HOME = prev;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("store: pending-relay queue add + drain (survives as durable backlog)", () => {
+  const home = mkdtempSync(join(tmpdir(), "priv-home-"));
+  const prev = process.env.PRIVATEER_HOME;
+  process.env.PRIVATEER_HOME = home;
+  try {
+    assert.deepEqual(loadPendingRelay(), []);
+    addPendingRelay({ routine: "news", at: new Date().toISOString(), content: "morning summary" });
+    addPendingRelay({ routine: "news", at: new Date().toISOString(), content: "second" });
+    assert.equal(loadPendingRelay().length, 2);
+    const drained = drainPendingRelay();
+    assert.equal(drained.length, 2);
+    assert.equal(drained[0].content, "morning summary"); // fire order preserved
+    assert.deepEqual(loadPendingRelay(), []); // cleared after drain
   } finally {
     if (prev === undefined) delete process.env.PRIVATEER_HOME;
     else process.env.PRIVATEER_HOME = prev;

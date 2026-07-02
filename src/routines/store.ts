@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { globalDir } from "../config/load.ts";
 import { Routine, RoutineFile } from "./schema.ts";
 
@@ -17,6 +18,25 @@ export function routineOutputDir(name: string): string {
 
 function slug(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "routine";
+}
+
+// A stable relay terminal id for the daemon, persisted so it reappears as the same
+// "Privateer Routines" terminal in the app across restarts (rather than a fresh
+// random terminal each boot). Random on first use so it stays unique per install —
+// the relay routes on this id with no user namespacing, so a shared constant could
+// collide across accounts. Matches the server's isValidTermId (`[A-Za-z0-9_-]{8,64}`).
+export function routineRelayId(): string {
+  const path = join(globalDir(), "routines", "relay-id");
+  if (existsSync(path)) {
+    const existing = readFileSync(path, "utf8").trim();
+    if (/^[A-Za-z0-9_-]{8,64}$/.test(existing)) return existing;
+  }
+  const id = `routines-${randomUUID().replace(/-/g, "")}`;
+  const dir = join(globalDir(), "routines");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path, id + "\n", { encoding: "utf8", mode: 0o600 });
+  tryChmod(path, 0o600);
+  return id;
 }
 
 function tryChmod(path: string, mode: number): void {
@@ -137,4 +157,49 @@ export function drainNotices(): RoutineNotice[] {
     /* best-effort clear */
   }
   return notices;
+}
+
+// A relay result produced while no controller was attached, held until the app
+// next connects. Persisted (not just in-memory) so it survives a daemon restart.
+export interface PendingRelay {
+  routine: string;
+  at: string; // ISO timestamp
+  content: string;
+}
+
+function pendingRelayPath(): string {
+  return join(globalDir(), "routines", "pending-relay.json");
+}
+
+export function loadPendingRelay(): PendingRelay[] {
+  const path = pendingRelayPath();
+  if (!existsSync(path)) return [];
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    return Array.isArray(data) ? (data as PendingRelay[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function addPendingRelay(entry: PendingRelay): void {
+  const dir = join(globalDir(), "routines");
+  mkdirSync(dir, { recursive: true });
+  const queue = loadPendingRelay();
+  queue.push(entry);
+  const trimmed = queue.slice(-50); // bound the backlog
+  writeFileSync(pendingRelayPath(), JSON.stringify(trimmed, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  tryChmod(pendingRelayPath(), 0o600);
+}
+
+// Read and clear the pending-relay queue (called when a controller attaches).
+export function drainPendingRelay(): PendingRelay[] {
+  const queue = loadPendingRelay();
+  if (queue.length === 0) return [];
+  try {
+    writeFileSync(pendingRelayPath(), "[]\n", { encoding: "utf8", mode: 0o600 });
+  } catch {
+    /* best-effort clear */
+  }
+  return queue;
 }

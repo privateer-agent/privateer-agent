@@ -63,6 +63,8 @@ export interface RelayCallbacks {
   onAttachment: (file: { name: string; mediaType: string; base64: string }) => void;
   // Surface a one-line status/notice in the TUI.
   onStatus?: (text: string) => void;
+  // The relay socket closed (controller no longer reachable until reconnect).
+  onDisconnected?: () => void;
 }
 
 const RECONNECT_MS = 3000;
@@ -125,9 +127,12 @@ export class RelayClient {
   private bufKind: "text" | "reasoning" | null = null;
   private buf = "";
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
-  // Stable for this process so reconnects keep the same terminal identity.
-  private readonly termId = randomUUID();
-  private readonly label = terminalLabel();
+  // Stable for this process so reconnects keep the same terminal identity. Callers
+  // may pass a persisted id/label (e.g. the routines daemon, so it shows up as one
+  // recognizable "Privateer Routines" terminal across restarts instead of a fresh
+  // random one each time).
+  private readonly termId: string;
+  private readonly label: string;
   // In-progress file transfers from the app, keyed by the controller's attachment
   // id. Reassembled from attach_begin/chunk/end frames, then handed to onAttachment.
   private readonly incoming = new Map<
@@ -135,7 +140,13 @@ export class RelayClient {
     { name: string; mediaType: string; chunks: string[]; received: number }
   >();
 
-  constructor(private readonly cb: RelayCallbacks) {}
+  constructor(
+    private readonly cb: RelayCallbacks,
+    opts?: { termId?: string; label?: string },
+  ) {
+    this.termId = opts?.termId ?? randomUUID();
+    this.label = opts?.label ?? terminalLabel();
+  }
 
   async start(): Promise<void> {
     this.closed = false;
@@ -182,6 +193,7 @@ export class RelayClient {
       ws.on("message", (data) => this.handle(data));
       ws.on("close", () => {
         if (this.ws === ws) this.ws = null;
+        this.cb.onDisconnected?.();
         if (!this.closed) {
           this.cb.onStatus?.(
             opened
@@ -319,6 +331,23 @@ export class RelayClient {
   }
 
   // ── agent → controller ──────────────────────────────────────────────────────
+
+  // Is the relay socket currently open? (Not the same as "a controller is
+  // attached" — the server forwards to a controller only when one is present.)
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  // Push a finished routine result to any attached controller as a text event, so
+  // it renders in the app's live feed. Returns whether the socket was open to send
+  // on; a durable channel (file/notice) still backs this up, since we can't know
+  // for certain a controller was attached.
+  sendRoutineResult(name: string, content: string): boolean {
+    if (!this.isConnected()) return false;
+    this.flushDeltas();
+    this.rawSend({ type: "event", event: { type: "text", text: safe(`⏺ Routine "${name}"\n\n${content}`, 8000) } });
+    return true;
+  }
 
   sendEvent(ev: EngineEvent): void {
     if (ev.type === "text") return this.bufferDelta("text", ev.text);

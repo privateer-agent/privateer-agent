@@ -1,10 +1,11 @@
 import type { Routine } from "./schema.ts";
 import { writeRoutineOutput, addNotice } from "./store.ts";
 
-// A relay pusher, injected by the daemon when a controller is attached. Given the
-// finished result, it forwards it to the user's own devices over the relay. Absent
-// when nothing is connected — relay delivery then degrades to a notice.
-export type RelayPusher = (routine: Routine, content: string) => boolean;
+// A relay pusher, injected by the daemon. Given the finished result it either
+// forwards it to an attached controller immediately ("live") or persists it to the
+// pending-relay queue to flush when the app next attaches ("queued"). Either way the
+// result is durably accounted for, so delivery doesn't add a notice backstop for it.
+export type RelayPusher = (routine: Routine, content: string) => "live" | "queued";
 
 export interface DeliveryContext {
   pushRelay?: RelayPusher;
@@ -23,10 +24,12 @@ function previewOf(content: string): string {
 }
 
 // Deliver a routine's result to its configured channels. `file` and `notice` are
-// deterministic and on-box; `relay` uses the injected pusher and falls back to a
-// notice when no controller is attached. `email` is intentionally not handled here:
-// it is fulfilled inside the agent turn (the daemon adds the Gmail tool + an
-// instruction to the prompt) so plaintext egress stays an explicit, gated action.
+// deterministic and on-box. `relay` pushes to an attached controller in real time
+// (best-effort — the socket may be up with no controller attached), so we ALSO keep
+// a durable record when the routine has no other on-box channel, guaranteeing the
+// result is never silently lost. `email` is intentionally not handled here: it is
+// fulfilled inside the agent turn (the daemon adds the Gmail tool + an instruction
+// to the prompt) so plaintext egress stays an explicit, gated action.
 export function deliver(
   routine: Routine,
   content: string,
@@ -34,27 +37,37 @@ export function deliver(
   ctx: DeliveryContext = {},
 ): DeliveryReport {
   const delivered: string[] = [];
+  const wants = new Set(routine.delivery);
   let filePath: string | undefined;
+  let noticed = false;
 
-  // Always keep an on-box copy when `file` is requested (and as a safety net for
-  // relay's fallback notice to point at).
-  if (routine.delivery.includes("file")) {
+  const leaveNotice = () => {
+    if (noticed) return;
+    addNotice({ routine: routine.name, at: new Date().toISOString(), status, preview: previewOf(content), path: filePath });
+    noticed = true;
+  };
+
+  // On-box copy.
+  if (wants.has("file")) {
     filePath = writeRoutineOutput(routine.name, content);
     delivered.push("file");
   }
 
-  if (routine.delivery.includes("relay")) {
-    const pushed = ctx.pushRelay?.(routine, content) ?? false;
-    if (pushed) delivered.push("relay");
-    else if (!routine.delivery.includes("notice")) {
-      // No controller attached — leave a notice so the result isn't lost.
-      addNotice({ routine: routine.name, at: new Date().toISOString(), status, preview: previewOf(content), path: filePath });
-      delivered.push("notice(relay-fallback)");
+  // Relay: pushed live to an attached controller, or queued to flush when the app
+  // next attaches (the daemon persists that queue, so it's durable either way). Only
+  // when no pusher is wired at all do we fall back to a notice so it isn't lost.
+  if (wants.has("relay")) {
+    const status = ctx.pushRelay?.(routine, content);
+    if (status === "live") delivered.push("relay");
+    else if (status === "queued") delivered.push("relay(queued)");
+    else if (!wants.has("file") && !wants.has("notice")) {
+      leaveNotice();
+      delivered.push("notice(backstop)");
     }
   }
 
-  if (routine.delivery.includes("notice")) {
-    addNotice({ routine: routine.name, at: new Date().toISOString(), status, preview: previewOf(content), path: filePath });
+  if (wants.has("notice")) {
+    leaveNotice();
     delivered.push("notice");
   }
 

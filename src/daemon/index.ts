@@ -4,7 +4,17 @@ import { loadConfig } from "../config/load.ts";
 import { createSession } from "../session.ts";
 import { autoApproveGate } from "../permissions/gate.ts";
 import { loadMcpServers, connectMcpServers } from "../mcp/client.ts";
-import { loadRoutines, upsertRoutine, findRoutine, removeRoutine } from "../routines/store.ts";
+import { RelayClient } from "../remote/relayClient.ts";
+import { hasCredentials } from "../auth/privateer.ts";
+import {
+  loadRoutines,
+  upsertRoutine,
+  findRoutine,
+  removeRoutine,
+  addPendingRelay,
+  drainPendingRelay,
+  routineRelayId,
+} from "../routines/store.ts";
 import type { Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigger.ts";
 import { deliver, type RelayPusher } from "../routines/delivery.ts";
@@ -35,15 +45,28 @@ export class Daemon {
   // Set of routine ids currently executing, so a slow run can't be re-entered by
   // the next tick.
   private readonly running = new Set<string>();
-  // Injected when a controller is attached; unset for now (relay from the daemon is
-  // a follow-up), so `relay` delivery gracefully falls back to a notice.
-  private pushRelay?: RelayPusher;
+  // Outbound relay connection to the Privateer server, opened lazily when a signed-in
+  // user has a routine that delivers over `relay`. Pushes results to an attached
+  // controller (e.g. the mobile app) in real time.
+  private relay?: RelayClient;
+  // Best-effort "is a controller attached right now?" — set on controller_attached,
+  // cleared when our socket drops. Used to decide push-live vs queue-for-later.
+  private controllerAttached = false;
+  // Push a result live if a controller is attached; otherwise persist it to the
+  // pending queue so it flushes the moment the app next attaches. Either path is
+  // durable, so delivery treats both as handled.
+  private readonly pushRelay: RelayPusher = (routine, content) => {
+    if (this.controllerAttached && this.relay?.sendRoutineResult(routine.name, content)) return "live";
+    addPendingRelay({ routine: routine.name, at: new Date().toISOString(), content });
+    return "queued";
+  };
 
   start(): void {
     // Prime nextRun for any routine missing one, then start the loop + IPC server.
     this.primeSchedule();
     this.timer = setInterval(() => void this.tick(), TICK_MS);
     this.server = startIpcServer((req) => this.handleIpc(req));
+    this.syncRelay();
     const count = loadRoutines().filter((r) => r.enabled).length;
     log(`daemon started (pid ${process.pid}); ${count} enabled routine(s). Tick every ${TICK_MS / 1000}s.`);
     // Fire an immediate scan so a just-due routine doesn't wait a full minute.
@@ -53,6 +76,49 @@ export class Daemon {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.server?.close();
+    this.relay?.stop();
+  }
+
+  // Open the relay connection when it's both wanted (a signed-in account + at least
+  // one enabled routine delivering over `relay`) and not already up. Started ahead
+  // of fire time so it's connected when a routine actually pushes. We never tear it
+  // down once up — an idle authenticated socket is cheap and reconnects itself.
+  private syncRelay(): void {
+    if (this.relay) return;
+    if (!hasCredentials()) return;
+    const wantsRelay = loadRoutines().some((r) => r.enabled && r.delivery.includes("relay"));
+    if (!wantsRelay) return;
+    this.relay = new RelayClient({
+      // The daemon publishes results but is not a drivable terminal: ignore any
+      // prompts/approvals a controller might send.
+      onPrompt: () => {},
+      onInterrupt: () => {},
+      onApprovalResponse: () => {},
+      onControllerAttached: () => this.onControllerAttached(),
+      onAttachment: () => {},
+      onStatus: (text) => log(`relay: ${text}`),
+      onDisconnected: () => {
+        this.controllerAttached = false;
+      },
+    }, {
+      // Stable identity so the daemon shows up as one recognizable terminal in the
+      // app across restarts, instead of a fresh random "terminal-xxxx" each boot.
+      termId: routineRelayId(),
+      label: "Privateer Routines",
+    });
+    void this.relay.start();
+    log("relay connection starting (routine has relay delivery + account signed in)");
+  }
+
+  // The app attached: greet it, then flush any routine results that finished while it
+  // was closed so it catches up immediately (in fire order).
+  private onControllerAttached(): void {
+    this.controllerAttached = true;
+    this.relay?.sendSnapshot([{ kind: "notice", text: "Privateer routines — results will appear here as they run." }]);
+    const pending = drainPendingRelay();
+    if (pending.length === 0) return;
+    log(`controller attached — flushing ${pending.length} pending routine result(s)`);
+    for (const p of pending) this.relay?.sendRoutineResult(p.routine, p.content);
   }
 
   private primeSchedule(): void {
@@ -171,6 +237,7 @@ export class Daemon {
         if (err) return { ok: false, message: `invalid trigger: ${err}` };
         const nr = computeNextRun(req.routine);
         upsertRoutine({ ...req.routine, nextRun: nr?.toISOString() });
+        this.syncRelay(); // connect the relay if this routine introduced relay delivery
         return { ok: true, message: `routine "${req.routine.name}" saved`, routines: loadRoutines() };
       }
       case "remove": {
@@ -186,6 +253,7 @@ export class Daemon {
         const enabled = req.cmd === "resume";
         const nr = enabled ? computeNextRun(r)?.toISOString() : undefined;
         upsertRoutine({ ...r, enabled, nextRun: nr });
+        if (enabled) this.syncRelay();
         return { ok: true, message: `${enabled ? "resumed" : "paused"} "${r.name}"`, routines: loadRoutines() };
       }
       case "run-now": {
@@ -197,6 +265,7 @@ export class Daemon {
       }
       case "reload":
         this.primeSchedule();
+        this.syncRelay();
         return { ok: true, message: "schedule reloaded", routines: loadRoutines() };
       default:
         return { ok: false, message: "unknown command" };
