@@ -4,6 +4,7 @@ import type { ToolContext } from "./context.ts";
 import { PermissionDeniedError } from "../permissions/gate.ts";
 import { DELIVERY_CHANNELS, newRoutineId, type Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, describeTrigger } from "../routines/trigger.ts";
+import { splitRoutineTools } from "../routines/toolSelect.ts";
 import { upsertRoutine } from "../routines/store.ts";
 import { sendToDaemon, DaemonNotRunningError } from "../daemon/ipc.ts";
 
@@ -19,7 +20,7 @@ export function routineTool(ctx: ToolContext) {
       "asks to be notified/updated on a cadence ('every morning', 'nightly') or at a future time " +
       "('at 3pm tomorrow'). Set exactly one of `cron` or `at`. Confirm timing + delivery with the " +
       "user first; this prompts for approval before saving. Runs use a safe read/web toolset (no " +
-      "writing or shell).",
+      "writing or shell) unless `tools` grants more.",
     inputSchema: z.object({
       name: z.string().describe("Short unique label, e.g. 'morning-news'."),
       cron: z
@@ -37,8 +38,16 @@ export function routineTool(ctx: ToolContext) {
         .describe("How to deliver the result. Defaults to ['file']. 'email' leaves the machine (opt-in)."),
       cwd: z.string().optional().describe("Working directory for the run. Defaults to the current one."),
       model: z.string().optional().describe("Optional 'provider:model' override."),
+      tools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Tool allow-list: builtin names ('read') and/or MCP selectors '<server>__<tool>' or " +
+            "'<server>__*'. MCP tools run unattended with no approval prompts — grant only what " +
+            "the task needs. Omit for the default safe read/web set.",
+        ),
     }),
-    execute: async ({ name, cron, at, prompt, delivery, cwd, model }) => {
+    execute: async ({ name, cron, at, prompt, delivery, cwd, model, tools }) => {
       const err = triggerError({ cron, at });
       if (err) return `Error: ${err}`;
 
@@ -49,12 +58,20 @@ export function routineTool(ctx: ToolContext) {
         (next ? ` (next ${next.toLocaleString()})` : "") +
         ` → ${chans.join(",")}`;
 
-      // Confirm with the user. Email egress is flagged so the human sees it.
+      // Confirm with the user. Egress grants are flagged so the human sees them:
+      // email delivery, and any MCP tools — those run unattended under the daemon's
+      // auto-approve gate, so this approval is the only human decision they get.
+      const split = splitRoutineTools(tools);
+      const flags: string[] = [];
+      if (chans.includes("email")) flags.push("email leaves your machine");
+      if (split.mcp.length > 0) flags.push(`grants external MCP tools, unattended: ${split.mcp.join(", ")}`);
       const decision = await ctx.gate.request({
         tool: "routine",
         kind: "write",
         title: "Create routine",
-        detail: chans.includes("email") ? `${detail}  [email leaves your machine]` : detail,
+        detail: flags.length > 0 ? `${detail}  [${flags.join("] [")}]` : detail,
+        // An MCP grant must always reach the human, above bypass mode/allowlists.
+        alwaysAsk: split.mcp.length > 0,
       });
       if (decision === "deny") throw new PermissionDeniedError("routine");
 
@@ -67,6 +84,7 @@ export function routineTool(ctx: ToolContext) {
         cwd: cwd ?? ctx.cwd,
         model,
         delivery: chans,
+        tools,
         enabled: true,
         nextRun: next?.toISOString(),
       };

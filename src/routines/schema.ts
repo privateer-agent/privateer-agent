@@ -28,7 +28,10 @@ export const Routine = z
     model: z.string().optional(),
     // Where to deliver the result. Defaults to on-box file output.
     delivery: z.array(z.enum(DELIVERY_CHANNELS)).default(["file"]),
-    // Optional tool allow-subset. Unset → the safe read/web set (see daemon).
+    // Optional tool allow-subset. Unset → the safe read/web set (see daemon). Entries
+    // may be builtin names ("read") or MCP selectors — "<server>__<tool>" exact or
+    // "<server>__*" for a whole server (see routines/toolSelect.ts). Selected MCP
+    // tools run unattended under the auto-approve gate, so grant the minimum needed.
     tools: z.array(z.string()).optional(),
     // Paused routines stay in the file but never fire.
     enabled: z.boolean().default(true),

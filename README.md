@@ -414,6 +414,13 @@ Everything below is optional and lives under `.privateer/` (project) or `~/.priv
     }
   }
   ```
+- **Routines** — saved tasks the scheduler daemon (`privateer daemon --detach`) runs
+  unattended, recurring (cron) or one-off. Ask the agent ("summarize world news every
+  morning") and approve; manage with `/routine` (list/pause/resume/rm/run). Runs use a safe
+  read/web toolset by default; a routine's `tools` list can also grant specific MCP tools
+  (`server__tool` or `server__*`) — flagged at approval, since they then run with no one
+  watching. See the [Sheet → WhatsApp recipe](docs/recipes/sheet-to-whatsapp.md) for a
+  full business automation built this way.
 - **Status line** — set `statusLine` to a shell command; it receives session JSON on stdin
   and its stdout becomes the status line.
 
@@ -467,6 +474,7 @@ deliberately simplified for now:
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md) — how the provider layer, agent loop, tools, and permissions fit together
+- [Recipe: Sheet → WhatsApp](docs/recipes/sheet-to-whatsapp.md) — an unattended routine + MCP servers messaging new spreadsheet rows
 - [Brand assets](brand/README.md) — the logo and icon set
 
 ## License

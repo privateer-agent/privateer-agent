@@ -1,0 +1,15 @@
+{
+  "name": "privateer-example-mcp-whatsapp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Example MCP stdio server: send WhatsApp messages via the Business Cloud API (default) or Twilio. Business-initiated messages must use pre-approved templates.",
+  "scripts": {
+    "start": "node --import tsx server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "tsx": "^4.19.0",
+    "zod": "^3.25.0"
+  }
+}

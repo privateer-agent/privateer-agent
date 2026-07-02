@@ -1,0 +1,15 @@
+{
+  "name": "privateer-example-mcp-google-sheets",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Example MCP stdio server: read/write a Google Sheet via a service account. Zero deps beyond the MCP SDK — Sheets REST over global fetch, RS256 via node:crypto.",
+  "scripts": {
+    "start": "node --import tsx server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "tsx": "^4.19.0",
+    "zod": "^3.25.0"
+  }
+}

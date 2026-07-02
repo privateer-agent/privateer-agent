@@ -17,6 +17,7 @@ import {
 } from "../routines/store.ts";
 import type { Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigger.ts";
+import { splitRoutineTools, filterMcpTools } from "../routines/toolSelect.ts";
 import { deliver, type RelayPusher } from "../routines/delivery.ts";
 import { startIpcServer, type IpcRequest, type IpcResponse } from "./ipc.ts";
 
@@ -155,24 +156,45 @@ export class Daemon {
 
     const config = loadConfig();
     const modelSpec = routine.model ?? config.defaultModel;
-    const allowedTools = routine.tools ?? SAFE_TOOLS;
+    const split = splitRoutineTools(routine.tools);
+    // If the routine names no builtin tools, it still gets the safe read/web set —
+    // a routine that only lists MCP selectors shouldn't lose the ability to read.
+    const allowedTools = split.builtin.length > 0 ? split.builtin : SAFE_TOOLS;
+    const wantsEmail = routine.delivery.includes("email");
 
-    // Email delivery is fulfilled inside the agent turn: connect MCP servers, expose
-    // their tools, and instruct the agent to send the result. This keeps plaintext
-    // egress an explicit tool action rather than a side channel.
+    // MCP tools are fulfilled inside the agent turn. Two grants exist: explicit
+    // "<server>__<tool>" selectors in routine.tools (least privilege: only the named
+    // servers are launched and only the selected tools exposed), and the legacy email
+    // delivery, which exposes every configured server so the mail tool is reachable.
+    // Either way, egress stays an explicit tool action rather than a side channel.
     let extraTools: ToolSet | undefined;
     let closeMcp: (() => void) | undefined;
     let prompt = routine.prompt;
-    if (routine.delivery.includes("email")) {
+    if (split.mcp.length > 0 || wantsEmail) {
       try {
-        const conn = await connectMcpServers(loadMcpServers(routine.cwd), routine.cwd, autoApproveGate);
-        extraTools = conn.tools;
+        const all = loadMcpServers(routine.cwd);
+        for (const s of split.servers) {
+          if (!all[s]) log(`  mcp: server "${s}" not configured in mcp.json — skipping`);
+        }
+        const servers = wantsEmail
+          ? all
+          : Object.fromEntries(Object.entries(all).filter(([name]) => split.servers.includes(name)));
+        const conn = await connectMcpServers(servers, routine.cwd, autoApproveGate);
+        const selected = filterMcpTools(conn.tools, split.mcp);
+        // Email needs every server's tools (the mail tool isn't in the selectors);
+        // otherwise expose only what the routine was granted.
+        extraTools = wantsEmail ? conn.tools : selected;
         closeMcp = () => conn.clients.forEach((c) => c.close());
-        prompt +=
-          "\n\nWhen finished, email the result to the account owner using the available mail tool " +
-          "(e.g. a Gmail create/send tool). Keep the subject short and put the summary in the body.";
+        if (split.mcp.length > 0 && Object.keys(selected).length === 0) {
+          log(`  mcp: selectors matched no tools (${split.mcp.join(", ")})`);
+        }
+        if (wantsEmail) {
+          prompt +=
+            "\n\nWhen finished, email the result to the account owner using the available mail tool " +
+            "(e.g. a Gmail create/send tool). Keep the subject short and put the summary in the body.";
+        }
       } catch (err) {
-        log(`  email setup failed: ${err instanceof Error ? err.message : String(err)}`);
+        log(`  mcp setup failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
