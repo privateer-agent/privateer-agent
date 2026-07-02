@@ -1,13 +1,17 @@
 import React from "react";
 import { render } from "ink";
 import { Command } from "commander";
+import { spawn } from "node:child_process";
+import { openSync } from "node:fs";
+import { join } from "node:path";
 import { Root } from "./components/Root.tsx";
 import { NAME, VERSION, DESCRIPTION } from "./version.ts";
-import { loadConfig } from "./config/load.ts";
+import { loadConfig, globalDir } from "./config/load.ts";
 import { createSession } from "./session.ts";
 import { loadLatest, loadSession } from "./memory/store.ts";
 import { configuredProviders } from "./providers/resolve.ts";
 import { describeError } from "./engine/errors.ts";
+import { runDaemon } from "./daemon/index.ts";
 
 // Set while Ink owns the screen. A stray unhandled rejection while the TUI is up
 // must NOT reach stdout/stderr — Node's default printer dumps the whole error
@@ -114,6 +118,26 @@ async function main() {
         process.stderr.write(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
         process.exitCode = 1;
       }
+    });
+
+  // The scheduler daemon: a resident process that fires routines on their cron
+  // schedule. Runs in the foreground by default; --detach forks a background copy.
+  program
+    .command("daemon")
+    .description("run the scheduler that fires saved routines on their cron schedule")
+    .option("--detach", "start the daemon in the background and return")
+    .action((opts: { detach?: boolean }) => {
+      if (opts.detach) {
+        const logPath = join(globalDir(), "daemon.log");
+        const out = openSync(logPath, "a");
+        // Re-invoke this same runtime + script without --detach, fully detached.
+        const args = process.argv.slice(1).filter((a) => a !== "--detach");
+        const child = spawn(process.argv[0], args, { detached: true, stdio: ["ignore", out, out] });
+        child.unref();
+        process.stdout.write(`Daemon started in background (pid ${child.pid}).\nLogs: ${logPath}\n`);
+        return;
+      }
+      runDaemon();
     });
 
   await program.parseAsync(process.argv);

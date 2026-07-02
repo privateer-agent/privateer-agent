@@ -13,6 +13,7 @@ import { saveAttachmentTool } from "./saveAttachment.ts";
 import { memoryTool } from "./memory.ts";
 import { askUserTool } from "./askUser.ts";
 import { worktreeTool } from "./worktree.ts";
+import { routineTool } from "./routine.ts";
 
 export type { ToolContext } from "./context.ts";
 
@@ -35,6 +36,7 @@ export function createTools(ctx: ToolContext): ToolSet {
     memory: memoryTool(ctx),
     ask_user: askUserTool(ctx),
     worktree: worktreeTool(ctx),
+    routine: routineTool(ctx),
   };
 }
 

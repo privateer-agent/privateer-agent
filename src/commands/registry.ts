@@ -56,7 +56,10 @@ export type CommandResult =
   // Sign out of the Privateer account on this terminal.
   | { type: "privateerLogout" }
   // Toggle remote access (let the Privateer app drive this terminal). on=true/false; null=show status.
-  | { type: "remoteAccess"; on: boolean | null };
+  | { type: "remoteAccess"; on: boolean | null }
+  // Manage routines via the daemon (resolved in the App over IPC).
+  // action defaults to "list"; arg is the routine name/id for the targeted actions.
+  | { type: "routine"; action: "list" | "pause" | "resume" | "remove" | "run"; arg?: string };
 
 export interface CommandContext {
   config: Config;
@@ -330,6 +333,28 @@ const COMMANDS: CommandDef[] = [
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
       if (sub === "logout") return { type: "mcpLogout", server: rest.join(" ") || undefined };
       return { type: "mcp" };
+    },
+  },
+  {
+    name: "routine",
+    summary: "routines: list, or `pause|resume|rm|run <name>`",
+    run: (args) => {
+      const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const arg = rest.join(" ") || undefined;
+      switch (sub) {
+        case "pause":
+          return { type: "routine", action: "pause", arg };
+        case "resume":
+          return { type: "routine", action: "resume", arg };
+        case "rm":
+        case "remove":
+        case "delete":
+          return { type: "routine", action: "remove", arg };
+        case "run":
+          return { type: "routine", action: "run", arg };
+        default:
+          return { type: "routine", action: "list" };
+      }
     },
   },
   {

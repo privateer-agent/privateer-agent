@@ -36,6 +36,10 @@ import { createSession } from "../session.ts";
 import { QueryEngine } from "../engine/QueryEngine.ts";
 import { emptyUsage, type UsageTotals } from "../engine/events.ts";
 import { runCommand, commandList } from "../commands/registry.ts";
+import { sendToDaemon, DaemonNotRunningError } from "../daemon/ipc.ts";
+import { drainNotices } from "../routines/store.ts";
+import { describeTrigger } from "../routines/trigger.ts";
+import type { Routine } from "../routines/schema.ts";
 import { isSlashCommand } from "./promptModel.ts";
 import { loadCustomCommands } from "../commands/custom.ts";
 import { saveGlobalConfig } from "../config/load.ts";
@@ -73,6 +77,20 @@ const BANNER = "__banner__";
 
 function asText(output: unknown): string {
   return typeof output === "string" ? output : JSON.stringify(output);
+}
+
+// Render the daemon's routine list for /routine.
+function formatRoutines(routines: Routine[]): string {
+  if (routines.length === 0) {
+    return "No routines. Ask the agent to create one (e.g. \"summarize world news every morning\").";
+  }
+  const lines = routines.map((r) => {
+    const state = r.enabled ? "▶" : "⏸";
+    const next = r.enabled && r.nextRun ? new Date(r.nextRun).toLocaleString() : "paused";
+    const last = r.lastRun ? ` · last ${r.lastStatus ?? "?"} ${new Date(r.lastRun).toLocaleString()}` : "";
+    return `  ${state} ${r.name} — ${describeTrigger(r)} → ${next} [${r.delivery.join(",")}]${last}`;
+  });
+  return `Routines:\n${lines.join("\n")}\n\n/routine pause|resume|rm|run <name>`;
 }
 
 // Rows of fixed chrome below the live transcript (spinner, todo, status bar, the
@@ -378,6 +396,22 @@ export function App({
         ...c,
       ]);
     }
+  }, []);
+
+  // Surface any scheduled-routine results that finished while no terminal was
+  // attached ("notice" delivery). Drained once on startup.
+  useEffect(() => {
+    const pending = drainNotices();
+    if (pending.length === 0) return;
+    const lines = pending.map((n) => {
+      const mark = n.status === "ok" ? "⏺" : "✗";
+      const where = n.path ? ` (${n.path})` : "";
+      return `  ${mark} ${n.routine}: ${n.preview}${where}`;
+    });
+    setCommitted((c) => [
+      { kind: "notice", text: `Scheduled routine results:\n${lines.join("\n")}` },
+      ...c,
+    ]);
   }, []);
 
   // Keep a live mirror of the committed transcript so checkpoints can record its
@@ -784,6 +818,47 @@ export function App({
             ? `Cleared saved OAuth for ${targets.length} server(s). Reconnect to re-authorize.`
             : "No OAuth credentials to clear.",
         });
+        break;
+      }
+      case "routine": {
+        const targeted = res.action !== "list";
+        if (targeted && !res.arg) {
+          append({ kind: "notice", tone: "error", text: `Usage: /routine ${res.action} <name>` });
+          break;
+        }
+        const req =
+          res.action === "list"
+            ? ({ cmd: "list" } as const)
+            : res.action === "pause"
+              ? ({ cmd: "pause", idOrName: res.arg! } as const)
+              : res.action === "resume"
+                ? ({ cmd: "resume", idOrName: res.arg! } as const)
+                : res.action === "remove"
+                  ? ({ cmd: "remove", idOrName: res.arg! } as const)
+                  : ({ cmd: "run-now", idOrName: res.arg! } as const);
+        void sendToDaemon(req)
+          .then((r) => {
+            if (!r.ok) {
+              append({ kind: "notice", tone: "error", text: r.message ?? "Command failed." });
+              return;
+            }
+            if (res.action === "list") {
+              append({ kind: "notice", text: formatRoutines(r.routines ?? []) });
+            } else {
+              append({ kind: "notice", text: r.message ?? "Done." });
+            }
+          })
+          .catch((err) => {
+            if (err instanceof DaemonNotRunningError) {
+              append({
+                kind: "notice",
+                tone: "error",
+                text: "Routine daemon isn't running. Start it with `privateer daemon` (or `privateer daemon --detach`).",
+              });
+            } else {
+              append({ kind: "notice", tone: "error", text: `Routine error: ${String(err)}` });
+            }
+          });
         break;
       }
       case "rewind":

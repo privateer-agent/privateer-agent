@@ -35,6 +35,10 @@ export interface SessionOptions {
   checkpoints?: CheckpointStore;
   // Extra tools merged into the toolset (e.g. tools exposed by MCP servers).
   extraTools?: ToolSet;
+  // When set, restrict the built-in toolset to these tool names (MCP `extraTools`
+  // are always kept). Used for unattended runs (scheduled routines) that must not
+  // have write/bash/edit auto-approved with no human to gate them.
+  allowedTools?: string[];
   // Background-shell registry for bash run_in_background / bash_output / kill_shell.
   processes?: ProcessRegistry;
   // Session attachment store, so dragged/pasted file bytes can be saved via the
@@ -118,21 +122,28 @@ export function createSession(opts: SessionOptions): Session {
     });
 
   const hooks = new HookRunner(loadHooks((opts.config as Record<string, unknown>).hooks), opts.cwd);
+  let builtinTools = createTools({
+    cwd: opts.cwd,
+    gate,
+    confineToCwd,
+    allowedOutsideRoots,
+    todos,
+    runSubAgent,
+    onSubAgentMetrics: opts.onSubAgentMetrics,
+    recordMutation: opts.checkpoints ? (abs) => opts.checkpoints!.recordMutation(abs) : undefined,
+    processes: opts.processes,
+    attachments,
+    askUser: opts.askUser,
+  });
+  if (opts.allowedTools) {
+    const allow = new Set(opts.allowedTools);
+    builtinTools = Object.fromEntries(
+      Object.entries(builtinTools).filter(([name]) => allow.has(name)),
+    );
+  }
   const tools = wrapToolsWithHooks(
     {
-      ...createTools({
-        cwd: opts.cwd,
-        gate,
-        confineToCwd,
-        allowedOutsideRoots,
-        todos,
-        runSubAgent,
-        onSubAgentMetrics: opts.onSubAgentMetrics,
-        recordMutation: opts.checkpoints ? (abs) => opts.checkpoints!.recordMutation(abs) : undefined,
-        processes: opts.processes,
-        attachments,
-        askUser: opts.askUser,
-      }),
+      ...builtinTools,
       ...(opts.extraTools ?? {}),
     },
     hooks,
