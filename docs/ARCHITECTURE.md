@@ -159,6 +159,12 @@ All of these load from `.privateer/` (project) and `~/.privateer/` (user), proje
 - **Output styles** (`context/outputStyles.ts`) — markdown personas that replace the system
   prompt's tone section while identity/security/tool-policy stay intact.
 - **Sub-agents** (`agents/loader.ts`) — see the `task` runner above.
+- **Skills** (`skills/loader.ts`, `tools/skill.ts`, `skills/installer.ts`) — Claude
+  Code-compatible skill directories (`skills/<name>/SKILL.md` + bundled files). The `skill`
+  tool embeds the name/description catalog in its description (the `task` pattern) and
+  returns a skill's body on demand; loading also marks the skill directory in-scope so
+  bundled files are readable. `/skills install` shallow-clones from GitHub and copies files
+  only (symlinks dropped, size-capped, nothing executed).
 - **Hooks** (`hooks/engine.ts`) — `PreToolUse`/`PostToolUse` wrap each tool's `execute`;
   `UserPromptSubmit`/`Stop` fire around the turn in `App`. Hooks run as shell commands with a
   JSON payload on stdin and may block (exit `2` or `{"decision":"block"}`) or inject context.

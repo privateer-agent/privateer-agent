@@ -42,6 +42,8 @@ import { describeTrigger } from "../routines/trigger.ts";
 import type { Routine } from "../routines/schema.ts";
 import { isSlashCommand } from "./promptModel.ts";
 import { loadCustomCommands } from "../commands/custom.ts";
+import { loadSkills } from "../skills/loader.ts";
+import { installSkills, removeSkill } from "../skills/installer.ts";
 import { saveGlobalConfig } from "../config/load.ts";
 import { logout as privateerLogout, hasCredentials } from "../auth/privateer.ts";
 import { RelayClient } from "../remote/relayClient.ts";
@@ -57,7 +59,7 @@ import {
   type SessionData,
   type SessionMeta,
 } from "../memory/store.ts";
-import { theme } from "./theme.ts";
+import { theme, toolDisplayName } from "./theme.ts";
 import { DOWN } from "./figures.ts";
 import { randomVerb } from "./spinnerVerbs.ts";
 
@@ -122,13 +124,16 @@ function mergeAgentMetrics(
 
 // Project the committed transcript into structured feed items for a remote
 // controller's catch-up snapshot, mirroring the live event kinds the app renders.
+// Whitespace-only assistant/thinking entries (possible in transcripts persisted
+// before the empty-block guard in the turn loop) are dropped — the app would
+// render each one as a blank gap in its feed.
 function snapshotEntries(entries: Entry[]): { kind: string; text: string }[] {
   const out: { kind: string; text: string }[] = [];
   for (const e of entries) {
     if (e.kind === "user") out.push({ kind: "you", text: e.text });
-    else if (e.kind === "assistant") out.push({ kind: "assistant", text: e.text });
-    else if (e.kind === "thinking") out.push({ kind: "reasoning", text: e.text });
-    else if (e.kind === "tool") out.push({ kind: "tool", text: `▸ ${e.name} — ${e.status}` });
+    else if (e.kind === "assistant" && e.text.trim()) out.push({ kind: "assistant", text: e.text });
+    else if (e.kind === "thinking" && e.text.trim()) out.push({ kind: "reasoning", text: e.text });
+    else if (e.kind === "tool") out.push({ kind: "tool", text: `▸ ${toolDisplayName(e.name)} — ${e.status}` });
     else if (e.kind === "notice") out.push({ kind: "notice", text: e.text });
   }
   return out;
@@ -281,7 +286,12 @@ export function App({
 
   // Custom slash commands from .privateer/commands, plus the merged autocomplete list.
   const customCommands = useMemo(() => loadCustomCommands(cwd), [cwd]);
-  const commands = useMemo(() => commandList(customCommands), [customCommands]);
+  // Agent skills from .privateer/skills. The epoch bumps after /skills install|remove
+  // so this list — and the session, whose skill-tool catalog is baked in at build
+  // time — pick up the change.
+  const [skillsEpoch, setSkillsEpoch] = useState(0);
+  const skills = useMemo(() => loadSkills(cwd).skills, [cwd, skillsEpoch]);
+  const commands = useMemo(() => commandList(customCommands, skills), [customCommands, skills]);
   // Lifecycle hooks (UserPromptSubmit / Stop) configured in settings.
   const hooks = useMemo(() => new HookRunner(loadHooks((config as any).hooks), cwd), [cwd]);
 
@@ -396,7 +406,7 @@ export function App({
     // Rebuild on model/style change, and when entering/leaving plan mode (so the
     // system prompt gains or loses the plan-mode mandate) — not on every mode change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelSpec, outputStyle, mode === "plan", mcpTools, zdrEnforced]);
+  }, [modelSpec, outputStyle, mode === "plan", mcpTools, zdrEnforced, skillsEpoch]);
 
   // One-time notice when resuming a prior conversation.
   useEffect(() => {
@@ -575,6 +585,13 @@ export function App({
         append({ kind: "notice", text: `📎 received ${file.name} from app` });
       },
       onInterrupt: () => abortRef.current?.abort(),
+      // The app's "End remote access" — same as typing /remote-access off. Flipping
+      // remoteEnabled runs this effect's cleanup: the client stops (no reconnect)
+      // and any parked approvals resolve to deny.
+      onTerminate: () => {
+        append({ kind: "notice", text: "Remote access turned off from the Privateer app. Use /remote-access on to re-enable." });
+        setRemoteEnabled(false);
+      },
       onApprovalResponse: (id, decision) => {
         const entry = pendingApprovalsRef.current.get(id);
         if (entry) {
@@ -674,7 +691,7 @@ export function App({
   const append = (...entries: Entry[]) => setCommitted((c) => [...c, ...entries]);
 
   function handleCommand(raw: string): boolean {
-    const res = runCommand(raw, { config, modelSpec, mode, usage, context, cwd, todos, customCommands });
+    const res = runCommand(raw, { config, modelSpec, mode, usage, context, cwd, todos, customCommands, skills });
     if (!res) return false;
     append({ kind: "user", text: raw });
     switch (res.type) {
@@ -706,6 +723,32 @@ export function App({
       case "runPrompt":
         void runTurn(res.text, { hideInput: true });
         break;
+      case "skillOp": {
+        const scope = res.project ? ("project" as const) : ("user" as const);
+        if (res.op === "install") {
+          append({ kind: "notice", text: `Installing skill(s) from ${res.arg}…` });
+          void installSkills(res.arg, { scope, all: res.all, force: res.force, cwd })
+            .then((installed) => {
+              append({
+                kind: "notice",
+                text: `Installed (${scope}): ${installed.map((s) => s.name).join(", ")}`,
+              });
+              setSkillsEpoch((e) => e + 1);
+            })
+            .catch((err) => {
+              append({ kind: "notice", tone: "error", text: err instanceof Error ? err.message : String(err) });
+            });
+        } else {
+          try {
+            const { dir } = removeSkill(res.arg, { scope: res.project ? "project" : undefined, cwd });
+            append({ kind: "notice", text: `Removed skill "${res.arg}" (${dir}).` });
+            setSkillsEpoch((e) => e + 1);
+          } catch (err) {
+            append({ kind: "notice", tone: "error", text: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        break;
+      }
       case "compact":
         void doCompact();
         break;
@@ -1130,10 +1173,16 @@ export function App({
       }
       for await (const ev of engine.send(sendText, controller.signal, attachments)) {
         switch (ev.type) {
-          case "text":
+          case "text": {
             thinkingIdx = -1;
             if (assistantIdx === -1) {
-              pushLive({ kind: "assistant", text: ev.text });
+              // Models often emit a whitespace-only text block between tool
+              // calls; opening an entry for it paints an empty ⏺ bullet. Hold
+              // off until real text arrives, and drop the leading whitespace
+              // when it does (it was only ever a separator).
+              const opening = ev.text.replace(/^\s+/, "");
+              if (!opening) break;
+              pushLive({ kind: "assistant", text: opening });
               assistantIdx = liveEntries.length - 1;
             } else {
               const idx = assistantIdx;
@@ -1143,9 +1192,13 @@ export function App({
               sync();
             }
             break;
-          case "reasoning":
+          }
+          case "reasoning": {
             if (thinkingIdx === -1) {
-              pushLive({ kind: "thinking", text: ev.text });
+              // Same whitespace-only guard as assistant text above.
+              const opening = ev.text.replace(/^\s+/, "");
+              if (!opening) break;
+              pushLive({ kind: "thinking", text: opening });
               thinkingIdx = liveEntries.length - 1;
             } else {
               const idx = thinkingIdx;
@@ -1155,6 +1208,7 @@ export function App({
               sync();
             }
             break;
+          }
           case "tool-call": {
             // `task` calls carry the sub-agent's description/type so the grouped
             // agents view can label each row before its metrics land.

@@ -54,6 +54,11 @@ export interface RelayCallbacks {
   onPrompt: (text: string) => void;
   // The app asked to interrupt the in-flight turn.
   onInterrupt: () => void;
+  // The app asked to turn remote access OFF entirely (the in-app "End remote
+  // access" action). The owner should disable /remote-access — i.e. stop this
+  // client and not reconnect. Optional: the routines daemon handles it too, but
+  // callbacks that predate it keep compiling.
+  onTerminate?: () => void;
   // The app answered a relayed approval request.
   onApprovalResponse: (id: string, decision: "allow" | "deny") => void;
   // A controller attached — push a transcript snapshot so it can catch up.
@@ -261,6 +266,9 @@ export class RelayClient {
         break;
       case "interrupt":
         this.cb.onInterrupt();
+        break;
+      case "terminate":
+        this.cb.onTerminate?.();
         break;
       case "approval_response":
         if (frame.id) this.cb.onApprovalResponse(frame.id, frame.decision === "deny" ? "deny" : "allow");

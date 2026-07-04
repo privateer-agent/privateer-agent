@@ -35,6 +35,7 @@ export interface ScopePaths {
   settingsLocal: string; // settings.local.json — gitignored local overrides
   commands: string; // commands/ — custom slash commands (M2)
   agents: string; // agents/ — custom subagents (M4)
+  skills: string; // skills/ — agent skills, one SKILL.md directory each
   outputStyles: string; // output-styles/ — persona prompts (M2)
   mcp: string; // mcp.json — MCP server declarations (M4)
 }
@@ -47,6 +48,7 @@ function scopePaths(dir: string): ScopePaths {
     settingsLocal: join(dir, "settings.local.json"),
     commands: join(dir, "commands"),
     agents: join(dir, "agents"),
+    skills: join(dir, "skills"),
     outputStyles: join(dir, "output-styles"),
     mcp: join(dir, "mcp.json"),
   };

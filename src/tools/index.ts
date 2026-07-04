@@ -15,12 +15,18 @@ import { memoryTool } from "./memory.ts";
 import { askUserTool } from "./askUser.ts";
 import { worktreeTool } from "./worktree.ts";
 import { routineTool } from "./routine.ts";
+import { skillTool } from "./skill.ts";
+import { loadSkills } from "../skills/loader.ts";
 
 export type { ToolContext } from "./context.ts";
 
 // Build the full toolset bound to a session context (cwd + permission gate + todo store).
 export function createTools(ctx: ToolContext): ToolSet {
+  // Registered only when skills exist — an empty catalog would be dead weight in
+  // every request.
+  const { skills } = loadSkills(ctx.cwd);
   return {
+    ...(skills.length > 0 ? { skill: skillTool(ctx, skills) } : {}),
     read: readTool(ctx),
     write: writeTool(ctx),
     edit: editTool(ctx),

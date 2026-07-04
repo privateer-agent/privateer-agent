@@ -6,6 +6,7 @@ import { configLayers } from "../config/load.ts";
 import { expandCommand, type CustomCommand } from "./custom.ts";
 import { loadOutputStyles } from "../context/outputStyles.ts";
 import { loadAgents } from "../agents/loader.ts";
+import { loadSkills, type SkillDefinition } from "../skills/loader.ts";
 import { loadHooks } from "../hooks/engine.ts";
 import { configuredProviders, parseModelSpec } from "../providers/resolve.ts";
 import { currentUser, serverBaseUrl } from "../auth/privateer.ts";
@@ -59,7 +60,9 @@ export type CommandResult =
   | { type: "remoteAccess"; on: boolean | null }
   // Manage routines via the daemon (resolved in the App over IPC).
   // action defaults to "list"; arg is the routine name/id for the targeted actions.
-  | { type: "routine"; action: "list" | "pause" | "resume" | "remove" | "run"; arg?: string };
+  | { type: "routine"; action: "list" | "pause" | "resume" | "remove" | "run"; arg?: string }
+  // Install or remove an agent skill (async fetch/fs work, resolved by the App).
+  | { type: "skillOp"; op: "install" | "remove"; arg: string; project?: boolean; all?: boolean; force?: boolean };
 
 export interface CommandContext {
   config: Config;
@@ -72,6 +75,7 @@ export interface CommandContext {
   cwd: string;
   todos: TodoItem[];
   customCommands?: CustomCommand[];
+  skills?: SkillDefinition[];
 }
 
 interface CommandDef {
@@ -89,9 +93,16 @@ const COMMANDS: CommandDef[] = [
       const custom = (ctx.customCommands ?? [])
         .map((c) => `  /${c.name.padEnd(11)} ${c.description}`)
         .join("\n");
+      const skills = (ctx.skills ?? [])
+        .map((s) => `  /${s.name.padEnd(11)} ${s.description.split("\n")[0]}`)
+        .join("\n");
       return {
         type: "notice",
-        text: "Commands:\n" + builtin + (custom ? "\n\nCustom commands:\n" + custom : ""),
+        text:
+          "Commands:\n" +
+          builtin +
+          (custom ? "\n\nCustom commands:\n" + custom : "") +
+          (skills ? "\n\nSkills:\n" + skills : ""),
       };
     },
   },
@@ -397,6 +408,70 @@ const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: "skills",
+    summary: "list agent skills, or install/remove one (install <src> | info | remove <name>)",
+    run: (args, ctx) => {
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const flags = new Set(parts.filter((p) => p.startsWith("--")));
+      const words = parts.filter((p) => !p.startsWith("--"));
+      const sub = words[0] ?? "list";
+      const project = flags.has("--project");
+      switch (sub) {
+        case "list": {
+          const { skills, warnings } = loadSkills(ctx.cwd);
+          if (skills.length === 0 && warnings.length === 0) {
+            return {
+              type: "notice",
+              text:
+                "No skills installed. Add SKILL.md directories under .privateer/skills/, " +
+                "or install one with /skills install <owner/repo[/path]>.",
+            };
+          }
+          const lines = skills.map(
+            (s) => `  ${s.name} (${s.scope})\n    ${s.description.split("\n")[0]}`,
+          );
+          const warn = warnings.length ? `\n\nWarnings:\n${warnings.map((w) => `  ${w}`).join("\n")}` : "";
+          return { type: "notice", text: `Skills:\n${lines.join("\n")}${warn}` };
+        }
+        case "info": {
+          const name = words[1];
+          if (!name) return { type: "notice", tone: "error", text: "Usage: /skills info <name>" };
+          const skill = loadSkills(ctx.cwd).skills.find((s) => s.name === name);
+          if (!skill) return { type: "notice", tone: "error", text: `No skill "${name}". See /skills.` };
+          const head = skill.body.split("\n").slice(0, 30).join("\n");
+          const fields = [
+            `name: ${skill.name} (${skill.scope})`,
+            `dir: ${skill.dir}`,
+            skill.model ? `model: ${skill.model}` : null,
+            skill.allowedTools?.length ? `allowed-tools: ${skill.allowedTools.join(", ")}` : null,
+            `description: ${skill.description}`,
+          ].filter(Boolean);
+          return { type: "notice", text: `${fields.join("\n")}\n\n${head}` };
+        }
+        case "install": {
+          if (!words[1]) {
+            return {
+              type: "notice",
+              tone: "error",
+              text: "Usage: /skills install <owner/repo[/path] | github url> [--project] [--all] [--force]",
+            };
+          }
+          return { type: "skillOp", op: "install", arg: words[1], project, all: flags.has("--all"), force: flags.has("--force") };
+        }
+        case "remove": {
+          if (!words[1]) return { type: "notice", tone: "error", text: "Usage: /skills remove <name> [--project]" };
+          return { type: "skillOp", op: "remove", arg: words[1], project };
+        }
+        default:
+          return {
+            type: "notice",
+            tone: "error",
+            text: `Unknown subcommand "${sub}". Use /skills [list | info <name> | install <src> | remove <name>].`,
+          };
+      }
+    },
+  },
+  {
     name: "compact",
     summary: "summarize older history to free up context",
     run: () => ({ type: "compact" }),
@@ -505,9 +580,16 @@ export const COMMAND_LIST: { name: string; summary: string }[] = COMMANDS.map((c
   summary: c.summary,
 }));
 
-// Built-ins plus any custom commands, for autocomplete.
-export function commandList(custom: CustomCommand[] = []): { name: string; summary: string }[] {
-  return [...COMMAND_LIST, ...custom.map((c) => ({ name: c.name, summary: c.description }))];
+// Built-ins plus any custom commands and skills, for autocomplete.
+export function commandList(
+  custom: CustomCommand[] = [],
+  skills: SkillDefinition[] = [],
+): { name: string; summary: string }[] {
+  return [
+    ...COMMAND_LIST,
+    ...custom.map((c) => ({ name: c.name, summary: c.description })),
+    ...skills.map((s) => ({ name: s.name, summary: `skill — ${s.description.split("\n")[0]}` })),
+  ];
 }
 
 // Parse and run a "/command args" line. Returns null if not a slash command.
@@ -520,5 +602,17 @@ export function runCommand(raw: string, ctx: CommandContext): CommandResult | nu
   if (cmd) return cmd.run(args, ctx);
   const custom = ctx.customCommands?.find((c) => c.name === name);
   if (custom) return { type: "runPrompt", text: expandCommand(custom, args) };
+  // A skill name invokes the skill via the tool (not by inlining the body): the
+  // tool's execute is what unlocks reads of the skill's bundled files.
+  const skill = ctx.skills?.find((s) => s.name === name);
+  if (skill) {
+    const req = args.trim();
+    return {
+      type: "runPrompt",
+      text:
+        `Load the "${skill.name}" skill with the skill tool and follow its instructions` +
+        (req ? ` for this request: ${req}` : "."),
+    };
+  }
   return { type: "notice", tone: "error", text: `Unknown command "/${name}". Try /help.` };
 }

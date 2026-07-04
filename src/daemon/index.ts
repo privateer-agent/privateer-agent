@@ -5,7 +5,7 @@ import { createSession } from "../session.ts";
 import { autoApproveGate } from "../permissions/gate.ts";
 import { loadMcpServers, connectMcpServers } from "../mcp/client.ts";
 import { RelayClient } from "../remote/relayClient.ts";
-import { hasCredentials } from "../auth/privateer.ts";
+import { hasCredentials, revokeChildSession } from "../auth/privateer.ts";
 import {
   loadRoutines,
   upsertRoutine,
@@ -53,6 +53,10 @@ export class Daemon {
   // Best-effort "is a controller attached right now?" — set on controller_attached,
   // cleared when our socket drops. Used to decide push-live vs queue-for-later.
   private controllerAttached = false;
+  // The app sent `terminate` (End remote access): keep the relay down until the
+  // daemon restarts, even if routine edits re-run syncRelay. Results still queue
+  // durably and deliver over the other channels meanwhile.
+  private relayTerminated = false;
   // Push a result live if a controller is attached; otherwise persist it to the
   // pending queue so it flushes the moment the app next attaches. Either path is
   // durable, so delivery treats both as handled.
@@ -85,7 +89,7 @@ export class Daemon {
   // of fire time so it's connected when a routine actually pushes. We never tear it
   // down once up — an idle authenticated socket is cheap and reconnects itself.
   private syncRelay(): void {
-    if (this.relay) return;
+    if (this.relay || this.relayTerminated) return;
     if (!hasCredentials()) return;
     const wantsRelay = loadRoutines().some((r) => r.enabled && r.delivery.includes("relay"));
     if (!wantsRelay) return;
@@ -97,6 +101,13 @@ export class Daemon {
       onApprovalResponse: () => {},
       onControllerAttached: () => this.onControllerAttached(),
       onAttachment: () => {},
+      onTerminate: () => {
+        this.relayTerminated = true;
+        this.controllerAttached = false;
+        this.relay?.stop();
+        this.relay = undefined;
+        log("relay terminated from the app; staying offline until the daemon restarts");
+      },
       onStatus: (text) => log(`relay: ${text}`),
       onDisconnected: () => {
         this.controllerAttached = false;
@@ -302,7 +313,9 @@ export function runDaemon(): void {
   const shutdown = () => {
     log("shutting down");
     daemon.stop();
-    process.exit(0);
+    // Release this process's Privateer session so the daemon drops off the
+    // app's Linked Devices immediately (best effort, then exit regardless).
+    void revokeChildSession().finally(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

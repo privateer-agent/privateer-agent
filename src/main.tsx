@@ -12,6 +12,7 @@ import { loadLatest, loadSession } from "./memory/store.ts";
 import { configuredProviders } from "./providers/resolve.ts";
 import { describeError } from "./engine/errors.ts";
 import { runDaemon } from "./daemon/index.ts";
+import { revokeChildSession } from "./auth/privateer.ts";
 
 // Set while Ink owns the screen. A stray unhandled rejection while the TUI is up
 // must NOT reach stdout/stderr — Node's default printer dumps the whole error
@@ -62,6 +63,16 @@ async function main() {
     .option("-r, --resume <id>", "resume a specific session by id (printed on exit)")
     .option("--onboard", "run the provider/key setup flow")
     .action(async (promptParts: string[], options: CliOptions) => {
+      // Terminal-window close (SIGHUP) or a kill (SIGTERM) bypasses the normal
+      // exit path below — revoke this terminal's Privateer session first so it
+      // drops off the app's Linked Devices immediately instead of lingering
+      // until server-side expiry. Installing a handler replaces Node's default
+      // terminate-on-signal, so exit explicitly with the conventional code.
+      const revokeAndExit = (code: number) => () => {
+        void revokeChildSession().finally(() => process.exit(code));
+      };
+      process.on("SIGHUP", revokeAndExit(129));
+      process.on("SIGTERM", revokeAndExit(143));
       try {
         if (options.cwd) process.chdir(options.cwd);
         const config = loadConfig();
@@ -83,6 +94,7 @@ async function main() {
 
         if (options.print) {
           await runPrint(modelSpec, promptParts.join(" ").trim(), config.confineToCwd);
+          await revokeChildSession();
           return;
         }
 
@@ -105,6 +117,11 @@ async function main() {
         await waitUntilExit();
         tuiActive = false;
 
+        // This terminal is done — release its Privateer session so it leaves the
+        // app's Linked Devices right away. Started before the resume hint prints
+        // and awaited after, so it doesn't delay the output.
+        const revoked = revokeChildSession();
+
         // On exit, print a hash that resumes this conversation later (à la Claude
         // Code). The latest persisted session carries the id used this run; it only
         // exists once at least one turn has been saved.
@@ -112,6 +129,7 @@ async function main() {
         if (last && last.messages.length > 0) {
           process.stdout.write(`\nResume this session:  ${NAME} --resume ${last.id}\n`);
         }
+        await revoked;
       } catch (err) {
         // Configuration/resolution errors are expected and user-facing — print them
         // cleanly without a stack trace.

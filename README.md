@@ -33,7 +33,7 @@ and streaming work identically across every provider — no model lock-in, no se
 - **The agent UX you already know.** Plan mode, checkpoint/rewind, a modal prompt, slash
   commands, sub-agents, and project memory — but vendor-neutral.
 - **Genuinely extensible.** MCP servers, lifecycle hooks, custom commands, output styles,
-  and sub-agents are all just files under `.privateer/`. No plugins to compile.
+  sub-agents, and skills are all just files under `.privateer/`. No plugins to compile.
 - **Zero binary deps.** The file/search/shell tools are pure Node — nothing to install
   beyond `node`.
 
@@ -392,6 +392,14 @@ Everything below is optional and lives under `.privateer/` (project) or `~/.priv
   Switch with `/output-style <name>` (or `default`).
 - **Sub-agents** — `.privateer/agents/<name>.md` with frontmatter (`description`, `tools`,
   `model`). Invoke via the `task` tool's `subagent_type`; `/agents` lists them.
+- **Skills** — `.privateer/skills/<name>/SKILL.md` (frontmatter `name`/`description` +
+  instruction body, plus any bundled `scripts/`/`references/` files). The format is
+  Claude Code-compatible, so published Agent Skills drop in unchanged. The agent sees a
+  catalog of names and descriptions and loads a skill's full instructions on demand via
+  the `skill` tool; `/skill-name` invokes one explicitly. Manage with `/skills`
+  (`list`, `info <name>`, `install <owner/repo[/path]> [--project] [--all] [--force]`,
+  `remove <name>`) — install fetches from GitHub with a shallow clone and never executes
+  anything it downloads.
 - **Hooks** — a `hooks` section in `settings.json` runs shell commands on `PreToolUse`,
   `PostToolUse`, `UserPromptSubmit`, and `Stop`. A hook blocks by exiting `2` or printing
   `{"decision":"block"}`; `UserPromptSubmit` can inject `additionalContext`. `/hooks` lists them.

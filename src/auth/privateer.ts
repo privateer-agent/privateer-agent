@@ -363,6 +363,31 @@ export async function apiRequest(path: string, init: RequestInit = {}): Promise<
   return authedFetch(`${base}${path}`, init);
 }
 
+/**
+ * Best-effort revoke of THIS terminal's child session on exit, so the terminal
+ * disappears from the app's Linked Devices list immediately instead of
+ * lingering until its access-token rows expire (24h server-side).
+ *
+ * Deliberately NOT authedFetch: that would spawn/refresh a session just to kill
+ * it. If no child was ever spawned (e.g. BYO-key run), there's nothing to do.
+ * Bounded by a short timeout — exit must never hang on a slow network — and all
+ * failures are swallowed; the server's TTL remains the fallback.
+ */
+export async function revokeChildSession(timeoutMs = 1500): Promise<void> {
+  const child = _child;
+  if (!child) return;
+  _child = null; // never reuse a session we've asked the server to revoke
+  try {
+    await fetch(`${serverBaseUrl()}/auth/session/current`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${child.accessToken}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    /* best effort — the session expires server-side regardless */
+  }
+}
+
 // ── Logout ───────────────────────────────────────────────────────────────────
 
 /**

@@ -102,20 +102,26 @@ export function EntryView({
       // Split off a trailing `recap:` line so it can render dimmed below the
       // response body. The model is asked to end each turn with one such line.
       const { body, recap } = splitRecap(entry.text);
+      const hasBody = body.trim().length > 0;
+      // Nothing to paint: a whitespace-only entry (possible in transcripts
+      // persisted before the turn loop filtered them) would render a bare ⏺.
+      if (!hasBody && !recap) return null;
       // ⏺ bullet in its own column so wrapped lines align under the text.
       return (
         <Box marginTop={1} flexDirection="column">
-          <Box>
-            <Text color={theme.accent}>{BULLET} </Text>
-            <Box width={bodyWidth}>
-              <Markdown text={body} />
+          {hasBody && (
+            <Box>
+              <Text color={theme.accent}>{BULLET} </Text>
+              <Box width={bodyWidth}>
+                <Markdown text={body} />
+              </Box>
             </Box>
-          </Box>
+          )}
           {recap && (
-            <Box marginTop={1}>
+            <Box marginTop={hasBody ? 1 : 0}>
               <Text color={theme.dim}>{"  "}</Text>
               <Box width={bodyWidth}>
-                <Text color="white">
+                <Text color={theme.dim} dimColor italic>
                   {recap}
                 </Text>
               </Box>
@@ -127,6 +133,7 @@ export function EntryView({
     case "thinking": {
       // The model's reasoning, rendered dimmed under a thinking mark. When
       // collapsed (Ctrl+O), show just a one-line summary instead of the full text.
+      if (entry.text.trim() === "") return null;
       if (collapsed) {
         const lineCount = entry.text.trim() === "" ? 0 : entry.text.trim().split("\n").length;
         return (

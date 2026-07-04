@@ -21,6 +21,7 @@ const {
   DEFAULT_SERVER_URL,
   defaultDeviceLabel,
   authedFetch,
+  revokeChildSession,
 } = await import("../src/auth/privateer.ts");
 
 const creds = {
@@ -184,6 +185,69 @@ test("authedFetch leaves a transient 429 (no cap code) retryable", async () => {
   try {
     const res = await authedFetch("https://example.test/x", {});
     assert.equal(res.status, 429);
+  } finally {
+    globalThis.fetch = orig;
+    clearCredentials();
+  }
+});
+
+test("revokeChildSession without a spawned child is a silent no-op", async () => {
+  clearCredentials(); // also drops any child left over from earlier tests
+  let called = false;
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    called = true;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await revokeChildSession();
+    assert.equal(called, false, "must not spawn a session just to revoke it");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("revokeChildSession revokes the child once with its own bearer", async () => {
+  saveCredentials(creds);
+  const revokes: { url: string; method: string; auth: string | null }[] = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (input: any, init: any) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("/auth/session/spawn")) {
+      return new Response(CHILD, { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/auth/session/current")) {
+      revokes.push({ url, method: init?.method, auth: new Headers(init?.headers).get("authorization") });
+      return new Response("{}", { status: 200 });
+    }
+    return new Response("ok", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await authedFetch("https://example.test/whoami", {}); // spawns the child
+    await revokeChildSession();
+    assert.equal(revokes.length, 1);
+    assert.equal(revokes[0].method, "DELETE");
+    // Self-revoke authenticates as the CHILD (the session being killed), not the parent.
+    assert.equal(revokes[0].auth, "Bearer child-access");
+    // The child is gone from memory — a second call must not re-revoke (or re-spawn).
+    await revokeChildSession();
+    assert.equal(revokes.length, 1);
+  } finally {
+    globalThis.fetch = orig;
+    clearCredentials();
+  }
+});
+
+test("revokeChildSession swallows network failure (exit must not throw)", async () => {
+  saveCredentials(creds);
+  const orig = globalThis.fetch;
+  globalThis.fetch = spawnAware(() => new Response("ok", { status: 200 }));
+  try {
+    await authedFetch("https://example.test/whoami", {}); // spawns the child
+    globalThis.fetch = (async () => {
+      throw new Error("network down");
+    }) as typeof fetch;
+    await assert.doesNotReject(revokeChildSession());
   } finally {
     globalThis.fetch = orig;
     clearCredentials();
