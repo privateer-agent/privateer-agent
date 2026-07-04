@@ -1,6 +1,6 @@
 {
   "name": "privateer-agent",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Privateer — a provider-agnostic terminal coding agent. Bring your own model (OpenRouter, Anthropic, OpenAI, Ollama, NEAR AI).",
   "type": "module",
   "license": "MIT",
