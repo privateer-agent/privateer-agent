@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useStdout } from "ink";
 import { App } from "./App.tsx";
 import { Onboarding, type OnboardingResult } from "./Onboarding.tsx";
 import { PrivateerLogin } from "./PrivateerLogin.tsx";
@@ -30,6 +31,17 @@ export function Root({
   const [modelSpec, setModelSpec] = useState(initialModel);
   const [onboarding, setOnboarding] = useState(startInOnboarding);
   const [loggingIn, setLoggingIn] = useState(false);
+  const { stdout } = useStdout();
+
+  // The App's banner/transcript lives in Ink's <Static> region, which stays in the
+  // terminal scrollback even after the component unmounts. Swapping screens (login,
+  // onboarding) and back therefore stacks a second banner under the stale one. Wipe
+  // screen + scrollback around every top-level swap so each view starts on a clean
+  // page — same trick App uses when the terminal is resized.
+  function swapScreen(update: () => void) {
+    stdout?.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback, home cursor
+    update();
+  }
 
   // Providers that already have credentials — pre-checked when re-running onboarding.
   const configured = configuredProviders(config)
@@ -47,9 +59,11 @@ export function Root({
     } catch {
       /* non-fatal: keys just won't persist to disk this run */
     }
-    setConfig(next);
-    setModelSpec(result.defaultModel);
-    setOnboarding(false);
+    swapScreen(() => {
+      setConfig(next);
+      setModelSpec(result.defaultModel);
+      setOnboarding(false);
+    });
   }
 
   // After a successful account login, switch to the Privateer-billed model so the
@@ -68,13 +82,20 @@ export function Root({
     } catch {
       /* non-fatal: model choice just won't persist this run */
     }
-    setConfig(next);
-    setModelSpec(spec);
-    setLoggingIn(false);
+    swapScreen(() => {
+      setConfig(next);
+      setModelSpec(spec);
+      setLoggingIn(false);
+    });
   }
 
   if (loggingIn) {
-    return <PrivateerLogin onComplete={finishLogin} onCancel={() => setLoggingIn(false)} />;
+    return (
+      <PrivateerLogin
+        onComplete={finishLogin}
+        onCancel={() => swapScreen(() => setLoggingIn(false))}
+      />
+    );
   }
 
   if (onboarding) {
@@ -88,8 +109,8 @@ export function Root({
       config={config}
       cwd={cwd}
       resume={resume}
-      onLogin={() => setOnboarding(true)}
-      onPrivateerLogin={() => setLoggingIn(true)}
+      onLogin={() => swapScreen(() => setOnboarding(true))}
+      onPrivateerLogin={() => swapScreen(() => setLoggingIn(true))}
     />
   );
 }
