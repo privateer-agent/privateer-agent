@@ -50,6 +50,14 @@ export interface SessionOptions {
   // Surfaces an `ask_user` question to the live TUI and resolves with the choice.
   // Omitted outside the interactive app, where ask_user reports it couldn't ask.
   askUser?: UserAsker;
+  // Streams a file to the connected remote controller (Privateer app), for the
+  // send_file_to_client tool. Omitted when remote access isn't available.
+  sendFileToController?: (file: {
+    name: string;
+    mediaType: string;
+    base64: string;
+    size: number;
+  }) => Promise<{ ok: boolean; reason?: string }>;
 }
 
 export interface Session {
@@ -134,6 +142,7 @@ export function createSession(opts: SessionOptions): Session {
     processes: opts.processes,
     attachments,
     askUser: opts.askUser,
+    sendFileToController: opts.sendFileToController,
   });
   if (opts.allowedTools) {
     const allow = new Set(opts.allowedTools);

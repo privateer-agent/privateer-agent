@@ -10,6 +10,7 @@ import { todoTool } from "./todo.ts";
 import { taskTool } from "./task.ts";
 import { webFetchTool, webSearchTool } from "./web.ts";
 import { saveAttachmentTool } from "./saveAttachment.ts";
+import { sendFileToClientTool } from "./sendFileToClient.ts";
 import { memoryTool } from "./memory.ts";
 import { askUserTool } from "./askUser.ts";
 import { worktreeTool } from "./worktree.ts";
@@ -33,6 +34,7 @@ export function createTools(ctx: ToolContext): ToolSet {
     web_fetch: webFetchTool(ctx),
     web_search: webSearchTool(ctx),
     save_attachment: saveAttachmentTool(ctx),
+    send_file_to_client: sendFileToClientTool(ctx),
     memory: memoryTool(ctx),
     ask_user: askUserTool(ctx),
     worktree: worktreeTool(ctx),

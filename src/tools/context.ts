@@ -57,6 +57,15 @@ export interface ToolContext {
   // user's choice. Absent outside the live TUI (sub-agents, remote-driven turns,
   // headless runs) — the tool then reports it couldn't ask and the model proceeds.
   askUser?: UserAsker;
+  // Streams a file to the connected remote controller (the Privateer app) over the
+  // relay, for the send_file_to_client tool. Absent when remote access is off or in
+  // bare/sub-agent/daemon contexts — the tool then reports it can't send.
+  sendFileToController?: (file: {
+    name: string;
+    mediaType: string;
+    base64: string;
+    size: number;
+  }) => Promise<{ ok: boolean; reason?: string }>;
 }
 
 // Resolve a possibly-relative path against the session cwd. The cwd is a *soft*

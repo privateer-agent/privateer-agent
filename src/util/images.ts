@@ -39,6 +39,28 @@ export function mediaModality(mediaType: string): Modality | null {
   return null;
 }
 
+// Text-like extensions whose concrete media type matters to the app (rendering /
+// save-as). Everything else in TEXT_EXTS is close enough to text/plain.
+const TEXT_MEDIA_TYPES: Record<string, string> = {
+  ".json": "application/json",
+  ".html": "text/html",
+  ".csv": "text/csv",
+  ".xml": "application/xml",
+  ".svg": "image/svg+xml",
+};
+
+// Media type for a file at `p`, for files sent over the relay to the app: binary
+// kinds from MEDIA_TYPES, recognized text kinds as text, else octet-stream (the
+// app renders those as a generic file card).
+export function mediaTypeForPath(p: string): string {
+  const ext = extname(p).toLowerCase();
+  const meta = MEDIA_TYPES[ext];
+  if (meta) return meta.mediaType;
+  const text = TEXT_MEDIA_TYPES[ext];
+  if (text) return text;
+  return TEXT_EXTS.has(ext) ? "text/plain" : "application/octet-stream";
+}
+
 // Magic-byte checks per media type, used to reject placeholder/corrupt files at capture
 // time. The motivating case: macOS delivers a drag from a screenshot thumbnail as a
 // *file promise*, so the terminal's …/T/drop-XXXXXX/ file can be a 4-byte stub holding

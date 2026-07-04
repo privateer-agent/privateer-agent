@@ -362,6 +362,16 @@ export function App({
         processes: processesRef.current,
         attachments: attachmentsRef.current,
         onSubAgentMetrics: (id, m) => subAgentMetricsRef.current.set(id, m),
+        // Read the ref at call time: the relay lives in its own effect (the
+        // /remote-access toggle), so this closure stays valid across session
+        // rebuilds and remote on/off flips.
+        sendFileToController: (file) => {
+          const client = relayRef.current;
+          if (!client) {
+            return Promise.resolve({ ok: false, reason: "remote access is off (/remote-access to enable)" });
+          }
+          return client.sendFile(file);
+        },
       });
       if (prev) {
         session.engine.messages.push(...prev.messages);

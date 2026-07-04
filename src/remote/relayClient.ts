@@ -73,6 +73,9 @@ const RECONNECT_MS = 3000;
 // memory with a lying `size` or a flood of concurrent transfers.
 const MAX_ATTACH_BYTES = 10 * 1024 * 1024; // 10 MB per file
 const MAX_INFLIGHT_ATTACH = 8; // simultaneous transfers
+// Base64 chars per file_chunk frame for agent→app sends (~135 KB decoded), kept
+// under the relay's 256 KB per-frame cap. Mirrors the app's CHUNK_CHARS.
+const FILE_CHUNK_CHARS = 180_000;
 // Coalesce streaming deltas so we don't emit one WS frame per token.
 const TEXT_FLUSH_MS = 60;
 
@@ -362,6 +365,38 @@ export class RelayClient {
   sendSnapshot(entries: { kind: string; text: string }[]): void {
     const trimmed = entries.slice(-80).map((e) => ({ kind: e.kind, text: safe(String(e.text ?? ""), 4000) }));
     this.rawSend({ type: "snapshot", entries: trimmed });
+  }
+
+  // ── agent → app file transfer (chunked) ─────────────────────────────────────
+  // Reverse of the attach_* path: file_begin → file_chunk* → file_end, each frame
+  // under the relay's 256 KB cap. Fire-and-forget past the socket — the server
+  // drops frames when no controller is attached and there is no ack, so "ok" means
+  // "handed to an open socket", not "the app received it". The payload is base64
+  // binary, so no redactSecrets (it would corrupt the bytes) — the caller decides
+  // what's safe to send.
+  async sendFile(file: {
+    name: string;
+    mediaType: string;
+    base64: string;
+    size: number;
+  }): Promise<{ ok: boolean; reason?: string }> {
+    if (!this.isConnected()) return { ok: false, reason: "relay socket not connected" };
+    if (file.size > MAX_ATTACH_BYTES) {
+      return { ok: false, reason: `exceeds the ${Math.round(MAX_ATTACH_BYTES / (1024 * 1024))} MB relay limit` };
+    }
+    this.flushDeltas(); // land the file in order relative to buffered text
+    const id = randomUUID();
+    this.rawSend({ type: "file_begin", id, name: file.name, mediaType: file.mediaType, size: file.size });
+    for (let off = 0, seq = 0; off < file.base64.length; off += FILE_CHUNK_CHARS, seq++) {
+      if (!this.isConnected()) return { ok: false, reason: "connection lost mid-transfer" };
+      this.rawSend({ type: "file_chunk", id, seq, data: file.base64.slice(off, off + FILE_CHUNK_CHARS) });
+      // Yield between frames of a multi-chunk file so a big send doesn't starve
+      // the event loop (ws buffers internally; no drain dance needed at ≤10 MB).
+      if (file.base64.length > FILE_CHUNK_CHARS) await new Promise((r) => setImmediate(r));
+    }
+    if (!this.isConnected()) return { ok: false, reason: "connection lost mid-transfer" };
+    this.rawSend({ type: "file_end", id });
+    return { ok: true };
   }
 
   requestApproval(id: string, req: PermissionRequest): void {
