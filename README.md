@@ -12,15 +12,25 @@
   <a href="https://github.com/privateer-agent/privateer-agent/actions/workflows/ci.yml">
     <img src="https://github.com/privateer-agent/privateer-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
+  <a href="https://www.npmjs.com/package/privateer-agent">
+    <img src="https://img.shields.io/npm/v/privateer-agent" alt="npm" />
+  </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
   <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Ollama%20·%20NEAR%20AI-5b8def" alt="Providers" />
   <img src="https://img.shields.io/badge/built%20on-Vercel%20AI%20SDK-black" alt="Vercel AI SDK" />
 </p>
 
+```bash
+curl -fsSL https://privateer.pro/install.sh | sh    # installs the `privateer` command
+npx privateer-agent                                 # or run it instantly, nothing installed
+```
+
 Switch between **OpenRouter**, **Anthropic**, **OpenAI**, local **Ollama**, and **NEAR AI**
 (private, attestable inference) with one command. Built on the Vercel AI SDK, so tool-calling
 and streaming work identically across every provider — no model lock-in, no separate code paths.
+MCP servers, Claude Code-compatible skills, scheduled routines, and approval from your phone
+included.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="Privateer running in the terminal" width="820" />
@@ -30,6 +40,8 @@ and streaming work identically across every provider — no model lock-in, no se
 
 - **No lock-in.** Point it at a frontier model today and a local Ollama model tomorrow —
   `/model` swaps mid-session. Your config, commands, and agents come along for the ride.
+- **No API key required.** Bring your own key (BYOK) from any supported provider, run
+  keyless against a local Ollama — or `/login` to bill a Privateer account instead.
 - **The agent UX you already know.** Plan mode, checkpoint/rewind, a modal prompt, slash
   commands, sub-agents, and project memory — but vendor-neutral.
 - **Genuinely extensible.** MCP servers, lifecycle hooks, custom commands, output styles,
@@ -39,54 +51,50 @@ and streaming work identically across every provider — no model lock-in, no se
 
 ## Highlights
 
-- A modal prompt with `/` command and `@` file autocomplete, `!` shell passthrough,
-  `#` memory append, input history, optional **vim** mode, and **ctrl-r** history search
-- Layered `settings.json` (user → project → local → managed), **custom slash commands**
-  and **output styles** as markdown files
-- **Plan mode** (read-only → present a plan → approve), **checkpoint/rewind** of
-  conversation and files
-- Extensible: **MCP servers** (local stdio + remote HTTP/SSE, with interactive OAuth),
-  lifecycle **hooks**, and **custom sub-agents**
-- Background shells, bounded parallel sub-agents, thinking display, structured compaction,
-  and image attachment for vision-capable models
+- **MCP servers** (local stdio + remote HTTP/SSE, with interactive OAuth), lifecycle
+  **hooks**, and **custom sub-agents**
+- **Claude Code-compatible skills** — published Agent Skills drop in unchanged; install
+  from GitHub with `/skills install owner/repo`
+- **Scheduled routines** — a daemon runs approved tasks unattended, cron or one-off
+- **Approve it from your phone** — link the terminal to the Privateer app with
+  `/remote-access` (off by default) and Allow/Deny every action remotely
 - **Zero-Data-Retention surfacing** for OpenRouter: a status-bar shield colors the selected
   model's retention posture, and `/zdr` pins routing to zero-retention endpoints
 - **Private, verifiable inference** via NEAR AI: every model runs in a TEE, a `⛉ TEE` status
   shield reflects the live attestation, and `/verify` fetches the attestation report (validate
   the raw quote chains with the NEAR Cloud Verifier for full cryptographic proof)
+- **Plan mode** (read-only → present a plan → approve), **checkpoint/rewind** of
+  conversation and files
+- A modal prompt with `/` command and `@` file autocomplete, `!` shell passthrough,
+  `#` memory append, input history, optional **vim** mode, and **ctrl-r** history search
+- Layered `settings.json` (user → project → local → managed), **custom slash commands**
+  and **output styles** as markdown files
+- Background shells, bounded parallel sub-agents, thinking display, structured compaction,
+  and image attachment for vision-capable models
 
 ## Quickstart
 
 ```bash
-npx privateer-agent                     # zero-install, runs the latest
-```
-
-Or install the `privateer` command on your PATH:
-
-```bash
-npm install -g privateer-agent          # then just run: privateer
-# or, the one-liner installer (checks Node, then installs):
-curl -fsSL https://privateer.pro/install.sh | sh
-```
-
-```bash
-export OPENROUTER_API_KEY=sk-or-...     # one provider is enough — or run /login
-privateer                               # launches the interactive TUI
+curl -fsSL https://privateer.pro/install.sh | sh    # or: npm install -g privateer-agent
+export OPENROUTER_API_KEY=sk-or-...                 # one provider is enough — or skip and run /login
+privateer                                           # launches the interactive TUI
 ```
 
 First run walks you through picking a provider and default model. From there, just type.
+(No install at all: `npx privateer-agent`.)
 
 ## Contents
 
-- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Model routing](#model-routing) · [Data retention (ZDR)](#data-retention-zdr) · [Private inference (NEAR AI)](#private-inference-near-ai) · [Usage](#usage)
+- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Model routing](#model-routing) · [Data retention (ZDR)](#data-retention-zdr) · [Private inference (NEAR AI)](#private-inference-near-ai) · [Privateer account](#privateer-account-billed-inference--what-it-sees) · [Usage](#usage)
 - [The prompt](#the-prompt) · [Slash commands](#slash-commands) · [Tools](#tools)
 - [Customize & extend](#customize--extend) · [Permission modes](#permission-modes) · [Project context](#project-context)
-- [Develop](#develop) · [Caveats](#caveats) · [Docs](#docs) · [License](#license)
+- [How it compares](#how-it-compares) · [Develop](#develop) · [Caveats](#caveats) · [Docs](#docs) · [License](#license)
 
 ## Requirements
 
-- Node.js ≥ 20
-- An API key for at least one provider (or a local Ollama install)
+- macOS or Linux
+- Node.js ≥ 20 (pure Node, zero binary dependencies)
+- An API key for at least one provider — or a local Ollama install, or a Privateer account (`/login`)
 
 ## Install
 
@@ -352,14 +360,19 @@ Built-ins (plus any custom commands you add):
 | Command | |
 |---|---|
 | `/help` `/doctor` `/config` | help, diagnostics, resolved settings layers |
-| `/model [spec]` `/provider` `/login` | choose a model, list providers, re-run onboarding |
+| `/model [spec]` `/provider` `/keys` | choose a model, list providers, manage API keys |
+| `/login` `/logout` | sign a Privateer account in/out (see [Privateer account](#privateer-account-billed-inference--what-it-sees)) |
+| `/remote-access [on\|off\|status]` | link this terminal to the Privateer app for phone approval (off by default) |
 | `/permissions [mode]` `/cost` `/context` | permission mode, token usage, context window |
-| `/init` `/memory` | write/show `PRIVATEER.md` |
+| `/init` `/memory` `/todo` | write/show `PRIVATEER.md`; show the task list |
 | `/agents` `/mcp [logout]` `/hooks` | inspect sub-agents; MCP status / clear OAuth; hooks |
+| `/skills [list\|info\|install\|remove]` | manage skills (see [Customize & extend](#customize--extend)) |
+| `/routine [list\|pause\|resume\|rm\|run]` | manage scheduled routines |
 | `/output-style [name]` `/vim` `/verbose` | persona, modal editing, full tool output |
 | `/zdr` | toggle OpenRouter zero-data-retention enforcement (see [Data retention](#data-retention-zdr)) |
 | `/verify` | fetch the NEAR AI TEE attestation for the current model (see [Private inference](#private-inference-near-ai)) |
 | `/rewind` `/compact` `/clear` `/export` | restore a checkpoint, compact, clear, save transcript |
+| `/resume` `/sessions` | pick up an earlier session in this directory |
 | `/exit` | quit |
 
 - `/model` — open a picker of each provider's live models (or `/model provider:id` to set one directly).
@@ -437,17 +450,41 @@ Everything below is optional and lives under `.privateer/` (project) or `~/.priv
 | Mode | Behavior |
 |---|---|
 | `default` | prompt before edits and shell commands |
-| `acceptEdits` | auto-approve file edits; still prompt for other shell commands (the default) |
+| `acceptEdits` | auto-approve file edits; still prompt for shell commands |
 | `bypass` | no prompts (also `--dangerously-skip-permissions` or `--no-quarter`) |
 | `plan` | read-only; the agent presents a plan, then you approve to leave plan mode |
 
-At an approval prompt: **y** allow once · **a** always · **n** deny. In plan mode, after the
-agent presents its plan: **a** approve and exit plan mode · **k** keep planning.
+Out of the box the mode is **`acceptEdits`** (naming is a nod to convention: the mode
+called `default` prompts on everything, but isn't the shipped default). Edits are still
+checkpointed, so `/rewind` undoes them; prefer prompting on every edit? Run
+`/permissions default` once — it persists. At an approval prompt: **y** allow once ·
+**a** always · **n** deny. In plan mode, after the agent presents its plan: **a** approve
+and exit plan mode · **k** keep planning.
 
 ## Project context
 
 Create a `PRIVATEER.md` in your repo (via `/init`) to give the agent standing
 context — conventions, architecture notes, anything it should always know.
+
+## How it compares
+
+There are excellent terminal coding agents already. What this one does differently:
+
+- **Provider-agnostic by construction, not adaptation.** One agent loop over the Vercel AI
+  SDK; OpenRouter, Anthropic, OpenAI, local Ollama, and NEAR AI are interchangeable at
+  `/model` time, including mid-session. No vendor's models are privileged.
+- **Retention posture is a UI element.** ZDR status is visible before you send and
+  enforceable per request (`/zdr`); TEE inference is attestable (`/verify`). Most tools
+  leave this to the provider's terms-of-service page.
+- **Phone approval.** `/remote-access` relays each proposed action to the Privateer app
+  for Allow/Deny while execution stays on your machine — useful for long agent runs you
+  want to supervise from anywhere.
+- **Interop over ecosystem.** Skills use the Agent Skills format, so Claude Code skills
+  drop in unchanged; MCP covers tools. The goal is to reuse what exists, not grow a
+  parallel plugin world.
+
+And, honestly, what it doesn't have: the maturity of the incumbents. It's a young
+codebase — see [Caveats](#caveats) for the sharp edges we know about.
 
 ## Develop
 
