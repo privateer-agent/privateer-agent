@@ -12,7 +12,7 @@ import type { SessionData } from "../memory/store.ts";
 
 // Top-level state machine: shows the onboarding flow (provider selection + key entry)
 // when needed, otherwise the main App. Onboarding can be re-entered from the app via
-// the /login command. Keeping config in state lets newly-saved keys take effect
+// the /keys command. Keeping config in state lets newly-saved keys take effect
 // immediately without a restart.
 export function Root({
   config: initialConfig,

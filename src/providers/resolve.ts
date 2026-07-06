@@ -4,9 +4,13 @@ import { KNOWN_PROVIDERS, type ProviderName } from "../config/schema.ts";
 import { buildModel, providerRequiresKey } from "./registry.ts";
 import { hasCredentials } from "../auth/privateer.ts";
 
-// Privateer's readiness is session-based, not key-based: ready iff logged in.
-function providerReady(name: ProviderName, cfg: { apiKey?: string }): boolean {
+// Whether a provider's credentials make it usable. Privateer's readiness is
+// session-based (ready iff logged in); the custom endpoint's is URL-based (the
+// key is optional — many local servers don't need one); everything else is
+// key-based or keyless.
+export function providerReady(name: ProviderName, cfg: { apiKey?: string; baseURL?: string }): boolean {
   if (name === "privateer") return hasCredentials();
+  if (name === "custom") return Boolean(cfg.baseURL);
   return providerRequiresKey(name) ? Boolean(cfg.apiKey) : true;
 }
 
@@ -60,9 +64,14 @@ export function resolveModel(spec: string, config: Config): ResolvedModel {
   if (provider === "privateer" && !hasCredentials()) {
     throw new Error(`Not signed in to your Privateer account. Run /login first.`);
   }
+  if (provider === "custom" && !cfg.baseURL) {
+    throw new Error(
+      `No endpoint URL for "custom". Run /keys and enter your OpenAI-compatible base URL.`,
+    );
+  }
   if (provider !== "privateer" && providerRequiresKey(provider) && !cfg.apiKey) {
     throw new Error(
-      `No API key for "${provider}". Set ${provider.toUpperCase()}_API_KEY or add it to ~/.privateer/config.json.`,
+      `No API key for "${provider}". Add one with /keys, or set ${provider.toUpperCase()}_API_KEY.`,
     );
   }
 

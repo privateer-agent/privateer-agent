@@ -72,6 +72,50 @@ test("Onboarding collects a masked key then opens the model step", async () => {
   unmount();
 });
 
+test("Onboarding walks the custom endpoint through URL then optional key", async () => {
+  // The model step fetches the endpoint's live listing; serve it a canned one.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      statusText: "",
+      json: async () => ({ data: [{ id: "qwen3-coder" }] }),
+      text: async () => "",
+    }) as Response) as typeof fetch;
+  try {
+    let result: OnboardingResult | null = null;
+    const { stdin, lastFrame, unmount } = render(
+      React.createElement(Onboarding, { onComplete: (r: OnboardingResult) => (result = r) }),
+    );
+    assert.ok(await until(has(lastFrame, /Select the providers/)), "select step renders");
+
+    // Custom sits just above Privateer at the bottom: wrap upward with "k".
+    for (let i = 0; i < 8 && !/❯ [◉○] Custom/.test(lastFrame() ?? ""); i++) {
+      await press(stdin, "k");
+      await until(has(lastFrame, /❯ [◉○] Custom/), 400);
+    }
+    assert.ok(await selectOn(stdin, lastFrame, /❯ ◉ Custom/), "Custom toggles on");
+    await press(stdin, ENTER);
+    assert.ok(await until(has(lastFrame, /Base URL of your OpenAI-compatible endpoint/)), "asks for the URL first");
+
+    for (const ch of "http://localhost:1234/v1") await press(stdin, ch);
+    await press(stdin, ENTER);
+    assert.ok(await until(has(lastFrame, /API key for http:\/\/localhost:1234\/v1/)), "then asks for the key");
+
+    await press(stdin, ENTER); // keyless endpoint — skip the key
+    assert.ok(await until(has(lastFrame, /qwen3-coder/)), "model step lists the endpoint's models");
+    await press(stdin, ENTER); // pick it
+    assert.ok(await until(() => result !== null), "onComplete fires");
+    assert.equal(result!.providers.custom?.baseURL, "http://localhost:1234/v1");
+    assert.equal(result!.providers.custom?.apiKey, undefined);
+    assert.equal(result!.defaultModel, "custom:qwen3-coder");
+    unmount();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("Onboarding masks the key input", async () => {
   const { stdin, lastFrame, unmount } = render(
     React.createElement(Onboarding, { onComplete: () => {} }),

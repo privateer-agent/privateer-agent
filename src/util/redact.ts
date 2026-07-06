@@ -6,11 +6,15 @@
 const PLACEHOLDER = "«redacted»";
 
 // Common API-key shapes, masked even when we don't have the exact value on hand:
-// OpenAI `sk-…`, Anthropic `sk-ant-…`, OpenRouter `sk-or-v1-…`, and bare
-// "Bearer <token>" / "x-api-key: <token>" header fragments.
+// OpenAI `sk-…`, Anthropic `sk-ant-…`, OpenRouter `sk-or-v1-…`, Google `AIza…`,
+// xAI `xai-…`, Groq `gsk_…`, and bare "Bearer <token>" / "x-api-key: <token>" /
+// "x-goog-api-key: <token>" header fragments.
 const KEY_PATTERNS: RegExp[] = [
   /\bsk-(ant|or|proj|live|test)?-?[A-Za-z0-9_-]{16,}\b/g,
-  /\b(authorization|x-api-key)\b\s*[:=]\s*(bearer\s+)?["']?[A-Za-z0-9_\-.]{16,}["']?/gi,
+  /\bAIza[A-Za-z0-9_-]{20,}\b/g,
+  /\bxai-[A-Za-z0-9_-]{16,}\b/g,
+  /\bgsk_[A-Za-z0-9_-]{16,}\b/g,
+  /\b(authorization|x-api-key|x-goog-api-key)\b\s*[:=]\s*(bearer\s+)?["']?[A-Za-z0-9_\-.]{16,}["']?/gi,
 ];
 
 // Exact secret strings to mask, gathered from the resolved config + environment.
@@ -26,8 +30,14 @@ export function collectSecrets(providers?: Record<string, { apiKey?: string } | 
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "XAI_API_KEY",
+    "GROQ_API_KEY",
     "NEAR_AI_API_KEY",
     "NEARAI_API_KEY",
+    "TINFOIL_API_KEY",
   ])
     add(process.env[k]);
   return [...out];

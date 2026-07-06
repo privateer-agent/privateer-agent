@@ -26,8 +26,15 @@ export const Config = z.object({
       openrouter: ProviderConfig.optional(),
       anthropic: ProviderConfig.optional(),
       openai: ProviderConfig.optional(),
+      google: ProviderConfig.optional(),
+      xai: ProviderConfig.optional(),
+      groq: ProviderConfig.optional(),
       ollama: ProviderConfig.optional(),
       nearai: ProviderConfig.optional(),
+      tinfoil: ProviderConfig.optional(),
+      // Custom OpenAI-compatible endpoint (LM Studio, vLLM, llama.cpp, a corporate
+      // proxy, …): the user supplies baseURL (required) and apiKey (optional).
+      custom: ProviderConfig.optional(),
       // Privateer account: inference billed to the user's account, no API key.
       // Auth lives in ~/.privateer/credentials.json (see src/auth/privateer.ts),
       // not here; this entry only carries an optional server baseURL override.
@@ -90,5 +97,17 @@ export const Config = z.object({
   .catchall(z.unknown());
 export type Config = z.infer<typeof Config>;
 
-export const KNOWN_PROVIDERS = ["openrouter", "anthropic", "openai", "ollama", "nearai", "privateer"] as const;
+export const KNOWN_PROVIDERS = [
+  "openrouter",
+  "anthropic",
+  "openai",
+  "google",
+  "xai",
+  "groq",
+  "ollama",
+  "nearai",
+  "tinfoil",
+  "custom",
+  "privateer",
+] as const;
 export type ProviderName = (typeof KNOWN_PROVIDERS)[number];

@@ -62,6 +62,9 @@ export function PrivateerLogin({
       <Text color={theme.dim}>
         Inference runs on your account and is billed to your subscription — no API key needed.
       </Text>
+      <Text color={theme.dim}>
+        Looking to add a provider API key instead? Press Esc, then run /keys.
+      </Text>
 
       {error ? (
         <Box flexDirection="column" marginTop={1}>

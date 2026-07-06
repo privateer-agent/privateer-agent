@@ -87,6 +87,86 @@ test("nearai listing requires a key", async () => {
   await assert.rejects(() => listModels("nearai", {}), /no API key/);
 });
 
+test("google listing sends the key header, keeps generateContent models, strips the prefix", async () => {
+  const calls = mockFetch({
+    models: [
+      {
+        name: "models/gemini-3.5-flash",
+        displayName: "Gemini 3.5 Flash",
+        supportedGenerationMethods: ["generateContent"],
+      },
+      { name: "models/text-embedding-004", supportedGenerationMethods: ["embedContent"] },
+    ],
+  });
+  const models = await listModels("google", { apiKey: "AIza-test" });
+  assert.deepEqual(models, [{ id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" }]);
+  assert.match(calls[0].url, /generativelanguage\.googleapis\.com\/v1beta\/models/);
+  assert.equal(calls[0].headers["x-goog-api-key"], "AIza-test");
+});
+
+test("google listing requires a key", async () => {
+  await assert.rejects(() => listModels("google", {}), /no API key/);
+});
+
+test("xai and groq list via the OpenAI shape with a bearer token", async () => {
+  const calls = mockFetch({ data: [{ id: "grok-4.3" }, { id: "grok-build-0.1" }] });
+  const xai = await listModels("xai", { apiKey: "xai-key" });
+  assert.deepEqual(
+    xai.map((m) => m.id),
+    ["grok-4.3", "grok-build-0.1"],
+  );
+  assert.match(calls[0].url, /api\.x\.ai\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer xai-key");
+
+  const groqCalls = mockFetch({ data: [{ id: "llama-3.3-70b-versatile" }] });
+  const groq = await listModels("groq", { apiKey: "gsk_key" });
+  assert.deepEqual(groq, [{ id: "llama-3.3-70b-versatile" }]);
+  assert.match(groqCalls[0].url, /api\.groq\.com\/openai\/v1\/models$/);
+  assert.equal(groqCalls[0].headers.authorization, "Bearer gsk_key");
+});
+
+test("xai and groq listings require a key", async () => {
+  await assert.rejects(() => listModels("xai", {}), /no API key/);
+  await assert.rejects(() => listModels("groq", {}), /no API key/);
+});
+
+test("custom listing hits the configured endpoint, key optional", async () => {
+  const calls = mockFetch({ data: [{ id: "qwen3-coder" }, { id: "glm-air" }] });
+  const models = await listModels("custom", { baseURL: "http://localhost:1234/v1" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["glm-air", "qwen3-coder"],
+  );
+  assert.match(calls[0].url, /localhost:1234\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, undefined);
+
+  const authed = mockFetch({ data: [{ id: "proxy-model" }] });
+  await listModels("custom", { baseURL: "https://llm.corp.example/v1", apiKey: "corp-key" });
+  assert.equal(authed[0].headers.authorization, "Bearer corp-key");
+});
+
+test("custom listing requires a base URL", async () => {
+  await assert.rejects(() => listModels("custom", {}), /no base URL/);
+});
+
+test("tinfoil listing keeps chat models and maps the multimodal flag to an image modality", async () => {
+  const calls = mockFetch({
+    data: [
+      { id: "kimi-k2-6", type: "chat", multimodal: true },
+      { id: "deepseek-v4-pro", type: "chat", multimodal: false },
+      { id: "whisper-large-v3-turbo", type: "audio" },
+      { id: "nomic-embed-text", type: "embedding" },
+    ],
+  });
+  const models = await listModels("tinfoil", { apiKey: "tk-key" });
+  assert.deepEqual(models, [
+    { id: "deepseek-v4-pro", inputModalities: undefined },
+    { id: "kimi-k2-6", inputModalities: ["text", "image"] },
+  ]);
+  assert.match(calls[0].url, /inference\.tinfoil\.sh\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer tk-key");
+});
+
 test("a non-OK response throws with the status", async () => {
   mockFetch({ error: "bad key" }, 401);
   await assert.rejects(() => listModels("anthropic", { apiKey: "nope" }), /401/);

@@ -42,7 +42,9 @@ export function ModelPicker({
   if (entries.length === 0) {
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text color={theme.error}>No providers configured. Run /login to add an API key.</Text>
+        <Text color={theme.error}>
+          No providers configured. Run /keys to add an API key, or /login for a Privateer account.
+        </Text>
       </Box>
     );
   }
@@ -193,7 +195,8 @@ function ModelStage({
       <Box flexDirection="column" paddingX={1}>
         <Text color={theme.error}>Couldn't fetch {label} models: {error}</Text>
         <Text color={theme.dim}>
-          Check the API key with /login, or set a model directly: /model {provider}:&lt;id&gt;.
+          {provider === "privateer" ? "Check your sign-in with /login" : "Check the API key with /keys"}, or set
+          a model directly: /model {provider}:&lt;id&gt;.
           {onBack ? " Esc to go back." : ""}
         </Text>
       </Box>

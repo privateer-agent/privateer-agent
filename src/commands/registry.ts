@@ -136,7 +136,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: "login",
-    summary: "sign in to your Privateer account (inference billed to your subscription)",
+    summary: "sign in to your Privateer account (to add provider API keys, use /keys)",
     run: () => ({ type: "privateerLogin" }),
   },
   {
@@ -489,7 +489,7 @@ const COMMANDS: CommandDef[] = [
         return {
           type: "notice",
           tone: "error",
-          text: "ZDR enforcement applies to OpenRouter. Add an OpenRouter key with /login first.",
+          text: "ZDR enforcement applies to OpenRouter. Add an OpenRouter key with /keys first.",
         };
       }
       return { type: "toggleZdr" };
@@ -523,7 +523,7 @@ const COMMANDS: CommandDef[] = [
         return {
           type: "notice",
           tone: "error",
-          text: "No NEAR AI key. Add one with /login (or set NEAR_AI_API_KEY) to fetch an attestation.",
+          text: "No NEAR AI key. Add one with /keys (or set NEAR_AI_API_KEY) to fetch an attestation.",
         };
       }
       return { type: "verify" };

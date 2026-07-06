@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
-  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Ollama%20·%20NEAR%20AI-5b8def" alt="Providers" />
+  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Google%20·%20xAI%20·%20Groq%20·%20Ollama%20·%20NEAR%20AI%20·%20Tinfoil-5b8def" alt="Providers" />
   <img src="https://img.shields.io/badge/built%20on-Vercel%20AI%20SDK-black" alt="Vercel AI SDK" />
 </p>
 
@@ -26,8 +26,9 @@ curl -fsSL https://privateer.pro/install.sh | sh    # installs the `privateer` c
 npx privateer-agent                                 # or run it instantly, nothing installed
 ```
 
-Switch between **OpenRouter**, **Anthropic**, **OpenAI**, local **Ollama**, and **NEAR AI**
-(private, attestable inference) with one command. Built on the Vercel AI SDK, so tool-calling
+Switch between **OpenRouter**, **Anthropic**, **OpenAI**, **Google**, **xAI**, **Groq**,
+local **Ollama**, **NEAR AI** or **Tinfoil** (private TEE inference), and any **custom
+OpenAI-compatible endpoint** (LM Studio, vLLM, llama.cpp…) with one command. Built on the Vercel AI SDK, so tool-calling
 and streaming work identically across every provider — no model lock-in, no separate code paths.
 MCP servers, Claude Code-compatible skills, scheduled routines, and approval from your phone
 included.
@@ -126,8 +127,12 @@ Privateer reads credentials from environment variables or a config file.
 export OPENROUTER_API_KEY=sk-or-...      # gateway to ~everything
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
+export GEMINI_API_KEY=AIza...            # Google (also GOOGLE_GENERATIVE_AI_API_KEY / GOOGLE_API_KEY)
+export XAI_API_KEY=xai-...               # xAI (Grok)
+export GROQ_API_KEY=gsk_...              # Groq (fast inference)
 export OLLAMA_BASE_URL=http://localhost:11434/api   # optional; defaults to this
 export NEAR_AI_API_KEY=...               # private TEE inference (cloud.near.ai)
+export TINFOIL_API_KEY=...               # private TEE inference (tinfoil.sh)
 ```
 
 **Config file** — `~/.privateer/config.json` (global) and/or `./.privateer/config.json` (per project):
@@ -142,6 +147,22 @@ export NEAR_AI_API_KEY=...               # private TEE inference (cloud.near.ai)
   }
 }
 ```
+
+**Custom endpoint** — point the `custom` provider at any OpenAI-compatible server
+(LM Studio, vLLM, llama.cpp, text-generation-inference, a corporate proxy…). Pick
+"Custom (OpenAI-compatible)" in `/keys` and paste the base URL (API key optional), or
+configure it directly:
+
+```json
+{
+  "providers": {
+    "custom": { "baseURL": "http://localhost:1234/v1", "apiKey": "optional" }
+  }
+}
+```
+
+The `/model` picker lists whatever the endpoint's `/models` reports; requests use the
+Chat Completions API. Model specs look like `custom:qwen3-coder`.
 
 Override the config location with `PRIVATEER_HOME`.
 
@@ -230,7 +251,7 @@ them.
 endpoints (`provider.zdr` on every request), so yellow models go green — and any model
 *without* a zero-retention endpoint is rejected rather than silently retained. Toggle it off
 to let OpenRouter route freely. Enforcement applies to OpenRouter only; add an OpenRouter key
-with `/login` first.
+with `/keys` first.
 
 ## Private inference (NEAR AI)
 

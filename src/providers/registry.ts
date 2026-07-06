@@ -1,6 +1,9 @@
 import type { LanguageModel } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createXai } from "@ai-sdk/xai";
+import { createGroq } from "@ai-sdk/groq";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createOllama } from "ollama-ai-provider-v2";
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
@@ -13,6 +16,11 @@ import { authedFetch, serverBaseUrl } from "../auth/privateer.ts";
 // default Responses transport, and supplies this base when the user hasn't set one.
 export const NEARAI_BASE_URL = "https://cloud-api.near.ai/v1";
 
+// Tinfoil's OpenAI-compatible inference gateway. Like NEAR AI, every model runs
+// inside a hardware enclave (TEE) — prompts are confidential to the host. Its
+// attestation protocol differs from NEAR's, so /verify doesn't cover it (yet).
+export const TINFOIL_BASE_URL = "https://inference.tinfoil.sh/v1";
+
 // Each factory turns provider credentials + a model id into an AI SDK LanguageModel.
 // This is the single seam that makes Privateer provider-agnostic: the agent loop,
 // tools, and UI never know or care which provider is behind the model.
@@ -23,8 +31,15 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   openrouter: true,
   anthropic: true,
   openai: true,
+  google: true,
+  xai: true,
+  groq: true,
   ollama: false,
   nearai: true,
+  tinfoil: true,
+  // A custom endpoint may or may not need a key (LM Studio doesn't, a corporate
+  // proxy might); its real requirement is the baseURL — see providerReady().
+  custom: false,
   // Privateer authenticates via a stored account session, not a typed key, so
   // there's no key to prompt for. Readiness is "are you logged in?" — see
   // providers/resolve.ts, which special-cases this against hasCredentials().
@@ -43,12 +58,27 @@ const FACTORIES: Record<ProviderName, Factory> = {
     createAnthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   openai: (cfg, modelId) =>
     createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  google: (cfg, modelId) =>
+    createGoogleGenerativeAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  xai: (cfg, modelId) =>
+    createXai({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  groq: (cfg, modelId) =>
+    createGroq({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   ollama: (cfg, modelId) =>
     createOllama({ baseURL: cfg.baseURL })(modelId),
   nearai: (cfg, modelId) =>
     // OpenAI-compatible, but Chat-Completions-only — `.chat()` avoids the SDK's
     // default Responses transport, which NEAR's TEE endpoints don't implement.
     createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? NEARAI_BASE_URL }).chat(modelId),
+  tinfoil: (cfg, modelId) =>
+    // OpenAI-compatible TEE gateway; `.chat()` pins Chat Completions like nearai.
+    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? TINFOIL_BASE_URL }).chat(modelId),
+  custom: (cfg, modelId) =>
+    // User-supplied OpenAI-compatible endpoint. `.chat()` pins Chat Completions —
+    // the lowest common denominator every compatible server implements (Responses
+    // is OpenAI-proper only). The placeholder key keeps the SDK from demanding
+    // OPENAI_API_KEY when the endpoint is keyless; resolveModel guards baseURL.
+    createOpenAI({ apiKey: cfg.apiKey ?? "unused", baseURL: cfg.baseURL }).chat(modelId),
   privateer: (cfg, modelId) =>
     // Routes to the Privateer server's billed, OpenAI-compatible agent endpoint.
     // `authedFetch` injects the account JWT and refreshes it on 401, so no key is

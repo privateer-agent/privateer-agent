@@ -3,15 +3,16 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { Config, ProviderName, ProviderConfig } from "../config/schema.ts";
 import { PROVIDER_LIST, PROVIDER_META, type ProviderMeta } from "../providers/catalog.ts";
-import { providerRequiresKey } from "../providers/registry.ts";
+import { providerReady } from "../providers/resolve.ts";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { theme } from "./theme.ts";
 import { WELCOME } from "./figures.ts";
 
-// Which of the just-entered providers are actually usable (have a key, or are keyless).
+// Which of the just-entered providers are actually usable (have a key, a base URL
+// for the custom endpoint, or are keyless) — same rule the picker/doctor use.
 function readyProviders(creds: Partial<Record<ProviderName, ProviderConfig>>): ProviderName[] {
   return (Object.keys(creds) as ProviderName[]).filter((name) =>
-    providerRequiresKey(name) ? Boolean(creds[name]?.apiKey) : true,
+    providerReady(name, creds[name] ?? {}),
   );
 }
 
@@ -75,6 +76,8 @@ function SelectStep({
 
 // Step 2 — walk the chosen providers one at a time, collecting a masked API key (or a
 // base URL for keyless/local providers). Empty key = skip that provider's credential.
+// The custom endpoint asks two questions: the base URL (required — skipping it skips
+// the provider) and then an API key (optional — many local servers don't need one).
 function KeyStep({
   providers,
   onDone,
@@ -85,21 +88,42 @@ function KeyStep({
   const [index, setIndex] = useState(0);
   const [value, setValue] = useState("");
   const [creds, setCreds] = useState<Partial<Record<ProviderName, ProviderConfig>>>({});
+  // The custom provider's URL, held between its two prompts.
+  const [pendingURL, setPendingURL] = useState<string | null>(null);
   const meta = providers[index];
+  const isCustom = meta.name === "custom";
+  const askingURL = isCustom && pendingURL === null;
 
-  function submit(raw: string) {
-    const v = raw.trim();
-    const entry: ProviderConfig = meta.requiresKey
-      ? v
-        ? { apiKey: v }
-        : {}
-      : { baseURL: v || meta.baseURLDefault };
+  function advance(entry: ProviderConfig) {
     const nextCreds = { ...creds, [meta.name]: entry };
     setCreds(nextCreds);
+    setPendingURL(null);
     setValue("");
     if (index + 1 < providers.length) setIndex(index + 1);
     else onDone(nextCreds);
   }
+
+  function submit(raw: string) {
+    const v = raw.trim();
+    if (askingURL) {
+      // No URL → skip the provider (an empty entry keeps it listed but not ready).
+      if (!v) return advance({});
+      setPendingURL(v);
+      setValue("");
+      return;
+    }
+    if (isCustom) return advance({ baseURL: pendingURL!, ...(v ? { apiKey: v } : {}) });
+    advance(meta.requiresKey ? (v ? { apiKey: v } : {}) : { baseURL: v || meta.baseURLDefault });
+  }
+
+  const prompt = askingURL
+    ? `Base URL of your OpenAI-compatible endpoint (${meta.keyHint}). Enter to skip.`
+    : isCustom
+      ? `API key for ${pendingURL} — Enter to skip if the endpoint doesn't need one.`
+      : meta.requiresKey
+        ? `Paste your API key (${meta.keyHint}). Enter to skip.`
+        : `Base URL for ${meta.label}. Enter to use the default.`;
+  const masked = isCustom ? !askingURL : meta.requiresKey;
 
   return (
     <Box flexDirection="column">
@@ -107,19 +131,15 @@ function KeyStep({
         Step {index + 1} of {providers.length} —{" "}
         <Text color={theme.accent}>{meta.label}</Text>
       </Text>
-      <Text color={theme.dim}>
-        {meta.requiresKey
-          ? `Paste your API key (${meta.keyHint}). Enter to skip.`
-          : `Base URL for Ollama. Enter to use the default.`}
-      </Text>
+      <Text color={theme.dim}>{prompt}</Text>
       <Box marginTop={1} borderStyle="round" borderColor={theme.accent} paddingX={1}>
         <Text color={theme.accent}>{"> "}</Text>
         <TextInput
           value={value}
           onChange={setValue}
           onSubmit={submit}
-          mask={meta.requiresKey ? "*" : undefined}
-          placeholder={meta.requiresKey ? "sk-…" : meta.baseURLDefault}
+          mask={masked ? "*" : undefined}
+          placeholder={masked ? "sk-…" : meta.baseURLDefault}
         />
       </Box>
     </Box>

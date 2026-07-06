@@ -14,3 +14,22 @@ test("openrouter buildModel leaves routing unpinned by default", () => {
   const model = buildModel("openrouter", { apiKey: "sk-or" }, "openai/gpt-4o");
   assert.equal((model as any).settings?.provider?.zdr, undefined);
 });
+
+// Construction is offline for every provider, so a smoke test catches a factory
+// that's miswired (wrong SDK import, bad default base) without touching the network.
+test("buildModel constructs a model for each new provider", () => {
+  for (const [provider, id] of [
+    ["google", "gemini-3.5-flash"],
+    ["xai", "grok-4.3"],
+    ["groq", "llama-3.3-70b-versatile"],
+    ["tinfoil", "deepseek-v4-pro"],
+  ] as const) {
+    const model = buildModel(provider, { apiKey: "test-key" }, id);
+    assert.equal((model as any).modelId, id, `${provider} model id passthrough`);
+  }
+});
+
+test("custom buildModel works keyless against a user-supplied endpoint", () => {
+  const model = buildModel("custom", { baseURL: "http://localhost:1234/v1" }, "qwen3-coder");
+  assert.equal((model as any).modelId, "qwen3-coder");
+});

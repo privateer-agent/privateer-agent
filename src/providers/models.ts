@@ -1,5 +1,5 @@
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
-import { NEARAI_BASE_URL } from "./registry.ts";
+import { NEARAI_BASE_URL, TINFOIL_BASE_URL } from "./registry.ts";
 import { authedFetch, serverBaseUrl, DEFAULT_SERVER_URL } from "../auth/privateer.ts";
 
 // A model offered by a provider, as surfaced in the picker. `id` is the bare model
@@ -19,9 +19,14 @@ const TIMEOUT_MS = 12_000;
 const DEFAULT_BASE: Record<ProviderName, string> = {
   anthropic: "https://api.anthropic.com",
   openai: "https://api.openai.com/v1",
+  google: "https://generativelanguage.googleapis.com/v1beta",
+  xai: "https://api.x.ai/v1",
+  groq: "https://api.groq.com/openai/v1",
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://localhost:11434/api",
   nearai: NEARAI_BASE_URL,
+  tinfoil: TINFOIL_BASE_URL,
+  custom: "", // no default exists for a user-supplied endpoint; listModels requires cfg.baseURL
   privateer: DEFAULT_SERVER_URL, // unused by the privateer branch (authed endpoint), kept for type completeness
 };
 
@@ -76,6 +81,31 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
         .map((m) => ({ id: m.id }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
+    case "google": {
+      // Gemini's native listing: names come prefixed ("models/gemini-…") and the list
+      // includes embedding/TTS models, so keep only those that can generateContent.
+      if (!cfg.apiKey) throw new Error("no API key");
+      const json = (await getJson(`${base}/models?pageSize=1000`, {
+        "x-goog-api-key": cfg.apiKey,
+      })) as {
+        models?: { name: string; displayName?: string; supportedGenerationMethods?: string[] }[];
+      };
+      return (json.models ?? [])
+        .filter((m) => m.supportedGenerationMethods?.includes("generateContent") ?? true)
+        .map((m) => ({ id: m.name.replace(/^models\//, ""), label: m.displayName }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+    case "xai":
+    case "groq": {
+      // Both speak the OpenAI listing shape.
+      if (!cfg.apiKey) throw new Error("no API key");
+      const json = (await getJson(`${base}/models`, {
+        authorization: `Bearer ${cfg.apiKey}`,
+      })) as { data?: { id: string }[] };
+      return (json.data ?? [])
+        .map((m) => ({ id: m.id }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
     case "openrouter": {
       // OpenRouter's model list is public; the key is sent when present but optional.
       const json = (await getJson(
@@ -102,6 +132,33 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
       const json = (await getJson(`${base}/models`, {
         authorization: `Bearer ${cfg.apiKey}`,
       })) as { data?: { id: string }[] };
+      return (json.data ?? [])
+        .map((m) => ({ id: m.id }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+    case "tinfoil": {
+      // OpenAI listing shape plus Tinfoil extras: `type` separates chat models from
+      // embeddings/TTS/whisper (keep chat only), and `multimodal` marks models that
+      // can see — surfaced as an image modality so the router knows. The listing
+      // itself is public; the key is sent when present.
+      const json = (await getJson(
+        `${base}/models`,
+        cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {},
+      )) as { data?: { id: string; type?: string; multimodal?: boolean }[] };
+      return (json.data ?? [])
+        .filter((m) => (m.type ?? "chat") === "chat")
+        .map((m) => ({ id: m.id, inputModalities: m.multimodal ? ["text", "image"] : undefined }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+    case "custom": {
+      // User-supplied OpenAI-compatible endpoint: standard /models listing, key
+      // optional (sent when present). No family filtering — we can't know what a
+      // custom server hosts, so everything it reports is offered.
+      if (!cfg.baseURL) throw new Error("no base URL — run /keys to set one");
+      const json = (await getJson(
+        `${base}/models`,
+        cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {},
+      )) as { data?: { id: string }[] };
       return (json.data ?? [])
         .map((m) => ({ id: m.id }))
         .sort((a, b) => a.id.localeCompare(b.id));

@@ -35,6 +35,34 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "openrouter:anthropic/claude-opus-4.8",
     keyHint: "openrouter.ai/keys",
   },
+  google: {
+    name: "google",
+    label: "Google (Gemini)",
+    requiresKey: providerRequiresKey("google"),
+    defaultModel: "google:gemini-3.5-flash",
+    keyHint: "aistudio.google.com/apikey",
+  },
+  xai: {
+    name: "xai",
+    label: "xAI (Grok)",
+    requiresKey: providerRequiresKey("xai"),
+    defaultModel: "xai:grok-4.3",
+    keyHint: "console.x.ai → API Keys",
+  },
+  groq: {
+    name: "groq",
+    label: "Groq (fast inference)",
+    requiresKey: providerRequiresKey("groq"),
+    defaultModel: "groq:llama-3.3-70b-versatile",
+    keyHint: "console.groq.com/keys",
+  },
+  tinfoil: {
+    name: "tinfoil",
+    label: "Tinfoil (private TEE inference)",
+    requiresKey: providerRequiresKey("tinfoil"),
+    defaultModel: "tinfoil:deepseek-v4-pro",
+    keyHint: "tinfoil.sh → dashboard → API Keys",
+  },
   ollama: {
     name: "ollama",
     label: "Ollama (local)",
@@ -49,6 +77,17 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     requiresKey: providerRequiresKey("nearai"),
     defaultModel: "nearai:zai-org/GLM-5.1-FP8",
     keyHint: "cloud.near.ai → API Keys",
+  },
+  custom: {
+    name: "custom",
+    label: "Custom (OpenAI-compatible)",
+    requiresKey: providerRequiresKey("custom"),
+    // No universal model id exists for an arbitrary endpoint; "default" is a
+    // last-resort fallback (several local servers accept or ignore the model id).
+    // In practice the live listing supplies real ids the moment a URL is entered.
+    defaultModel: "custom:default",
+    keyHint: "any OpenAI-compatible endpoint — LM Studio, vLLM, llama.cpp, a proxy…",
+    baseURLDefault: "http://localhost:1234/v1",
   },
   privateer: {
     name: "privateer",
