@@ -7,7 +7,8 @@ const PLACEHOLDER = "«redacted»";
 
 // Common API-key shapes, masked even when we don't have the exact value on hand:
 // OpenAI `sk-…`, Anthropic `sk-ant-…`, OpenRouter `sk-or-v1-…`, Google `AIza…`,
-// xAI `xai-…`, Groq `gsk_…`, Z.ai/Zhipu `<32 hex>.<suffix>`, Cerebras `csk-…`, and bare
+// xAI `xai-…`, Groq `gsk_…`, Z.ai/Zhipu `<32 hex>.<suffix>`, Cerebras `csk-…`,
+// Venice `vapi_…`, and bare
 // "Bearer <token>" / "x-api-key: <token>" / "x-goog-api-key: <token>" header
 // fragments. (Mistral keys are prefix-less, so they rely on exact-value masking
 // and the header patterns.)
@@ -17,6 +18,7 @@ const KEY_PATTERNS: RegExp[] = [
   /\bxai-[A-Za-z0-9_-]{16,}\b/g,
   /\bgsk_[A-Za-z0-9_-]{16,}\b/g,
   /\bcsk-[A-Za-z0-9_-]{16,}\b/g,
+  /\bvapi_[A-Za-z0-9_-]{16,}\b/g,
   /\b[a-f0-9]{32}\.[A-Za-z0-9]{10,}\b/g,
   /\b(authorization|x-api-key|x-goog-api-key)\b\s*[:=]\s*(bearer\s+)?["']?[A-Za-z0-9_\-.]{16,}["']?/gi,
 ];
@@ -51,6 +53,7 @@ export function collectSecrets(providers?: Record<string, { apiKey?: string } | 
     "NEAR_AI_API_KEY",
     "NEARAI_API_KEY",
     "TINFOIL_API_KEY",
+    "VENICE_API_KEY",
   ])
     add(process.env[k]);
   return [...out];

@@ -241,6 +241,33 @@ test("mistral listing requires a key", async () => {
   await assert.rejects(() => listModels("mistral", {}), /no API key/);
 });
 
+test("venice listing is public, badges anonymized models, and maps vision", async () => {
+  const calls = mockFetch({
+    data: [
+      {
+        id: "qwen3-coder-480b-a35b-instruct-turbo",
+        model_spec: { name: "Qwen3 Coder 480B", privacy: "private", capabilities: {} },
+      },
+      {
+        id: "claude-opus-4-8",
+        model_spec: { name: "Claude Opus 4.8", privacy: "anonymized", capabilities: {} },
+      },
+      {
+        id: "z-ai-glm-5v-turbo",
+        model_spec: { name: "GLM 5V Turbo", privacy: "private", capabilities: { supportsVision: true } },
+      },
+    ],
+  });
+  const models = await listModels("venice", {});
+  assert.deepEqual(models, [
+    { id: "claude-opus-4-8", label: "Claude Opus 4.8 (anonymized — proxied upstream)", inputModalities: undefined },
+    { id: "qwen3-coder-480b-a35b-instruct-turbo", label: "Qwen3 Coder 480B", inputModalities: undefined },
+    { id: "z-ai-glm-5v-turbo", label: "GLM 5V Turbo", inputModalities: ["text", "image"] },
+  ]);
+  assert.match(calls[0].url, /api\.venice\.ai\/api\/v1\/models\?type=text$/);
+  assert.equal(calls[0].headers.authorization, undefined);
+});
+
 test("custom listing hits the configured endpoint, key optional", async () => {
   const calls = mockFetch({ data: [{ id: "qwen3-coder" }, { id: "glm-air" }] });
   const models = await listModels("custom", { baseURL: "http://localhost:1234/v1" });

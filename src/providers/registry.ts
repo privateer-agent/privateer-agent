@@ -41,6 +41,27 @@ export const MINIMAX_BASE_URL = "https://api.minimax.io/v1";
 // migrating to workspace-scoped URLs — users on those can override baseURL.
 export const QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 
+// Venice.ai's OpenAI-compatible endpoint. Zero prompt retention by policy (not
+// hardware-attested like the TEE providers above); its listing also carries
+// "anonymized" models that proxy to upstream providers — flagged in listModels.
+export const VENICE_BASE_URL = "https://api.venice.ai/api/v1";
+
+// Venice appends its own system prompt to every chat request unless opted out —
+// wrong for an agent that supplies its own. This fetch wrapper injects the
+// opt-out into the JSON request body; non-JSON bodies pass through untouched.
+export const veniceFetch: typeof fetch = (input, init) => {
+  if (typeof init?.body === "string") {
+    try {
+      const body = JSON.parse(init.body);
+      body.venice_parameters = { include_venice_system_prompt: false, ...body.venice_parameters };
+      init = { ...init, body: JSON.stringify(body) };
+    } catch {
+      // not JSON — leave the request untouched
+    }
+  }
+  return fetch(input, init);
+};
+
 // Each factory turns provider credentials + a model id into an AI SDK LanguageModel.
 // This is the single seam that makes Privateer provider-agnostic: the agent loop,
 // tools, and UI never know or care which provider is behind the model.
@@ -64,6 +85,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   ollama: false,
   nearai: true,
   tinfoil: true,
+  venice: true,
   // A custom endpoint may or may not need a key (LM Studio doesn't, a corporate
   // proxy might); its real requirement is the baseURL — see providerReady().
   custom: false,
@@ -124,6 +146,14 @@ const FACTORIES: Record<ProviderName, Factory> = {
   tinfoil: (cfg, modelId) =>
     // OpenAI-compatible TEE gateway; `.chat()` pins Chat Completions like nearai.
     createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? TINFOIL_BASE_URL }).chat(modelId),
+  venice: (cfg, modelId) =>
+    // OpenAI-compatible, Chat Completions pinned like nearai/tinfoil; veniceFetch
+    // opts out of Venice's injected system prompt.
+    createOpenAI({
+      apiKey: cfg.apiKey,
+      baseURL: cfg.baseURL ?? VENICE_BASE_URL,
+      fetch: veniceFetch,
+    }).chat(modelId),
   custom: (cfg, modelId) =>
     // User-supplied OpenAI-compatible endpoint. `.chat()` pins Chat Completions —
     // the lowest common denominator every compatible server implements (Responses

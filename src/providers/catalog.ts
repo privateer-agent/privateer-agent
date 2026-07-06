@@ -131,6 +131,15 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "nearai:zai-org/GLM-5.1-FP8",
     keyHint: "cloud.near.ai → API Keys",
   },
+  venice: {
+    name: "venice",
+    label: "Venice (no-retention inference)",
+    requiresKey: providerRequiresKey("venice"),
+    defaultModel: "venice:qwen3-coder-480b-a35b-instruct-turbo",
+    // Honest copy: Venice's guarantee is policy, not hardware — TEE-attested
+    // inference is nearai/tinfoil. Anonymized-tier models proxy upstream.
+    keyHint: "venice.ai → API Keys (no retention by policy, not TEE-attested; “anonymized” models proxy upstream)",
+  },
   custom: {
     name: "custom",
     label: "Custom (OpenAI-compatible)",

@@ -93,6 +93,7 @@ function applyEnv(cfg: ConfigT): ConfigT {
   set("ollama", "baseURL", process.env.OLLAMA_BASE_URL);
   set("nearai", "apiKey", process.env.NEAR_AI_API_KEY ?? process.env.NEARAI_API_KEY);
   set("tinfoil", "apiKey", process.env.TINFOIL_API_KEY);
+  set("venice", "apiKey", process.env.VENICE_API_KEY);
   return cfg;
 }
 

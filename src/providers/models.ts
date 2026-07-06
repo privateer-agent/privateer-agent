@@ -1,5 +1,5 @@
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
-import { MINIMAX_BASE_URL, NEARAI_BASE_URL, QWEN_BASE_URL, TINFOIL_BASE_URL, ZAI_BASE_URL } from "./registry.ts";
+import { MINIMAX_BASE_URL, NEARAI_BASE_URL, QWEN_BASE_URL, TINFOIL_BASE_URL, VENICE_BASE_URL, ZAI_BASE_URL } from "./registry.ts";
 import { authedFetch, serverBaseUrl, DEFAULT_SERVER_URL } from "../auth/privateer.ts";
 
 // A model offered by a provider, as surfaced in the picker. `id` is the bare model
@@ -33,6 +33,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   ollama: "http://localhost:11434/api",
   nearai: NEARAI_BASE_URL,
   tinfoil: TINFOIL_BASE_URL,
+  venice: VENICE_BASE_URL,
   custom: "", // no default exists for a user-supplied endpoint; listModels requires cfg.baseURL
   privateer: DEFAULT_SERVER_URL, // unused by the privateer branch (authed endpoint), kept for type completeness
 };
@@ -179,6 +180,36 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
       return (json.data ?? [])
         .filter((m) => (m.type ?? "chat") === "chat")
         .map((m) => ({ id: m.id, inputModalities: m.multimodal ? ["text", "image"] : undefined }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+    case "venice": {
+      // Venice's listing is public (the key is sent when present) and metadata-
+      // rich. Each model declares a privacy tier: "private" (Venice-hosted, zero
+      // retention by policy) vs "anonymized" (proxied to an upstream provider
+      // that does see the prompt) — the latter is flagged in the label so the
+      // picker stays honest.
+      const json = (await getJson(
+        `${base}/models?type=text`,
+        cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {},
+      )) as {
+        data?: {
+          id: string;
+          model_spec?: {
+            name?: string;
+            privacy?: string;
+            capabilities?: { supportsVision?: boolean };
+          };
+        }[];
+      };
+      return (json.data ?? [])
+        .map((m) => ({
+          id: m.id,
+          label:
+            m.model_spec?.privacy === "anonymized"
+              ? `${m.model_spec?.name ?? m.id} (anonymized — proxied upstream)`
+              : m.model_spec?.name,
+          inputModalities: m.model_spec?.capabilities?.supportsVision ? ["text", "image"] : undefined,
+        }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
     case "custom": {

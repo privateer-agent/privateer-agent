@@ -1,7 +1,7 @@
 {
   "name": "privateer-agent",
   "version": "0.2.1",
-  "description": "Privateer — a provider-agnostic terminal coding agent. Bring your own model (OpenRouter, Anthropic, OpenAI, Google, xAI, Groq, Mistral, Z.ai, Moonshot, Cerebras, DeepSeek, MiniMax, Qwen, Ollama, NEAR AI, Tinfoil).",
+  "description": "Privateer — a provider-agnostic terminal coding agent. Bring your own model (OpenRouter, Anthropic, OpenAI, Google, xAI, Groq, Mistral, Z.ai, Moonshot, Cerebras, DeepSeek, MiniMax, Qwen, Ollama, NEAR AI, Tinfoil, Venice).",
   "type": "module",
   "license": "MIT",
   "author": "Patrick (zahnno)",
@@ -38,7 +38,8 @@
     "deepseek",
     "minimax",
     "qwen",
-    "tinfoil"
+    "tinfoil",
+    "venice"
   ],
   "bin": {
     "privateer": "./bin/privateer.mjs"

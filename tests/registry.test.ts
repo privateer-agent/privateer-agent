@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildModel } from "../src/providers/registry.ts";
+import { buildModel, veniceFetch } from "../src/providers/registry.ts";
 
 // The OpenRouter model object carries the per-request settings it was built with,
 // so we can assert that ZDR enforcement actually attaches provider.zdr (the flag
@@ -30,10 +30,30 @@ test("buildModel constructs a model for each new provider", () => {
     ["minimax", "MiniMax-M3"],
     ["qwen", "qwen3.7-max"],
     ["tinfoil", "deepseek-v4-pro"],
+    ["venice", "qwen3-coder-480b-a35b-instruct-turbo"],
   ] as const) {
     const model = buildModel(provider, { apiKey: "test-key" }, id);
     assert.equal((model as any).modelId, id, `${provider} model id passthrough`);
   }
+});
+
+test("veniceFetch injects the Venice system-prompt opt-out into JSON bodies", async () => {
+  const real = globalThis.fetch;
+  let captured: any;
+  globalThis.fetch = (async (_url: any, init: any) => {
+    captured = JSON.parse(init.body);
+    return { ok: true } as Response;
+  }) as typeof fetch;
+  try {
+    await veniceFetch("https://api.venice.ai/api/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "m", messages: [] }),
+    });
+  } finally {
+    globalThis.fetch = real;
+  }
+  assert.equal(captured.venice_parameters.include_venice_system_prompt, false);
+  assert.equal(captured.model, "m");
 });
 
 test("custom buildModel works keyless against a user-supplied endpoint", () => {

@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
-  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Google%20·%20xAI%20·%20Groq%20·%20Mistral%20·%20Z.ai%20·%20Moonshot%20·%20Cerebras%20·%20DeepSeek%20·%20MiniMax%20·%20Qwen%20·%20Ollama%20·%20NEAR%20AI%20·%20Tinfoil-5b8def" alt="Providers" />
+  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Google%20·%20xAI%20·%20Groq%20·%20Mistral%20·%20Z.ai%20·%20Moonshot%20·%20Cerebras%20·%20DeepSeek%20·%20MiniMax%20·%20Qwen%20·%20Ollama%20·%20NEAR%20AI%20·%20Tinfoil%20·%20Venice-5b8def" alt="Providers" />
   <img src="https://img.shields.io/badge/built%20on-Vercel%20AI%20SDK-black" alt="Vercel AI SDK" />
 </p>
 
@@ -27,7 +27,7 @@ npx privateer-agent                                 # or run it instantly, nothi
 ```
 
 Switch between **OpenRouter**, **Anthropic**, **OpenAI**, **Google**, **xAI**, **Groq**,
-**Mistral**, **Z.ai** (GLM), **Moonshot** (Kimi), **Cerebras**, **DeepSeek**, **MiniMax**, **Qwen**, local **Ollama**, **NEAR AI** or **Tinfoil** (private TEE inference), and any **custom
+**Mistral**, **Z.ai** (GLM), **Moonshot** (Kimi), **Cerebras**, **DeepSeek**, **MiniMax**, **Qwen**, local **Ollama**, **NEAR AI** or **Tinfoil** (private TEE inference), **Venice** (no-retention inference), and any **custom
 OpenAI-compatible endpoint** (LM Studio, vLLM, llama.cpp…) with one command. Built on the Vercel AI SDK, so tool-calling
 and streaming work identically across every provider — no model lock-in, no separate code paths.
 MCP servers, Claude Code-compatible skills, scheduled routines, and approval from your phone
@@ -140,6 +140,7 @@ export DASHSCOPE_API_KEY=sk-...          # Qwen via Alibaba Model Studio intl (a
 export OLLAMA_BASE_URL=http://localhost:11434/api   # optional; defaults to this
 export NEAR_AI_API_KEY=...               # private TEE inference (cloud.near.ai)
 export TINFOIL_API_KEY=...               # private TEE inference (tinfoil.sh)
+export VENICE_API_KEY=vapi_...           # Venice (no-retention inference, see note below)
 ```
 
 **Config file** — `~/.privateer/config.json` (global) and/or `./.privateer/config.json` (per project):
@@ -172,6 +173,12 @@ Per DeepSeek's own privacy policy, data is stored on servers in China and API in
 may be used to train their models unless you opt out. If that doesn't fit your
 threat model, the same models are available with zero-data-retention routing via
 `openrouter` (with `enforceZdr`) or inside a TEE via `nearai`/`tinfoil`.
+
+**Venice privacy note** — Venice doesn't store or log prompts or responses; that's
+a strong policy guarantee, but a *policy* one — there's no hardware attestation you
+can verify (for that, use `nearai` or `tinfoil`). Venice's catalog also carries
+"anonymized" models (Claude, GPT, Gemini…) that are proxied to the upstream
+provider, which does process your prompt; the model picker labels these.
 
 **Custom endpoint** — point the `custom` provider at any OpenAI-compatible server
 (LM Studio, vLLM, llama.cpp, text-generation-inference, a corporate proxy…). Pick

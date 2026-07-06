@@ -39,6 +39,7 @@ export const Config = z.object({
       ollama: ProviderConfig.optional(),
       nearai: ProviderConfig.optional(),
       tinfoil: ProviderConfig.optional(),
+      venice: ProviderConfig.optional(),
       // Custom OpenAI-compatible endpoint (LM Studio, vLLM, llama.cpp, a corporate
       // proxy, …): the user supplies baseURL (required) and apiKey (optional).
       custom: ProviderConfig.optional(),
@@ -121,6 +122,7 @@ export const KNOWN_PROVIDERS = [
   "ollama",
   "nearai",
   "tinfoil",
+  "venice",
   "custom",
   "privateer",
 ] as const;
