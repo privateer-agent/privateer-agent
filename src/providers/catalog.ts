@@ -108,6 +108,17 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
       "fireworks.ai → API Keys (open models: zero retention by default, not TEE-attested; Fireworks's own f1/FireFunction may log)",
     privacy: ["zdr"],
   },
+  together: {
+    name: "together",
+    label: "Together AI",
+    requiresKey: providerRequiresKey("together"),
+    defaultModel: "together:zai-org/GLM-5.2",
+    // Honest copy: Together supports ZDR, but only as an account-level setting
+    // the client can't verify — so no flat ⛉ badge (contrast fireworks/venice,
+    // where zero retention is the default for what we route to).
+    keyHint:
+      "api.together.ai → API Keys (ZDR exists but must be enabled in account Privacy settings; default retains)",
+  },
   deepseek: {
     name: "deepseek",
     label: "DeepSeek",

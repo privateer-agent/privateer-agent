@@ -8,6 +8,7 @@ import { createMistral } from "@ai-sdk/mistral";
 import { createMoonshotAI } from "@ai-sdk/moonshotai";
 import { createCerebras } from "@ai-sdk/cerebras";
 import { createFireworks } from "@ai-sdk/fireworks";
+import { createTogetherAI } from "@ai-sdk/togetherai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createOllama } from "ollama-ai-provider-v2";
@@ -82,6 +83,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   moonshot: true,
   cerebras: true,
   fireworks: true,
+  together: true,
   deepseek: true,
   minimax: true,
   qwen: true,
@@ -132,6 +134,10 @@ const FACTORIES: Record<ProviderName, Factory> = {
     // Open models run zero-data-retention by default (volatile memory only); the
     // dedicated package supplies the inference base URL and key header.
     createFireworks({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  together: (cfg, modelId) =>
+    // ZDR exists but only as an account-level setting the client can't verify —
+    // see the catalog keyHint / README note for the honest copy.
+    createTogetherAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   deepseek: (cfg, modelId) =>
     // The dedicated package maps the reasoner mode's non-standard
     // `reasoning_content` field into AI SDK reasoning parts.

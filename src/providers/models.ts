@@ -27,6 +27,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   moonshot: "https://api.moonshot.ai/v1",
   cerebras: "https://api.cerebras.ai/v1",
   fireworks: "https://api.fireworks.ai/inference/v1",
+  together: "https://api.together.xyz/v1",
   deepseek: "https://api.deepseek.com",
   minimax: MINIMAX_BASE_URL,
   qwen: QWEN_BASE_URL,
@@ -131,6 +132,21 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
       })) as { data?: { id: string }[] };
       return (json.data ?? [])
         .map((m) => ({ id: m.id }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+    case "together": {
+      // Together's listing is a BARE ARRAY (not the OpenAI {data} envelope), with a
+      // `type` enum separating chat models from image/embedding/rerank/etc. Keep
+      // type "chat" — falling back to the full list if the filter empties it, so a
+      // listing-shape change degrades to showing everything rather than nothing.
+      if (!cfg.apiKey) throw new Error("no API key");
+      const json = (await getJson(`${base}/models`, {
+        authorization: `Bearer ${cfg.apiKey}`,
+      })) as { id: string; type?: string; display_name?: string }[] | { data?: unknown };
+      const list = Array.isArray(json) ? json : [];
+      const chat = list.filter((m) => (m.type ?? "chat") === "chat");
+      return (chat.length ? chat : list)
+        .map((m) => ({ id: m.id, label: m.display_name }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
     case "fireworks": {

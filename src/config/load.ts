@@ -88,6 +88,7 @@ function applyEnv(cfg: ConfigT): ConfigT {
   set("moonshot", "apiKey", process.env.MOONSHOT_API_KEY);
   set("cerebras", "apiKey", process.env.CEREBRAS_API_KEY);
   set("fireworks", "apiKey", process.env.FIREWORKS_API_KEY);
+  set("together", "apiKey", process.env.TOGETHER_API_KEY ?? process.env.TOGETHER_AI_API_KEY);
   set("deepseek", "apiKey", process.env.DEEPSEEK_API_KEY);
   set("minimax", "apiKey", process.env.MINIMAX_API_KEY);
   set("qwen", "apiKey", process.env.DASHSCOPE_API_KEY ?? process.env.QWEN_API_KEY);

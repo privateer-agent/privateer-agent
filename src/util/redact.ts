@@ -10,8 +10,8 @@ const PLACEHOLDER = "«redacted»";
 // xAI `xai-…`, Groq `gsk_…`, Z.ai/Zhipu `<32 hex>.<suffix>`, Cerebras `csk-…`,
 // Venice `vapi_…`, Fireworks `fw_…`, and bare
 // "Bearer <token>" / "x-api-key: <token>" / "x-goog-api-key: <token>" header
-// fragments. (Mistral keys are prefix-less, so they rely on exact-value masking
-// and the header patterns.)
+// fragments. (Mistral and Together keys are prefix-less, so they rely on
+// exact-value masking and the header patterns.)
 const KEY_PATTERNS: RegExp[] = [
   /\bsk-(ant|or|proj|live|test)?-?[A-Za-z0-9_-]{16,}\b/g,
   /\bAIza[A-Za-z0-9_-]{20,}\b/g,
@@ -48,6 +48,8 @@ export function collectSecrets(providers?: Record<string, { apiKey?: string } | 
     "MOONSHOT_API_KEY",
     "CEREBRAS_API_KEY",
     "FIREWORKS_API_KEY",
+    "TOGETHER_API_KEY",
+    "TOGETHER_AI_API_KEY",
     "DEEPSEEK_API_KEY",
     "MINIMAX_API_KEY",
     "DASHSCOPE_API_KEY",

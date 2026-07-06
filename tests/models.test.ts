@@ -222,6 +222,32 @@ test("fireworks listing requires a key", async () => {
   await assert.rejects(() => listModels("fireworks", {}), /no API key/);
 });
 
+test("together listing parses the bare-array shape, keeps chat models, maps display names", async () => {
+  const calls = mockFetch([
+    { id: "zai-org/GLM-5.2", type: "chat", display_name: "GLM 5.2" },
+    { id: "BAAI/bge-large-en-v1.5", type: "embedding" },
+    { id: "black-forest-labs/FLUX.1-schnell", type: "image" },
+    { id: "moonshotai/Kimi-K2.7-Code", type: "chat" },
+  ]);
+  const models = await listModels("together", { apiKey: "together-key" });
+  assert.deepEqual(models, [
+    { id: "moonshotai/Kimi-K2.7-Code", label: undefined },
+    { id: "zai-org/GLM-5.2", label: "GLM 5.2" },
+  ]);
+  assert.match(calls[0].url, /api\.together\.xyz\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer together-key");
+});
+
+test("together listing falls back to everything when no entry is typed chat", async () => {
+  mockFetch([{ id: "some/model", type: "language" }]);
+  const models = await listModels("together", { apiKey: "together-key" });
+  assert.deepEqual(models.map((m) => m.id), ["some/model"]);
+});
+
+test("together listing requires a key", async () => {
+  await assert.rejects(() => listModels("together", {}), /no API key/);
+});
+
 test("deepseek lists via the OpenAI shape against the DeepSeek endpoint", async () => {
   const calls = mockFetch({ data: [{ id: "deepseek-v4-pro" }, { id: "deepseek-v4-flash" }] });
   const models = await listModels("deepseek", { apiKey: "sk-ds" });
