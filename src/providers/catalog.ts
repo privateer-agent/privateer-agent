@@ -93,6 +93,15 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     // stored on servers in China and may be used for training unless opted out.
     keyHint: "platform.deepseek.com → API Keys (data stored in China; inputs may train models unless opted out)",
   },
+  minimax: {
+    name: "minimax",
+    label: "MiniMax",
+    requiresKey: providerRequiresKey("minimax"),
+    defaultModel: "minimax:MiniMax-M3",
+    // Honest copy: the intl platform is Singapore-based, but MiniMax doesn't
+    // publish whether API inputs are retained or used for training.
+    keyHint: "platform.minimax.io → API Keys (Singapore-based intl platform; retention/training posture unpublished)",
+  },
   tinfoil: {
     name: "tinfoil",
     label: "Tinfoil (private TEE inference)",

@@ -30,6 +30,12 @@ export const TINFOIL_BASE_URL = "https://inference.tinfoil.sh/v1";
 // https://api.z.ai/api/coding/paas/v4 to spend the subscription instead.
 export const ZAI_BASE_URL = "https://api.z.ai/api/paas/v4";
 
+// MiniMax's international OpenAI-compatible endpoint (Singapore entity; mainland
+// China is a separate platform at api.minimaxi.com). M-series thinking arrives as
+// inline <think> tags in content by default — no SDK-5-compatible dedicated
+// package exists to split it out.
+export const MINIMAX_BASE_URL = "https://api.minimax.io/v1";
+
 // Each factory turns provider credentials + a model id into an AI SDK LanguageModel.
 // This is the single seam that makes Privateer provider-agnostic: the agent loop,
 // tools, and UI never know or care which provider is behind the model.
@@ -48,6 +54,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   moonshot: true,
   cerebras: true,
   deepseek: true,
+  minimax: true,
   ollama: false,
   nearai: true,
   tinfoil: true,
@@ -94,6 +101,10 @@ const FACTORIES: Record<ProviderName, Factory> = {
     // The dedicated package maps the reasoner mode's non-standard
     // `reasoning_content` field into AI SDK reasoning parts.
     createDeepSeek({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  minimax: (cfg, modelId) =>
+    // OpenAI-compatible, Chat-Completions-only — `.chat()` pins the transport
+    // like nearai/tinfoil/zai.
+    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? MINIMAX_BASE_URL }).chat(modelId),
   ollama: (cfg, modelId) =>
     createOllama({ baseURL: cfg.baseURL })(modelId),
   nearai: (cfg, modelId) =>

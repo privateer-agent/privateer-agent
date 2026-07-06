@@ -190,6 +190,21 @@ test("deepseek listing requires a key", async () => {
   await assert.rejects(() => listModels("deepseek", {}), /no API key/);
 });
 
+test("minimax lists via the OpenAI shape against the MiniMax intl endpoint", async () => {
+  const calls = mockFetch({ data: [{ id: "MiniMax-M3" }, { id: "MiniMax-M2.7" }] });
+  const models = await listModels("minimax", { apiKey: "sk-mm" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["MiniMax-M2.7", "MiniMax-M3"],
+  );
+  assert.match(calls[0].url, /api\.minimax\.io\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer sk-mm");
+});
+
+test("minimax listing requires a key", async () => {
+  await assert.rejects(() => listModels("minimax", {}), /no API key/);
+});
+
 test("mistral listing keeps chat models, maps vision, sends a bearer token", async () => {
   const calls = mockFetch({
     data: [

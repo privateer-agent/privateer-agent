@@ -88,6 +88,7 @@ function applyEnv(cfg: ConfigT): ConfigT {
   set("moonshot", "apiKey", process.env.MOONSHOT_API_KEY);
   set("cerebras", "apiKey", process.env.CEREBRAS_API_KEY);
   set("deepseek", "apiKey", process.env.DEEPSEEK_API_KEY);
+  set("minimax", "apiKey", process.env.MINIMAX_API_KEY);
   set("ollama", "baseURL", process.env.OLLAMA_BASE_URL);
   set("nearai", "apiKey", process.env.NEAR_AI_API_KEY ?? process.env.NEARAI_API_KEY);
   set("tinfoil", "apiKey", process.env.TINFOIL_API_KEY);
