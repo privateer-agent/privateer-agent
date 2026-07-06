@@ -11,11 +11,13 @@ export interface ProviderMeta {
   defaultModel: string; // "provider:model" picked when this provider is selected first
   keyHint: string; // where to obtain a key, or a note for keyless providers
   baseURLDefault?: string; // shown as the placeholder for keyless/local providers
-  // Privacy channels the provider guarantees for every model it serves: "tee" =
-  // confidential-enclave inference (attestable), "zdr" = zero data retention.
-  // Rendered as a green ⛉ badge on the provider row in pickers. Venice is ZDR by
-  // policy only (see its keyHint); OpenRouter is omitted because ZDR there is
-  // per-model/account, surfaced in the model stage instead.
+  // Privacy channels the provider offers: "tee" = confidential-enclave inference
+  // (attestable), "zdr" = zero data retention. Rendered as a ⛉ badge on the
+  // provider row in pickers (PrivacyBadge) — green when the provider guarantees
+  // the channel for every model it serves. Venice is ZDR by policy only (see its
+  // keyHint). OpenRouter's ZDR is per-model/account, so its badge is posture-
+  // aware instead of flat green: yellow until /zdr enforcement pins requests to
+  // zero-retention endpoints (matching the status-bar shield semantics).
   privacy?: ("tee" | "zdr")[];
 }
 
@@ -40,6 +42,9 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     requiresKey: providerRequiresKey("openrouter"),
     defaultModel: "openrouter:anthropic/claude-opus-4.8",
     keyHint: "openrouter.ai/keys",
+    // Not a blanket guarantee: ZDR endpoints exist per model, and only /zdr
+    // enforcement pins requests to them — pickers render this yellow until then.
+    privacy: ["zdr"],
   },
   google: {
     name: "google",

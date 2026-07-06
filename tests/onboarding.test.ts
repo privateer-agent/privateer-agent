@@ -51,6 +51,13 @@ test("Onboarding collects a masked key then opens the model step", async () => {
   for (const label of ["Anthropic", "OpenAI", "OpenRouter", "Ollama"]) {
     assert.match(frame, new RegExp(label));
   }
+  // Privacy channels surface here too: guaranteed ones (Venice, NEAR AI) and
+  // OpenRouter's per-model ZDR (yellow until /zdr enforcement — same ⛉ glyph).
+  const row = (label: string) => frame.split("\n").find((l) => l.includes(label)) ?? "";
+  assert.match(row("OpenRouter"), /⛉ ZDR/);
+  assert.match(row("Venice"), /⛉ ZDR/);
+  assert.match(row("NEAR AI"), /⛉ TEE/);
+  assert.ok(!row("Anthropic").includes("⛉"), "plain provider must not carry a privacy badge");
 
   // Cursor starts on the first provider (OpenRouter). Toggle it on and confirm.
   assert.ok(await selectOn(stdin, lastFrame, /❯ ◉ OpenRouter/), "OpenRouter toggles on");

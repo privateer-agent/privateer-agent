@@ -5,13 +5,27 @@ import TextInput from "ink-text-input";
 import type { Config, ProviderName } from "../config/schema.ts";
 import { configuredProviders, privateerChannel } from "../providers/resolve.ts";
 import { hasCredentials } from "../auth/privateer.ts";
-import { PROVIDER_META } from "../providers/catalog.ts";
+import { PROVIDER_META, type ProviderMeta } from "../providers/catalog.ts";
 import { listModels, zdrPosture, type ModelInfo } from "../providers/models.ts";
 import { theme, POSTURE_COLOR } from "./theme.ts";
 import { SHIELD, KEY, ARROW } from "./figures.ts";
 import { useZdrAccount, type ZdrAccountState } from "./useZdrShield.ts";
 
 const PAGE = 8; // visible rows in the scrolling model list
+
+// The ⛉ privacy badge on a provider row, shared by the /model picker and the /keys
+// select list. Channels the provider guarantees for everything it serves render
+// green. OpenRouter's ZDR is per-model/account, so its badge follows the status-bar
+// posture instead: yellow (available — /zdr to enforce) until enforcement is on.
+export function PrivacyBadge({ meta, zdrEnforced }: { meta: ProviderMeta; zdrEnforced?: boolean }) {
+  if (!meta.privacy) return null;
+  const conditional = meta.name === "openrouter" && !zdrEnforced;
+  return (
+    <Text color={conditional ? POSTURE_COLOR.yellow : POSTURE_COLOR.green}>
+      {`  ${SHIELD} ${meta.privacy.map((c) => c.toUpperCase()).join("·")}`}
+    </Text>
+  );
+}
 
 // A two-stage picker: choose a provider, then choose one of the models it
 // actually offers (fetched live with the user's key). Returns a "provider:model" spec.
@@ -71,7 +85,14 @@ export function ModelPicker({
   }
 
   if (provider === null) {
-    return <ProviderStage providers={entries} onPick={pick} onCancel={onCancel} />;
+    return (
+      <ProviderStage
+        providers={entries}
+        zdrEnforced={Boolean(config.providers.openrouter?.enforceZdr)}
+        onPick={pick}
+        onCancel={onCancel}
+      />
+    );
   }
 
   if (provider === "privateer" && !hasCredentials()) {
@@ -96,10 +117,12 @@ export function ModelPicker({
 
 function ProviderStage({
   providers,
+  zdrEnforced,
   onPick,
   onCancel,
 }: {
   providers: { name: ProviderName; ready: boolean }[];
+  zdrEnforced: boolean;
   onPick: (name: ProviderName) => void;
   onCancel?: () => void;
 }) {
@@ -124,13 +147,7 @@ function ProviderStage({
             <Text key={p.name} color={i === cursor ? theme.accent : undefined}>
               {i === cursor ? "❯ " : "  "}
               {meta.label}
-              {meta.privacy ? (
-                // Same green ⛉ as the model-stage badges: the provider guarantees
-                // this channel for everything it serves.
-                <Text color={POSTURE_COLOR.green}>
-                  {`  ${SHIELD} ${meta.privacy.map((c) => c.toUpperCase()).join("·")}`}
-                </Text>
-              ) : null}
+              <PrivacyBadge meta={meta} zdrEnforced={zdrEnforced} />
               {!p.ready ? (
                 p.name === "privateer" ? (
                   // The account login is the primary call-to-action: bold accent, not a dim tag.
@@ -143,7 +160,14 @@ function ProviderStage({
           );
         })}
       </Box>
-      <Box marginTop={1}>
+      <Box marginTop={1} flexDirection="column">
+        {providers.some((p) => p.name === "openrouter") && !zdrEnforced ? (
+          // The one badge that isn't a blanket guarantee gets its own key line.
+          <Text color={theme.dim}>
+            <Text color={POSTURE_COLOR.yellow}>{`${SHIELD} ZDR`}</Text> available per model — /zdr to
+            enforce (goes green).
+          </Text>
+        ) : null}
         <Text color={theme.dim}>Remote access (/remote-access on) works only with a Privateer account.</Text>
       </Box>
     </Box>

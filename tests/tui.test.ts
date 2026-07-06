@@ -342,6 +342,10 @@ test("ModelPicker lists all providers, Privateer first, and routes unconfigured 
   assert.match(lines[at("Venice")], /⛉ ZDR/);
   assert.match(lines[at("Privateer account")], /⛉ TEE·ZDR/);
   assert.ok(!lines[at("Anthropic")].includes("⛉"), "plain provider must not carry a privacy badge");
+  // OpenRouter's ZDR is per-model/account, so its badge comes with a key line
+  // explaining it goes green only under /zdr enforcement.
+  assert.match(lines[at("OpenRouter")], /⛉ ZDR/);
+  assert.match(frame, /⛉ ZDR available per model — \/zdr to enforce/);
   assert.match(frame, /Remote access .* works only with a Privateer account/);
 
   // Privateer is row 0; OpenRouter (unconfigured) is row 1. Down + enter → setup.

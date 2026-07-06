@@ -106,6 +106,7 @@ export function Root({
     return (
       <Onboarding
         initialSelected={setupProvider ? [...configured, setupProvider] : configured}
+        zdrEnforced={Boolean(config.providers.openrouter?.enforceZdr)}
         onComplete={finish}
       />
     );

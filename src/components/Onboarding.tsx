@@ -4,7 +4,7 @@ import TextInput from "ink-text-input";
 import type { Config, ProviderName, ProviderConfig } from "../config/schema.ts";
 import { PROVIDER_LIST, PROVIDER_META, type ProviderMeta } from "../providers/catalog.ts";
 import { providerReady } from "../providers/resolve.ts";
-import { ModelPicker } from "./ModelPicker.tsx";
+import { ModelPicker, PrivacyBadge } from "./ModelPicker.tsx";
 import { theme } from "./theme.ts";
 import { WELCOME } from "./figures.ts";
 
@@ -25,9 +25,11 @@ export interface OnboardingResult {
 // enter confirms (needs at least one).
 function SelectStep({
   initial,
+  zdrEnforced,
   onConfirm,
 }: {
   initial: Set<ProviderName>;
+  zdrEnforced: boolean;
   onConfirm: (selected: ProviderMeta[]) => void;
 }) {
   const [cursor, setCursor] = useState(0);
@@ -62,6 +64,7 @@ function SelectStep({
             <Text key={p.name} color={active ? theme.accent : undefined}>
               {active ? "❯ " : "  "}
               {on ? "◉" : "○"} {p.label.padEnd(16)}
+              <PrivacyBadge meta={p} zdrEnforced={zdrEnforced} />
               <Text color={theme.dim}> {p.requiresKey ? `key: ${p.keyHint}` : p.keyHint}</Text>
             </Text>
           );
@@ -179,9 +182,12 @@ function ModelStep({
 
 export function Onboarding({
   initialSelected = [],
+  zdrEnforced = false,
   onComplete,
 }: {
   initialSelected?: ProviderName[];
+  // Whether OpenRouter ZDR enforcement (/zdr) is already on — colors its ⛉ badge.
+  zdrEnforced?: boolean;
   onComplete: (result: OnboardingResult) => void;
 }) {
   const [chosen, setChosen] = useState<ProviderMeta[] | null>(null);
@@ -206,7 +212,7 @@ export function Onboarding({
       <Text color={theme.dim}>Bring your own keys. They're saved to ~/.privateer/config.json.</Text>
       <Box marginTop={1}>
         {chosen === null ? (
-          <SelectStep initial={new Set(initialSelected)} onConfirm={setChosen} />
+          <SelectStep initial={new Set(initialSelected)} zdrEnforced={zdrEnforced} onConfirm={setChosen} />
         ) : creds === null ? (
           <KeyStep providers={chosen} onDone={onKeysDone} />
         ) : (
