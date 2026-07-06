@@ -156,18 +156,6 @@ export VENICE_API_KEY=vapi_...           # Venice (no-retention inference, see n
 }
 ```
 
-**Z.ai coding plan** — the `zai` provider defaults to Z.ai's pay-as-you-go endpoint.
-If you have a GLM coding-plan subscription, point it at the plan's quota-billed
-endpoint instead:
-
-```json
-{
-  "providers": {
-    "zai": { "apiKey": "...", "baseURL": "https://api.z.ai/api/coding/paas/v4" }
-  }
-}
-```
-
 **DeepSeek privacy note** — the `deepseek` provider talks to DeepSeek's direct API.
 Per DeepSeek's own privacy policy, data is stored on servers in China and API inputs
 may be used to train their models unless you opt out. If that doesn't fit your
@@ -180,10 +168,57 @@ can verify (for that, use `nearai` or `tinfoil`). Venice's catalog also carries
 "anonymized" models (Claude, GPT, Gemini…) that are proxied to the upstream
 provider, which does process your prompt; the model picker labels these.
 
-**Custom endpoint** — point the `custom` provider at any OpenAI-compatible server
-(LM Studio, vLLM, llama.cpp, text-generation-inference, a corporate proxy…). Pick
-"Custom (OpenAI-compatible)" in `/keys` and paste the base URL (API key optional), or
-configure it directly:
+### Provider reference
+
+Model specs are `provider:model`. Every provider entry in `config.json` accepts an
+optional **`baseURL`** that overrides the default endpoint — useful for proxies,
+regional endpoints, and subscription plans (see the Z.ai example below).
+
+| Provider | Spec prefix | Key env var | Default endpoint (overridable via `baseURL`) |
+|---|---|---|---|
+| OpenRouter | `openrouter:` | `OPENROUTER_API_KEY` | SDK default |
+| Anthropic | `anthropic:` | `ANTHROPIC_API_KEY` | SDK default |
+| OpenAI | `openai:` | `OPENAI_API_KEY` | SDK default |
+| Google (Gemini) | `google:` | `GEMINI_API_KEY` (or `GOOGLE_GENERATIVE_AI_API_KEY`, `GOOGLE_API_KEY`) | SDK default |
+| xAI (Grok) | `xai:` | `XAI_API_KEY` | SDK default |
+| Groq | `groq:` | `GROQ_API_KEY` | SDK default |
+| Mistral | `mistral:` | `MISTRAL_API_KEY` | SDK default |
+| Z.ai (GLM) | `zai:` | `ZAI_API_KEY` (or `Z_AI_API_KEY`) | `https://api.z.ai/api/paas/v4` |
+| Moonshot (Kimi) | `moonshot:` | `MOONSHOT_API_KEY` | SDK default |
+| Cerebras | `cerebras:` | `CEREBRAS_API_KEY` | SDK default |
+| DeepSeek | `deepseek:` | `DEEPSEEK_API_KEY` | SDK default |
+| MiniMax | `minimax:` | `MINIMAX_API_KEY` | `https://api.minimax.io/v1` (intl platform) |
+| Qwen (Alibaba) | `qwen:` | `DASHSCOPE_API_KEY` (or `QWEN_API_KEY`) | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| Ollama | `ollama:` | — (local, keyless) | `http://localhost:11434/api` (env: `OLLAMA_BASE_URL`) |
+| NEAR AI | `nearai:` | `NEAR_AI_API_KEY` (or `NEARAI_API_KEY`) | `https://cloud-api.near.ai/v1` |
+| Tinfoil | `tinfoil:` | `TINFOIL_API_KEY` | `https://inference.tinfoil.sh/v1` |
+| Venice | `venice:` | `VENICE_API_KEY` | `https://api.venice.ai/api/v1` |
+| Custom | `custom:` | — (key optional) | you supply it — see below |
+| Privateer account | `privateer:` | — (sign in with `/login`) | Privateer server |
+
+"SDK default" means the provider's official endpoint as shipped in its Vercel AI SDK
+package; `baseURL` still overrides it. Providers without a dedicated SDK package
+(Z.ai, MiniMax, Qwen, NEAR AI, Tinfoil, Venice) speak the OpenAI Chat Completions
+API against the pinned endpoint shown.
+
+**Example: Z.ai coding plan.** The `zai` provider defaults to Z.ai's pay-as-you-go
+endpoint. If you have a GLM coding-plan subscription, point it at the plan's
+quota-billed endpoint instead:
+
+```json
+{
+  "providers": {
+    "zai": { "apiKey": "...", "baseURL": "https://api.z.ai/api/coding/paas/v4" }
+  }
+}
+```
+
+### Custom providers (any OpenAI-compatible endpoint)
+
+The `custom` provider turns any OpenAI-compatible server into a first-class
+provider — LM Studio, vLLM, llama.cpp's server, text-generation-inference, an
+internal corporate proxy or gateway. Pick "Custom (OpenAI-compatible)" in `/keys`
+and paste the base URL, or configure it directly:
 
 ```json
 {
@@ -193,8 +228,34 @@ configure it directly:
 }
 ```
 
-The `/model` picker lists whatever the endpoint's `/models` reports; requests use the
-Chat Completions API. Model specs look like `custom:qwen3-coder`.
+How it works:
+
+- **The base URL is the only requirement.** The API key is optional — local servers
+  like LM Studio don't need one, a corporate proxy might. The provider counts as
+  configured as soon as a `baseURL` is set.
+- **Requests use the Chat Completions API** — the lowest common denominator every
+  OpenAI-compatible server implements (the newer Responses API is OpenAI-proper
+  only). Tool calling and streaming work exactly as with the hosted providers,
+  as long as the model behind the endpoint supports them.
+- **Models are listed live.** The `/model` picker shows whatever the endpoint's
+  `/models` route reports, and specs look like `custom:qwen3-coder`. You can also
+  pass an id the listing doesn't include — it's sent through as-is.
+- **It's a normal provider everywhere else** — routing, `/keys`, the status line,
+  and mid-session `/model` switching all treat it the same as the built-ins.
+
+Known-good base URLs for common servers (default ports):
+
+| Server | Base URL |
+|---|---|
+| LM Studio | `http://localhost:1234/v1` |
+| vLLM | `http://localhost:8000/v1` |
+| llama.cpp (`llama-server`) | `http://localhost:8080/v1` |
+| text-generation-inference | `http://localhost:8080/v1` |
+
+One nuance: if the endpoint you're pointing at is really a *hosted provider's*
+alternate endpoint (a regional variant, a subscription plan, an API-compatible
+mirror), prefer overriding that provider's `baseURL` instead of using `custom` —
+you keep the provider's proper label, key hints, and defaults.
 
 Override the config location with `PRIVATEER_HOME`.
 
@@ -379,7 +440,9 @@ You can also pass a model string directly as `provider:model`:
 | `openrouter:anthropic/claude-opus-4.8` | any model on OpenRouter |
 | `anthropic:claude-opus-4-8` | direct Anthropic |
 | `openai:gpt-5.5` | direct OpenAI |
+| `zai:glm-5` | direct Z.ai (GLM) |
 | `ollama:qwen3-coder` | local model |
+| `custom:qwen3-coder` | your own OpenAI-compatible endpoint |
 
 ## The prompt
 
@@ -524,7 +587,8 @@ context — conventions, architecture notes, anything it should always know.
 There are excellent terminal coding agents already. What this one does differently:
 
 - **Provider-agnostic by construction, not adaptation.** One agent loop over the Vercel AI
-  SDK; OpenRouter, Anthropic, OpenAI, local Ollama, and NEAR AI are interchangeable at
+  SDK; all eighteen providers — from OpenRouter and the frontier labs to local Ollama, TEE
+  inference, and your own OpenAI-compatible endpoint — are interchangeable at
   `/model` time, including mid-session. No vendor's models are privileged.
 - **Retention posture is a UI element.** ZDR status is visible before you send and
   enforceable per request (`/zdr`); TEE inference is attestable (`/verify`). Most tools
