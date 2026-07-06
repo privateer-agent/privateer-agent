@@ -31,7 +31,7 @@ import type { Attachment } from "../util/images.ts";
 import { AttachmentStore } from "../util/attachmentStore.ts";
 import type { Entry, ToolEntry, Row } from "./types.ts";
 import type { TodoStore, TodoItem } from "../tools/todoStore.ts";
-import type { Config, PermissionMode } from "../config/schema.ts";
+import type { Config, PermissionMode, ProviderName } from "../config/schema.ts";
 import { createSession } from "../session.ts";
 import { QueryEngine } from "../engine/QueryEngine.ts";
 import { emptyUsage, type UsageTotals } from "../engine/events.ts";
@@ -158,6 +158,7 @@ export function App({
   resume,
   onLogin,
   onPrivateerLogin,
+  onSetupProvider,
 }: {
   model: string;
   config: Config;
@@ -165,6 +166,8 @@ export function App({
   resume?: SessionData | null;
   onLogin?: () => void;
   onPrivateerLogin?: () => void;
+  // Open the /keys setup flow pre-selected on one provider (from the model picker).
+  onSetupProvider?: (name: ProviderName) => void;
 }) {
   // Config is state, not just a prop, so runtime toggles that change request
   // behavior (e.g. /zdr) can update it and trigger a session rebuild.
@@ -1565,6 +1568,22 @@ export function App({
               applyModel(spec);
             }}
             onCancel={() => setPicking(false)}
+            onSetup={
+              onSetupProvider
+                ? (name) => {
+                    setPicking(false);
+                    onSetupProvider(name);
+                  }
+                : undefined
+            }
+            onLogin={
+              onPrivateerLogin
+                ? () => {
+                    setPicking(false);
+                    onPrivateerLogin();
+                  }
+                : undefined
+            }
           />
         ) : pending ? (
           <ApprovalPrompt

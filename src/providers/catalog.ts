@@ -11,6 +11,12 @@ export interface ProviderMeta {
   defaultModel: string; // "provider:model" picked when this provider is selected first
   keyHint: string; // where to obtain a key, or a note for keyless providers
   baseURLDefault?: string; // shown as the placeholder for keyless/local providers
+  // Privacy channels the provider guarantees for every model it serves: "tee" =
+  // confidential-enclave inference (attestable), "zdr" = zero data retention.
+  // Rendered as a green ⛉ badge on the provider row in pickers. Venice is ZDR by
+  // policy only (see its keyHint); OpenRouter is omitted because ZDR there is
+  // per-model/account, surfaced in the model stage instead.
+  privacy?: ("tee" | "zdr")[];
 }
 
 export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
@@ -115,6 +121,7 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     requiresKey: providerRequiresKey("tinfoil"),
     defaultModel: "tinfoil:deepseek-v4-pro",
     keyHint: "tinfoil.sh → dashboard → API Keys",
+    privacy: ["tee"],
   },
   ollama: {
     name: "ollama",
@@ -130,6 +137,7 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     requiresKey: providerRequiresKey("nearai"),
     defaultModel: "nearai:zai-org/GLM-5.1-FP8",
     keyHint: "cloud.near.ai → API Keys",
+    privacy: ["tee"],
   },
   venice: {
     name: "venice",
@@ -139,6 +147,7 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     // Honest copy: Venice's guarantee is policy, not hardware — TEE-attested
     // inference is nearai/tinfoil. Anonymized-tier models proxy upstream.
     keyHint: "venice.ai → API Keys (no retention by policy, not TEE-attested; “anonymized” models proxy upstream)",
+    privacy: ["zdr"],
   },
   custom: {
     name: "custom",
@@ -160,6 +169,8 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     requiresKey: providerRequiresKey("privateer"),
     defaultModel: "privateer:near/deepseek-ai/DeepSeek-V4-Flash",
     keyHint: "sign in with /login — no API key needed",
+    // Every account model routes through a TEE or ZDR channel (see privateerChannel).
+    privacy: ["tee", "zdr"],
   },
 };
 

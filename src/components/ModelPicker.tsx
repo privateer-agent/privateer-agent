@@ -8,12 +8,12 @@ import { hasCredentials } from "../auth/privateer.ts";
 import { PROVIDER_META } from "../providers/catalog.ts";
 import { listModels, zdrPosture, type ModelInfo } from "../providers/models.ts";
 import { theme, POSTURE_COLOR } from "./theme.ts";
-import { SHIELD } from "./figures.ts";
+import { SHIELD, KEY, ARROW } from "./figures.ts";
 import { useZdrAccount, type ZdrAccountState } from "./useZdrShield.ts";
 
 const PAGE = 8; // visible rows in the scrolling model list
 
-// A two-stage picker: choose a configured provider, then choose one of the models it
+// A two-stage picker: choose a provider, then choose one of the models it
 // actually offers (fetched live with the user's key). Returns a "provider:model" spec.
 // Reused by the /model command and the onboarding flow. Esc cancels (if onCancel given).
 export function ModelPicker({
@@ -21,20 +21,29 @@ export function ModelPicker({
   providers,
   onSelect,
   onCancel,
+  onSetup,
+  onLogin,
 }: {
   config: Config;
-  // Restrict the provider stage to these names; defaults to all ready providers.
+  // Restrict the provider stage to these names; defaults to every known provider.
   providers?: ProviderName[];
   onSelect: (spec: string) => void;
   onCancel?: () => void;
+  // Route a provider with no credentials into the /keys setup flow.
+  onSetup?: (provider: ProviderName) => void;
+  // Route a signed-out Privateer account into the /login flow.
+  onLogin?: () => void;
 }) {
   const entries = useMemo<{ name: ProviderName; ready: boolean }[]>(() => {
     if (providers) return providers.map((name) => ({ name, ready: true }));
-    // Ready providers, plus the Privateer account provider even when signed
-    // out: an expired machine login wipes the stored credentials, and the
-    // account silently vanishing from this list reads as a bug. It stays
-    // listed, annotated, and selecting it points at /login.
-    return configuredProviders(config).filter((p) => p.ready || p.name === "privateer");
+    // Every known provider, ready or not, with the Privateer account first.
+    // Unconfigured ones stay listed with a short tag (⚿ no key / → sign in) so setup is one
+    // keypress away (via onSetup/onLogin) instead of hidden behind /keys.
+    const all = configuredProviders(config);
+    return [
+      ...all.filter((p) => p.name === "privateer"),
+      ...all.filter((p) => p.name !== "privateer"),
+    ];
   }, [config, providers]);
 
   const [provider, setProvider] = useState<ProviderName | null>(entries.length === 1 ? entries[0].name : null);
@@ -49,8 +58,20 @@ export function ModelPicker({
     );
   }
 
+  // An unconfigured pick hands off to setup (/keys for key providers, /login for
+  // the account) when the caller wired those routes; otherwise fall through to
+  // the in-picker explanations (SignedOutStage / the fetch-error hint).
+  function pick(name: ProviderName) {
+    const ready = entries.find((e) => e.name === name)?.ready ?? true;
+    if (!ready) {
+      if (name === "privateer" && onLogin) return onLogin();
+      if (name !== "privateer" && onSetup) return onSetup(name);
+    }
+    setProvider(name);
+  }
+
   if (provider === null) {
-    return <ProviderStage providers={entries} onPick={setProvider} onCancel={onCancel} />;
+    return <ProviderStage providers={entries} onPick={pick} onCancel={onCancel} />;
   }
 
   if (provider === "privateer" && !hasCredentials()) {
@@ -97,13 +118,33 @@ function ProviderStage({
         <Text color={theme.accent}>enter</Text> select{onCancel ? ", esc cancel" : ""}.
       </Text>
       <Box flexDirection="column" marginTop={1}>
-        {providers.map((p, i) => (
-          <Text key={p.name} color={i === cursor ? theme.accent : undefined}>
-            {i === cursor ? "❯ " : "  "}
-            {PROVIDER_META[p.name].label}
-            {!p.ready ? <Text color={theme.warning}> — signed out, run /login</Text> : null}
-          </Text>
-        ))}
+        {providers.map((p, i) => {
+          const meta = PROVIDER_META[p.name];
+          return (
+            <Text key={p.name} color={i === cursor ? theme.accent : undefined}>
+              {i === cursor ? "❯ " : "  "}
+              {meta.label}
+              {meta.privacy ? (
+                // Same green ⛉ as the model-stage badges: the provider guarantees
+                // this channel for everything it serves.
+                <Text color={POSTURE_COLOR.green}>
+                  {`  ${SHIELD} ${meta.privacy.map((c) => c.toUpperCase()).join("·")}`}
+                </Text>
+              ) : null}
+              {!p.ready ? (
+                p.name === "privateer" ? (
+                  // The account login is the primary call-to-action: bold accent, not a dim tag.
+                  <Text color={theme.accent} bold>{`  ${ARROW} sign in`}</Text>
+                ) : (
+                  <Text color={theme.dim}>{`  ${KEY} no key`}</Text>
+                )
+              ) : null}
+            </Text>
+          );
+        })}
+      </Box>
+      <Box marginTop={1}>
+        <Text color={theme.dim}>Remote access (/remote-access on) works only with a Privateer account.</Text>
       </Box>
     </Box>
   );

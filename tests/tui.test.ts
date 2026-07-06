@@ -12,6 +12,8 @@ import { ToolCallView } from "../src/components/ToolCallView.tsx";
 import { AgentGroupView } from "../src/components/AgentGroupView.tsx";
 import type { Entry, ToolEntry } from "../src/components/types.ts";
 import { StatusBar } from "../src/components/StatusBar.tsx";
+import { ModelPicker } from "../src/components/ModelPicker.tsx";
+import { PROVIDER_LIST } from "../src/providers/catalog.ts";
 import { emptyUsage } from "../src/engine/events.ts";
 import { Config } from "../src/config/schema.ts";
 import { privateerChannel } from "../src/providers/resolve.ts";
@@ -251,4 +253,50 @@ test("TodoPanel hides when empty and lists tasks when populated", () => {
   assert.match(frame, /Implementing/); // in_progress shows activeForm
   assert.match(frame, /Test/);
   full.unmount();
+});
+
+// /model's provider stage lists every known provider — not just the configured
+// ones — with the Privateer account pinned first, unconfigured rows tagged
+// "⚿ no key" (the account: "→ sign in"), and a note that remote access needs
+// the account. Picking an
+// unconfigured provider routes into the /keys setup flow via onSetup.
+test("ModelPicker lists all providers, Privateer first, and routes unconfigured picks to setup", async () => {
+  const config = Config.parse({ providers: { anthropic: { apiKey: "x" } } });
+  let setup: string | null = null;
+  const { lastFrame, stdin, unmount } = render(
+    React.createElement(ModelPicker, {
+      config,
+      onSelect: () => {},
+      onSetup: (name: string) => {
+        setup = name;
+      },
+      onLogin: () => {},
+    }),
+  );
+  await new Promise((r) => setTimeout(r, 30)); // let Ink attach its stdin listener
+  const frame = lastFrame() ?? "";
+  for (const p of PROVIDER_LIST) {
+    assert.ok(frame.includes(p.label), `missing provider row: ${p.label}`);
+  }
+  const lines = frame.split("\n");
+  const at = (needle: string) => lines.findIndex((l) => l.includes(needle));
+  assert.ok(at("Privateer account") < at("Anthropic"), "Privateer should be listed first");
+  assert.ok(!lines[at("Anthropic")].includes("no key"), "configured provider must not be tagged");
+  assert.match(lines[at("OpenAI")], /⚿ no key/);
+  assert.match(lines[at("Privateer account")], /→ sign in/);
+  // Providers with a blanket privacy guarantee carry a ⛉ badge; the rest don't.
+  assert.match(lines[at("NEAR AI")], /⛉ TEE/);
+  assert.match(lines[at("Tinfoil")], /⛉ TEE/);
+  assert.match(lines[at("Venice")], /⛉ ZDR/);
+  assert.match(lines[at("Privateer account")], /⛉ TEE·ZDR/);
+  assert.ok(!lines[at("Anthropic")].includes("⛉"), "plain provider must not carry a privacy badge");
+  assert.match(frame, /Remote access .* works only with a Privateer account/);
+
+  // Privateer is row 0; OpenRouter (unconfigured) is row 1. Down + enter → setup.
+  stdin.write("\x1B[B");
+  await new Promise((r) => setTimeout(r, 20));
+  stdin.write("\r");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(setup, "openrouter");
+  unmount();
 });

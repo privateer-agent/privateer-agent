@@ -30,6 +30,9 @@ export function Root({
   const [config, setConfig] = useState<Config>(initialConfig);
   const [modelSpec, setModelSpec] = useState(initialModel);
   const [onboarding, setOnboarding] = useState(startInOnboarding);
+  // A provider picked in /model without credentials: onboarding opens with it
+  // pre-checked so the user lands one enter away from its key prompt.
+  const [setupProvider, setSetupProvider] = useState<ProviderName | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
   const { stdout } = useStdout();
 
@@ -63,6 +66,7 @@ export function Root({
       setConfig(next);
       setModelSpec(result.defaultModel);
       setOnboarding(false);
+      setSetupProvider(null);
     });
   }
 
@@ -99,7 +103,12 @@ export function Root({
   }
 
   if (onboarding) {
-    return <Onboarding initialSelected={configured} onComplete={finish} />;
+    return (
+      <Onboarding
+        initialSelected={setupProvider ? [...configured, setupProvider] : configured}
+        onComplete={finish}
+      />
+    );
   }
 
   return (
@@ -109,8 +118,9 @@ export function Root({
       config={config}
       cwd={cwd}
       resume={resume}
-      onLogin={() => swapScreen(() => setOnboarding(true))}
+      onLogin={() => swapScreen(() => { setSetupProvider(null); setOnboarding(true); })}
       onPrivateerLogin={() => swapScreen(() => setLoggingIn(true))}
+      onSetupProvider={(name) => swapScreen(() => { setSetupProvider(name); setOnboarding(true); })}
     />
   );
 }
