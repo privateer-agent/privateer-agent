@@ -105,6 +105,41 @@ test("redacts secrets that leak into provider error text", () => {
   assert.match(d.message, /«redacted»/);
 });
 
+test("recognizes a connection-refused local Ollama as 'not running', with a start hint", () => {
+  // The real shape when Ollama is down: RetryError → APICallError ("Cannot
+  // connect to API: ", statusCode undefined, url set) → AggregateError with an
+  // EMPTY message but code ECONNREFUSED. The facts are spread across all three
+  // levels; none alone is enough.
+  const socketErr = new AggregateError([], "") as AggregateError & Record<string, unknown>;
+  socketErr.code = "ECONNREFUSED";
+  const apiErr = new Error("Cannot connect to API: ") as Error & Record<string, unknown>;
+  apiErr.url = "http://localhost:11434/api/chat";
+  apiErr.requestBodyValues = { model: "llama3.1" };
+  apiErr.cause = socketErr;
+  const retryErr = new Error(
+    "Failed after 3 attempts. Last error: Cannot connect to API: ",
+  ) as Error & Record<string, unknown>;
+  retryErr.lastError = apiErr;
+
+  const d = describeError(retryErr);
+  assert.match(d.message, /Ollama/);
+  assert.match(d.message, /localhost:11434/);
+  assert.match(d.hint ?? "", /ollama serve/);
+  assert.notEqual(d.retryable, true); // won't clear until the user starts it
+});
+
+test("treats a connection failure to a remote host as a retryable network error", () => {
+  const err = new Error("fetch failed") as Error & Record<string, unknown>;
+  err.url = "https://api.openai.com/v1/chat/completions";
+  const cause = new Error("") as Error & Record<string, unknown>;
+  cause.code = "ETIMEDOUT";
+  err.cause = cause;
+
+  const d = describeError(err);
+  assert.match(d.message, /Network error reaching OpenAI/);
+  assert.equal(d.retryable, true);
+});
+
 test("handles plain errors and strings without throwing", () => {
   assert.equal(describeError(new Error("boom")).message, "boom");
   assert.equal(describeError("just a string").message, "just a string");

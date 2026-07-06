@@ -139,6 +139,11 @@ export class QueryEngine {
         providerOptions: route.thinkingBudget
           ? { anthropic: { thinking: { type: "enabled", budgetTokens: route.thinkingBudget } } }
           : undefined,
+        // streamText's default onError is `console.error(error)`, which dumps the
+        // raw error object — request body included, unredacted — over the TUI. The
+        // same error reaches us as an `error` part on fullStream (handled below),
+        // so the default's only effect is the raw duplicate. Suppress it.
+        onError: () => {},
       });
     } catch (err) {
       const d = describeError(err);

@@ -17,8 +17,11 @@ interface ErrorFacts {
   statusCode?: number;
   providerMessage?: string;
   code?: string; // provider's machine-readable error code, e.g. "DAILY_CAP_HIT"
+  errno?: string; // Node socket-level code, e.g. "ECONNREFUSED"
   model?: string;
   provider?: string;
+  url?: string; // the endpoint the failing request targeted
+  message?: string; // deepest non-empty Error message in the chain
 }
 
 const HOST_LABELS: Record<string, string> = {
@@ -26,70 +29,81 @@ const HOST_LABELS: Record<string, string> = {
   "api.anthropic.com": "Anthropic",
   "api.openai.com": "OpenAI",
   "cloud-api.near.ai": "NEAR AI",
+  "localhost:11434": "Ollama",
+  "127.0.0.1:11434": "Ollama",
 };
 
-// The AI SDK wraps the real provider error: a retry sequence that exhausts its
-// attempts throws AI_RetryError, whose `.lastError` is the APICallError that
-// actually carries statusCode / responseBody / requestBodyValues. Without peeling
-// that off we'd read undefined for every field and fall back to the wrapper's bare
-// "Too Many Requests". Follow `.lastError` (and a `.cause` that looks like a
-// richer error) until we reach the one with the useful fields.
-function unwrap(err: unknown): unknown {
-  let cur = err;
-  for (let i = 0; i < 5; i++) {
-    if (!cur || typeof cur !== "object") break;
-    const e = cur as Record<string, unknown>;
-    const richer = e.statusCode == null && e.responseBody == null;
-    const inner = e.lastError ?? (richer ? e.cause : undefined);
-    if (!inner || inner === cur) break;
-    cur = inner;
-  }
-  return cur;
-}
+// Socket-level failures Node/undici report via an error `code`. Distinct from the
+// provider's machine code (which comes out of the response body) — these mean the
+// request never got a response at all.
+const NETWORK_ERRNO =
+  /^(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EPIPE|ENETUNREACH|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)$/;
 
 // Pull structured fields off an unknown error without trusting any one shape.
+//
+// The AI SDK nests the useful error: retry exhaustion throws AI_RetryError, whose
+// `.lastError` is the APICallError carrying statusCode / url / responseBody, whose
+// `.cause` on a connection failure is the socket error (often an AggregateError
+// with an EMPTY message but an errno code). No single level has everything, so
+// walk the whole chain and merge: HTTP-ish facts keep the first (shallowest)
+// value found, while `message` keeps the deepest NON-EMPTY one — inner messages
+// are more specific ("Cannot connect to API") than the wrapper's ("Failed after
+// 3 attempts…"), but the socket error at the very bottom may have none at all.
 function extract(err: unknown): ErrorFacts {
-  const e = (err ?? {}) as Record<string, unknown>;
-  const statusCode = typeof e.statusCode === "number" ? e.statusCode : undefined;
+  const facts: ErrorFacts = {};
 
   // The provider's own message + machine code, preferred over the SDK's wrapper
   // text. Providers disagree on shape: OpenAI/OpenRouter nest under `error`, while
   // the Privateer account backend returns a flat `{ message, code }` (e.g. a daily
   // usage cap). Read both shapes; keep the first message/code we find.
-  let providerMessage: string | undefined;
-  let code: string | undefined;
   const readBody = (body: unknown) => {
     const b = body as
       | { error?: { message?: unknown; code?: unknown }; message?: unknown; code?: unknown }
       | undefined;
     if (!b || typeof b !== "object") return;
     const msg = b.error?.message ?? b.message;
-    if (providerMessage == null && typeof msg === "string") providerMessage = msg;
+    if (facts.providerMessage == null && typeof msg === "string") facts.providerMessage = msg;
     const c = b.error?.code ?? b.code;
-    if (code == null && typeof c === "string") code = c;
+    if (facts.code == null && typeof c === "string") facts.code = c;
   };
-  readBody(e.data);
-  if (typeof e.responseBody === "string") {
-    try {
-      readBody(JSON.parse(e.responseBody));
-    } catch {
-      /* responseBody wasn't JSON — fall back to the wrapper message */
+
+  let cur: unknown = err;
+  for (let i = 0; i < 6 && cur && typeof cur === "object"; i++) {
+    const e = cur as Record<string, unknown>;
+
+    if (facts.statusCode == null && typeof e.statusCode === "number") facts.statusCode = e.statusCode;
+    readBody(e.data);
+    if (typeof e.responseBody === "string") {
+      try {
+        readBody(JSON.parse(e.responseBody));
+      } catch {
+        /* responseBody wasn't JSON — fall back to the wrapper message */
+      }
     }
+
+    const reqBody = e.requestBodyValues as { model?: unknown } | undefined;
+    if (facts.model == null && typeof reqBody?.model === "string") facts.model = reqBody.model;
+
+    if (facts.url == null && typeof e.url === "string" && /^https?:/.test(e.url)) {
+      facts.url = e.url;
+      try {
+        facts.provider = HOST_LABELS[new URL(e.url).host];
+      } catch {
+        /* not a URL */
+      }
+    }
+
+    if (facts.errno == null && typeof e.code === "string" && NETWORK_ERRNO.test(e.code)) {
+      facts.errno = e.code;
+    }
+    if (typeof e.message === "string" && e.message.trim()) facts.message = e.message;
+
+    const next = e.lastError ?? e.cause;
+    if (!next || next === cur) break;
+    cur = next;
   }
 
-  const reqBody = e.requestBodyValues as { model?: unknown } | undefined;
-  const model = typeof reqBody?.model === "string" ? reqBody.model : undefined;
-
-  let provider: string | undefined;
-  if (typeof e.url === "string") {
-    try {
-      provider = HOST_LABELS[new URL(e.url).host];
-    } catch {
-      /* not a URL */
-    }
-  }
-
-  return { statusCode, providerMessage, code, model, provider };
+  return facts;
 }
 
 // Machine codes the Privateer backend returns for a hard account cap (daily /
@@ -116,10 +130,9 @@ function rawMessage(err: unknown): string {
 // Map a provider error to a friendly message + hint. Falls back to the raw
 // (redacted) message for anything we don't recognize, so nothing is swallowed.
 export function describeError(err: unknown): DescribedError {
-  const inner = unwrap(err);
-  const facts = extract(inner);
+  const facts = extract(err);
   const status = facts.statusCode;
-  const text = facts.providerMessage ?? rawMessage(inner);
+  const text = facts.providerMessage ?? facts.message ?? rawMessage(err);
   const forModel = facts.model ? ` for ${facts.model}` : "";
   const forProvider = facts.provider ? ` for ${facts.provider}` : "";
 
@@ -195,9 +208,36 @@ export function describeError(err: unknown): DescribedError {
       retryable: true,
     });
   }
-  if (/fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network/i.test(text)) {
+  if (
+    facts.errno != null ||
+    /fetch failed|cannot connect|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network/i.test(text)
+  ) {
+    let origin: string | undefined;
+    let localhost = false;
+    if (facts.url) {
+      try {
+        const u = new URL(facts.url);
+        origin = u.origin;
+        localhost = /^(localhost$|127\.|0\.0\.0\.0$|\[::1\]$)/.test(u.hostname);
+      } catch {
+        /* not a URL */
+      }
+    }
+    // A local inference server that refuses connections isn't a flaky network —
+    // it isn't running. Say which one and how to start it; retrying won't help
+    // until the user acts, so no `retryable` flag.
+    if (localhost) {
+      const label = facts.provider ?? "the local server";
+      return out({
+        message: `Cannot connect to ${label} at ${origin} — nothing is listening there.`,
+        hint:
+          facts.provider === "Ollama"
+            ? "Start Ollama (run `ollama serve`, or open the Ollama app), then try again — or run /model to switch models."
+            : "Start the server (or check its base URL), then try again — or run /model to switch models.",
+      });
+    }
     return out({
-      message: "Network error reaching the provider.",
+      message: `Network error reaching ${facts.provider ?? origin ?? "the provider"}.`,
       hint: "Check your connection and try again.",
       retryable: true,
     });
