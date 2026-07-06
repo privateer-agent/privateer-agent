@@ -24,6 +24,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   groq: "https://api.groq.com/openai/v1",
   mistral: "https://api.mistral.ai/v1",
   zai: ZAI_BASE_URL,
+  moonshot: "https://api.moonshot.ai/v1",
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://localhost:11434/api",
   nearai: NEARAI_BASE_URL,
@@ -99,8 +100,9 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
     }
     case "xai":
     case "groq":
-    case "zai": {
-      // All three speak the OpenAI listing shape.
+    case "zai":
+    case "moonshot": {
+      // These all speak the OpenAI listing shape.
       if (!cfg.apiKey) throw new Error("no API key");
       const json = (await getJson(`${base}/models`, {
         authorization: `Bearer ${cfg.apiKey}`,

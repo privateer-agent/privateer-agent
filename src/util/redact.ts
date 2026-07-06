@@ -41,6 +41,7 @@ export function collectSecrets(providers?: Record<string, { apiKey?: string } | 
     "MISTRAL_API_KEY",
     "ZAI_API_KEY",
     "Z_AI_API_KEY",
+    "MOONSHOT_API_KEY",
     "NEAR_AI_API_KEY",
     "NEARAI_API_KEY",
     "TINFOIL_API_KEY",

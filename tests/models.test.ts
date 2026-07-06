@@ -145,6 +145,21 @@ test("zai listing requires a key", async () => {
   await assert.rejects(() => listModels("zai", {}), /no API key/);
 });
 
+test("moonshot lists via the OpenAI shape against the Moonshot endpoint", async () => {
+  const calls = mockFetch({ data: [{ id: "kimi-k2.7-code" }, { id: "kimi-k2.6" }] });
+  const models = await listModels("moonshot", { apiKey: "sk-kimi" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["kimi-k2.6", "kimi-k2.7-code"],
+  );
+  assert.match(calls[0].url, /api\.moonshot\.ai\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer sk-kimi");
+});
+
+test("moonshot listing requires a key", async () => {
+  await assert.rejects(() => listModels("moonshot", {}), /no API key/);
+});
+
 test("mistral listing keeps chat models, maps vision, sends a bearer token", async () => {
   const calls = mockFetch({
     data: [

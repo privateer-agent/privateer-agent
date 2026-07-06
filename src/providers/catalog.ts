@@ -70,6 +70,13 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "zai:glm-5",
     keyHint: "z.ai → API Keys (coding-plan subscribers: set the coding base URL in /keys)",
   },
+  moonshot: {
+    name: "moonshot",
+    label: "Moonshot (Kimi)",
+    requiresKey: providerRequiresKey("moonshot"),
+    defaultModel: "moonshot:kimi-k2.7-code",
+    keyHint: "platform.moonshot.ai → API Keys",
+  },
   tinfoil: {
     name: "tinfoil",
     label: "Tinfoil (private TEE inference)",
