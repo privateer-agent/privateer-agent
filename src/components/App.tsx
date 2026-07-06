@@ -45,7 +45,7 @@ import { loadCustomCommands } from "../commands/custom.ts";
 import { loadSkills } from "../skills/loader.ts";
 import { installSkills, removeSkill } from "../skills/installer.ts";
 import { saveGlobalConfig } from "../config/load.ts";
-import { logout as privateerLogout, hasCredentials } from "../auth/privateer.ts";
+import { logout as privateerLogout, hasCredentials, onSessionExpired, warmSession } from "../auth/privateer.ts";
 import { RelayClient } from "../remote/relayClient.ts";
 import { ModeGate, type AskOutcome } from "../permissions/uiGate.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
@@ -689,6 +689,32 @@ export function App({
   }, [busy]);
 
   const append = (...entries: Entry[]) => setCommitted((c) => [...c, ...entries]);
+
+  // Announce a Privateer sign-out the moment it happens. The machine login
+  // dies server-side when its refresh-token TTL lapses (only after weeks of
+  // no use — spawns slide it forward) or it's revoked, and — because the child
+  // session only spawns on demand — the CLI used to discover that on the first
+  // request after a boot, where the credentials were wiped silently. The
+  // listener covers every spawn path (startup, first prompt, relay tickets);
+  // warming the session up front when the active model bills to the account
+  // moves the announcement to launch instead of mid-turn.
+  useEffect(() => {
+    const unsub = onSessionExpired(() =>
+      append({
+        kind: "notice",
+        tone: "error",
+        text: "Signed out of your Privateer account — this machine's login expired.",
+        hint: "Run /login to sign back in. Account models stay listed under /model.",
+      }),
+    );
+    try {
+      if (parseModelSpec(modelSpec).provider === "privateer") void warmSession();
+    } catch {
+      /* malformed model spec — nothing to warm */
+    }
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleCommand(raw: string): boolean {
     const res = runCommand(raw, { config, modelSpec, mode, usage, context, cwd, todos, customCommands, skills });

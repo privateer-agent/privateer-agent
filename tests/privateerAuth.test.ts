@@ -22,6 +22,8 @@ const {
   defaultDeviceLabel,
   authedFetch,
   revokeChildSession,
+  onSessionExpired,
+  warmSession,
 } = await import("../src/auth/privateer.ts");
 
 const creds = {
@@ -151,6 +153,47 @@ test("session spawn presents the parent access token + JSON body", async () => {
     // otherwise the server can't parse the refreshToken body (regression guard).
     assert.equal(spawnCt, "application/json");
   } finally {
+    globalThis.fetch = orig;
+    clearCredentials();
+  }
+});
+
+test("expired machine login: spawn 401 wipes credentials and notifies listeners", async () => {
+  saveCredentials(creds);
+  let expired = 0;
+  const unsub = onSessionExpired(() => expired++);
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (input: any) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("/auth/session/spawn")) return new Response("{}", { status: 401 });
+    return new Response("ok", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(() => authedFetch("https://example.test/whoami", {}), /session expired/i);
+    assert.equal(expired, 1, "sign-out announced exactly once");
+    assert.equal(hasCredentials(), false, "stale credentials wiped");
+  } finally {
+    unsub();
+    globalThis.fetch = orig;
+    clearCredentials();
+  }
+});
+
+test("warmSession: no-op when logged out; surfaces expiry without throwing", async () => {
+  clearCredentials();
+  await warmSession(); // logged out — must not throw (and has nothing to spawn)
+
+  saveCredentials(creds);
+  let expired = 0;
+  const unsub = onSessionExpired(() => expired++);
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("{}", { status: 401 })) as typeof fetch;
+  try {
+    await warmSession(); // swallows the spawn failure but still notifies
+    assert.equal(expired, 1, "expiry announced at warm-up");
+    assert.equal(hasCredentials(), false);
+  } finally {
+    unsub();
     globalThis.fetch = orig;
     clearCredentials();
   }

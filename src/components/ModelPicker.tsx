@@ -4,6 +4,7 @@ import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import type { Config, ProviderName } from "../config/schema.ts";
 import { configuredProviders, privateerChannel } from "../providers/resolve.ts";
+import { hasCredentials } from "../auth/privateer.ts";
 import { PROVIDER_META } from "../providers/catalog.ts";
 import { listModels, zdrPosture, type ModelInfo } from "../providers/models.ts";
 import { theme, POSTURE_COLOR } from "./theme.ts";
@@ -27,14 +28,18 @@ export function ModelPicker({
   onSelect: (spec: string) => void;
   onCancel?: () => void;
 }) {
-  const ready = useMemo(() => {
-    const offered = providers ?? configuredProviders(config).filter((p) => p.ready).map((p) => p.name);
-    return offered as ProviderName[];
+  const entries = useMemo<{ name: ProviderName; ready: boolean }[]>(() => {
+    if (providers) return providers.map((name) => ({ name, ready: true }));
+    // Ready providers, plus the Privateer account provider even when signed
+    // out: an expired machine login wipes the stored credentials, and the
+    // account silently vanishing from this list reads as a bug. It stays
+    // listed, annotated, and selecting it points at /login.
+    return configuredProviders(config).filter((p) => p.ready || p.name === "privateer");
   }, [config, providers]);
 
-  const [provider, setProvider] = useState<ProviderName | null>(ready.length === 1 ? ready[0] : null);
+  const [provider, setProvider] = useState<ProviderName | null>(entries.length === 1 ? entries[0].name : null);
 
-  if (ready.length === 0) {
+  if (entries.length === 0) {
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text color={theme.error}>No providers configured. Run /login to add an API key.</Text>
@@ -43,7 +48,16 @@ export function ModelPicker({
   }
 
   if (provider === null) {
-    return <ProviderStage providers={ready} onPick={setProvider} onCancel={onCancel} />;
+    return <ProviderStage providers={entries} onPick={setProvider} onCancel={onCancel} />;
+  }
+
+  if (provider === "privateer" && !hasCredentials()) {
+    return (
+      <SignedOutStage
+        onBack={entries.length > 1 ? () => setProvider(null) : undefined}
+        onCancel={onCancel}
+      />
+    );
   }
 
   return (
@@ -51,7 +65,7 @@ export function ModelPicker({
       provider={provider}
       config={config}
       onSelect={(id) => onSelect(`${provider}:${id}`)}
-      onBack={ready.length > 1 ? () => setProvider(null) : undefined}
+      onBack={entries.length > 1 ? () => setProvider(null) : undefined}
       onCancel={onCancel}
     />
   );
@@ -62,7 +76,7 @@ function ProviderStage({
   onPick,
   onCancel,
 }: {
-  providers: ProviderName[];
+  providers: { name: ProviderName; ready: boolean }[];
   onPick: (name: ProviderName) => void;
   onCancel?: () => void;
 }) {
@@ -70,7 +84,7 @@ function ProviderStage({
   useInput((input, key) => {
     if (key.upArrow || input === "k") setCursor((c) => (c - 1 + providers.length) % providers.length);
     else if (key.downArrow || input === "j") setCursor((c) => (c + 1) % providers.length);
-    else if (key.return) onPick(providers[cursor]);
+    else if (key.return) onPick(providers[cursor].name);
     else if (key.escape) onCancel?.();
   });
 
@@ -81,13 +95,32 @@ function ProviderStage({
         <Text color={theme.accent}>enter</Text> select{onCancel ? ", esc cancel" : ""}.
       </Text>
       <Box flexDirection="column" marginTop={1}>
-        {providers.map((name, i) => (
-          <Text key={name} color={i === cursor ? theme.accent : undefined}>
+        {providers.map((p, i) => (
+          <Text key={p.name} color={i === cursor ? theme.accent : undefined}>
             {i === cursor ? "❯ " : "  "}
-            {PROVIDER_META[name].label}
+            {PROVIDER_META[p.name].label}
+            {!p.ready ? <Text color={theme.warning}> — signed out, run /login</Text> : null}
           </Text>
         ))}
       </Box>
+    </Box>
+  );
+}
+
+// The Privateer account provider is listed but signed out (fresh install, or
+// the machine login's TTL lapsed and the credentials were wiped): explain how
+// to get it back instead of failing the model fetch with a raw auth error.
+function SignedOutStage({ onBack, onCancel }: { onBack?: () => void; onCancel?: () => void }) {
+  useInput((_input, key) => {
+    if (key.escape) (onBack ?? onCancel)?.();
+  });
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      <Text color={theme.warning}>Not signed in to your Privateer account.</Text>
+      <Text color={theme.dim}>
+        Run /login to link this terminal, then pick an account model here.
+        {onBack ? " Esc to go back." : onCancel ? " Esc to cancel." : ""}
+      </Text>
     </Box>
   );
 }

@@ -153,6 +153,16 @@ export function describeError(err: unknown): DescribedError {
       hint: "Upgrade or top up your Privateer account, or run /provider to use your own API key.",
     });
   }
+  // Privateer machine-login expiry (thrown by the session spawn after the
+  // server rejects the parent refresh token). The stored credentials are
+  // already wiped; the only fix is a fresh /login, so say exactly that and
+  // never mark it retryable.
+  if (/privateer session expired/i.test(text)) {
+    return out({
+      message: "Your Privateer session expired — this terminal was signed out.",
+      hint: "Run /login to sign back in to your Privateer account.",
+    });
+  }
   if (status === 401 || status === 403) {
     return out({
       message: `Authentication failed${forProvider} (${status}).`,

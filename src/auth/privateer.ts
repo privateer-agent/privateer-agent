@@ -145,6 +145,32 @@ function tryChmod(path: string, mode: number): void {
   }
 }
 
+// ── Session-expiry notification ──────────────────────────────────────────────
+// Fired when the machine login is invalidated server-side: the parent refresh
+// token's TTL lapsed (14 days for email logins, 60 for wallet — each session
+// spawn slides it forward, so this means the machine sat unused that long), or
+// it was revoked (from the app's Linked Devices, or by reuse detection).
+// Without a listener the credentials are wiped silently and Privateer just
+// stops working; the UI subscribes to announce the sign-out prominently.
+
+type SessionExpiredListener = () => void;
+const _expiredListeners = new Set<SessionExpiredListener>();
+
+export function onSessionExpired(listener: SessionExpiredListener): () => void {
+  _expiredListeners.add(listener);
+  return () => _expiredListeners.delete(listener);
+}
+
+function notifySessionExpired(): void {
+  for (const listener of _expiredListeners) {
+    try {
+      listener();
+    } catch {
+      /* a failing listener must not break the auth path */
+    }
+  }
+}
+
 // ── Device authorization flow ────────────────────────────────────────────────
 
 export interface DeviceCode {
@@ -271,12 +297,31 @@ async function spawnChildSession(): Promise<ChildSession> {
   });
   if (!res.ok) {
     // Parent refresh token invalid/expired → the machine login is gone.
-    if (res.status === 401) clearCredentials();
+    if (res.status === 401) {
+      clearCredentials();
+      notifySessionExpired();
+    }
     throw new Error("Your Privateer session expired. Run /login to sign in again.");
   }
   const { accessToken, refreshToken } = (await res.json()) as ChildSession;
   _child = { accessToken, refreshToken };
   return _child;
+}
+
+/**
+ * Eagerly spawn this terminal's child session at startup so an expired machine
+ * login is announced (via onSessionExpired) at launch rather than surfacing as
+ * an inference error on the first prompt of the day. Best effort: transient
+ * network failures stay silent here — the first real request retries the spawn
+ * and reports through the normal error path.
+ */
+export async function warmSession(): Promise<void> {
+  if (!hasCredentials()) return;
+  try {
+    await ensureChildSession();
+  } catch {
+    /* expiry is announced via onSessionExpired; other failures retry on use */
+  }
 }
 
 // Ensure a child session exists, de-duping concurrent spawns within this process.
