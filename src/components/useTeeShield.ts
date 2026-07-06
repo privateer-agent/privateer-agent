@@ -4,8 +4,11 @@ import { parseModelSpec, privateerChannel } from "../providers/resolve.ts";
 import {
   fetchAttestation,
   fetchAttestationViaServer,
+  fetchTinfoilAttestation,
   teePosture,
+  tinfoilTeePosture,
   type Attestation,
+  type TinfoilAttestation,
   type TeePosture,
 } from "../providers/attestation.ts";
 
@@ -16,7 +19,7 @@ export type TeeState =
   | { kind: "no-key" } // NEAR AI (BYO key) selected but no API key to attest with
   | { kind: "loading" } // fetching the attestation report
   | { kind: "error" } // network / timeout / HTTP failure
-  | { kind: "ready"; posture: TeePosture; attestation: Attestation };
+  | { kind: "ready"; posture: TeePosture; attestation: Attestation | TinfoilAttestation };
 
 // Attestations are per-model (each model has its own enclave + signing key), so we
 // cache the in-flight/resolved promise per (apiKey, baseURL, modelId) and reuse it
@@ -53,10 +56,29 @@ function loadServerAttestation(modelId: string): Promise<Attestation> {
   return pending;
 }
 
-// Resolve the TEE shield state for the currently selected model. Two paths trigger
-// a fetch: BYO `nearai:*` models (direct gateway, needs a key) and account-billed
-// `privateer:near/*` models (server proxy, uses the logged-in session). Everything
-// else returns "hidden" before touching the network.
+// Tinfoil attests the host itself (every model behind the gateway shares the
+// enclave-terminated channel), and its well-known endpoint needs no key — so the
+// cache is per endpoint, keyed by the configured baseURL.
+const tinfoilCache = new Map<string, Promise<TinfoilAttestation>>();
+
+function loadTinfoilAttestation(baseURL: string | undefined): Promise<TinfoilAttestation> {
+  const key = baseURL ?? "";
+  let pending = tinfoilCache.get(key);
+  if (!pending) {
+    pending = fetchTinfoilAttestation({ baseURL }).catch((err) => {
+      tinfoilCache.delete(key);
+      throw err;
+    });
+    tinfoilCache.set(key, pending);
+  }
+  return pending;
+}
+
+// Resolve the TEE shield state for the currently selected model. Three paths
+// trigger a fetch: BYO `nearai:*` models (direct gateway, needs a key),
+// account-billed `privateer:near/*` models (server proxy, uses the logged-in
+// session), and `tinfoil:*` models (public per-host attestation document).
+// Everything else returns "hidden" before touching the network.
 export function useTeeShield(modelSpec: string, config: Config): TeeState {
   let provider = "";
   let modelId = "";
@@ -69,13 +91,15 @@ export function useTeeShield(modelSpec: string, config: Config): TeeState {
   const cfg = config.providers.nearai ?? {};
   const isNearai = provider === "nearai";
   const isPrivateerTee = provider === "privateer" && privateerChannel(modelId) === "tee";
+  const isTinfoil = provider === "tinfoil";
   const apiKey = isNearai ? cfg.apiKey : undefined;
   const baseURL = cfg.baseURL;
+  const tinfoilBaseURL = config.providers.tinfoil?.baseURL;
 
   const [state, setState] = useState<TeeState>({ kind: "hidden" });
 
   useEffect(() => {
-    if (!isNearai && !isPrivateerTee) {
+    if (!isNearai && !isPrivateerTee && !isTinfoil) {
       setState({ kind: "hidden" });
       return;
     }
@@ -85,12 +109,18 @@ export function useTeeShield(modelSpec: string, config: Config): TeeState {
     }
     let ignore = false;
     setState({ kind: "loading" });
-    const pending = isPrivateerTee
-      ? loadServerAttestation(modelId)
-      : loadAttestation(apiKey!, baseURL, modelId);
+    const pending: Promise<{ posture: TeePosture; attestation: Attestation | TinfoilAttestation }> =
+      isTinfoil
+        ? loadTinfoilAttestation(tinfoilBaseURL).then((att) => ({
+            posture: tinfoilTeePosture(att),
+            attestation: att,
+          }))
+        : (isPrivateerTee ? loadServerAttestation(modelId) : loadAttestation(apiKey!, baseURL, modelId)).then(
+            (att) => ({ posture: teePosture(att), attestation: att }),
+          );
     pending
-      .then((attestation) => {
-        if (!ignore) setState({ kind: "ready", posture: teePosture(attestation), attestation });
+      .then(({ posture, attestation }) => {
+        if (!ignore) setState({ kind: "ready", posture, attestation });
       })
       .catch(() => {
         if (!ignore) setState({ kind: "error" });
@@ -98,7 +128,7 @@ export function useTeeShield(modelSpec: string, config: Config): TeeState {
     return () => {
       ignore = true;
     };
-  }, [isNearai, isPrivateerTee, apiKey, baseURL, modelId]);
+  }, [isNearai, isPrivateerTee, isTinfoil, apiKey, baseURL, tinfoilBaseURL, modelId]);
 
   return state;
 }

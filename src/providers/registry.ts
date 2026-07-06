@@ -21,8 +21,9 @@ import { authedFetch, serverBaseUrl } from "../auth/privateer.ts";
 export const NEARAI_BASE_URL = "https://cloud-api.near.ai/v1";
 
 // Tinfoil's OpenAI-compatible inference gateway. Like NEAR AI, every model runs
-// inside a hardware enclave (TEE) — prompts are confidential to the host. Its
-// attestation protocol differs from NEAR's, so /verify doesn't cover it (yet).
+// inside a hardware enclave (TEE) — prompts are confidential to the host. The
+// gateway publishes a per-host attestation document that /verify and the status-bar
+// shield check, TLS-key-bound to the connection (see ./attestation.ts).
 export const TINFOIL_BASE_URL = "https://inference.tinfoil.sh/v1";
 
 // Z.ai's (GLM) OpenAI-compatible pay-as-you-go endpoint. Coding-plan subscribers

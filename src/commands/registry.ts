@@ -35,7 +35,7 @@ export type CommandResult =
   | { type: "toggleVim" }
   // Toggle OpenRouter Zero-Data-Retention enforcement (pins requests to ZDR endpoints).
   | { type: "toggleZdr" }
-  // Fetch + display the NEAR AI TEE attestation for the current model (resolved by the App).
+  // Fetch + display the TEE attestation (NEAR AI or Tinfoil) for the current model (resolved by the App).
   | { type: "verify" }
   // Toggle full vs truncated tool output in the transcript.
   | { type: "toggleVerbose" }
@@ -514,7 +514,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: "verify",
-    summary: "show the NEAR AI TEE attestation proving the current model runs privately",
+    summary: "show the TEE attestation proving the current model runs privately",
     run: (_args, ctx) => {
       let provider = "";
       let modelId = "";
@@ -523,15 +523,17 @@ const COMMANDS: CommandDef[] = [
       } catch {
         /* malformed model spec → handled below */
       }
-      // NEAR models reachable two ways: BYO key (`nearai:*`) or account-billed
-      // through the Privateer server (`privateer:near/*`). Both are TEE-attestable.
+      // TEE-attestable three ways: NEAR with a BYO key (`nearai:*`), NEAR
+      // account-billed through the Privateer server (`privateer:near/*`), and
+      // Tinfoil (`tinfoil:*`, whose attestation document is public — no key).
       const isNearai = provider === "nearai";
       const isPrivateerNear = provider === "privateer" && modelId.startsWith("near/");
-      if (!isNearai && !isPrivateerNear) {
+      const isTinfoil = provider === "tinfoil";
+      if (!isNearai && !isPrivateerNear && !isTinfoil) {
         return {
           type: "notice",
           tone: "error",
-          text: "/verify attests NEAR AI TEE models. Switch to a nearai:* or privateer:near/* model with /model first.",
+          text: "/verify attests TEE models. Switch to a nearai:*, privateer:near/*, or tinfoil:* model with /model first.",
         };
       }
       // BYO path needs a local key; the account path uses your Privateer session

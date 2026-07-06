@@ -1,6 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash, X509Certificate } from "node:crypto";
+import { request as httpsRequest } from "node:https";
+import type { TLSSocket } from "node:tls";
+import { gunzipSync } from "node:zlib";
 import type { ProviderConfig } from "../config/schema.ts";
-import { NEARAI_BASE_URL } from "./registry.ts";
+import { NEARAI_BASE_URL, TINFOIL_BASE_URL } from "./registry.ts";
 import { authedFetch, serverBaseUrl } from "../auth/privateer.ts";
 
 // ── NEAR AI TEE attestation ──────────────────────────────────────────────────
@@ -145,5 +148,145 @@ export async function fetchAttestationViaServer(modelId: string): Promise<Attest
 export function teePosture(att: Attestation): TeePosture {
   if (!att.signingAddress && att.hardware.length === 0) return "red";
   if (att.signingAddress && att.hardware.length > 0 && att.nonceEchoed) return "green";
+  return "yellow";
+}
+
+// ── Tinfoil TEE attestation ──────────────────────────────────────────────────
+// Tinfoil enclaves publish an attestation document at /.well-known/tinfoil-attestation:
+// { format: <predicate URL>, body: <base64 (gzipped) hardware report> }. Unlike
+// NEAR's per-model reports, the document attests the *host* — the gateway itself
+// runs in the enclave. For the SEV-SNP predicate, report_data[0:32] of the signed
+// report is the SHA-256 of the enclave's TLS public key (SPKI DER): TLS terminates
+// inside the enclave, so matching that hash against the key on the very connection
+// that served the document proves the channel ends in attested hardware. As with
+// NEAR, this is a pragmatic check — we do NOT re-validate the AMD signature chain
+// or the Sigstore code measurements; that's the job of the full verifier
+// (github.com/tinfoilsh/tinfoil-cli). /verify prints the raw document for it.
+
+export interface TinfoilAttestation {
+  host: string; // host the document came from (attestation is per-host, not per-model)
+  format: string; // predicate URL declaring the report type
+  hardware: string[]; // TEE platform(s) the predicate names, e.g. ["AMD SEV-SNP"]
+  attestedTlsKeyFp?: string; // report_data[0:32]: hash of the enclave's TLS key
+  liveTlsKeyFp?: string; // hash of the TLS key that actually served the document
+  tlsKeyMatched: boolean; // live key is the attested key → channel ends in the enclave
+  raw: unknown; // full document, for /verify display + external verification
+}
+
+// What the transport hands back: the parsed well-known document plus the SPKI
+// SHA-256 of the leaf certificate on the connection that served it. Injectable so
+// tests can exercise interpretation without a TLS handshake.
+export type TinfoilTransport = (host: string) => Promise<{ doc: unknown; liveTlsKeyFp?: string }>;
+
+// Node's fetch never exposes the peer certificate, so the default transport drops
+// to https.request and reads the leaf cert off the socket that delivered the body —
+// the binding is only meaningful against that exact connection.
+const httpsTransport: TinfoilTransport = (host) =>
+  new Promise((resolve, reject) => {
+    const url = new URL(`https://${host}/.well-known/tinfoil-attestation`);
+    const req = httpsRequest(
+      {
+        hostname: url.hostname,
+        port: url.port ? Number(url.port) : 443,
+        path: url.pathname,
+        method: "GET",
+        timeout: TIMEOUT_MS,
+      },
+      (res) => {
+        let liveTlsKeyFp: string | undefined;
+        try {
+          const peer = (res.socket as TLSSocket).getPeerCertificate();
+          if (peer?.raw) {
+            const spki = new X509Certificate(peer.raw).publicKey.export({ type: "spki", format: "der" });
+            liveTlsKeyFp = createHash("sha256").update(spki).digest("hex");
+          }
+        } catch {
+          // cert unavailable → binding stays unconfirmed (yellow), not an error
+        }
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            const hint = body.slice(0, 200).trim();
+            reject(new Error(`HTTP ${res.statusCode} ${res.statusMessage ?? ""}${hint ? ` — ${hint}` : ""}`));
+            return;
+          }
+          try {
+            resolve({ doc: JSON.parse(body), liveTlsKeyFp });
+          } catch {
+            reject(new Error("attestation endpoint returned non-JSON"));
+          }
+        });
+        res.on("error", reject);
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error(`timed out after ${TIMEOUT_MS / 1000}s`)));
+    req.on("error", reject);
+    req.end();
+  });
+
+// Fetch and interpret the attestation document for the configured Tinfoil endpoint.
+// Needs no API key — the well-known endpoint is public. Throws a readable error on
+// network/HTTP failure (mirroring fetchAttestation) so the UI can show "error".
+export async function fetchTinfoilAttestation(
+  cfg: ProviderConfig,
+  transport: TinfoilTransport = httpsTransport,
+): Promise<TinfoilAttestation> {
+  const host = new URL(cfg.baseURL ?? TINFOIL_BASE_URL).host;
+  const { doc, liveTlsKeyFp } = await transport(host);
+  return interpretTinfoilDoc(host, doc, liveTlsKeyFp);
+}
+
+// Turn a raw attestation document into our posture inputs. Pure and lenient: a
+// malformed document degrades to "no material" (red) rather than throwing.
+export function interpretTinfoilDoc(
+  host: string,
+  doc: unknown,
+  liveTlsKeyFp?: string,
+): TinfoilAttestation {
+  const d = (doc ?? {}) as { format?: unknown; body?: unknown };
+  const format = typeof d.format === "string" ? d.format : "";
+  // Hardware evidence comes from the predicate URL itself (e.g.
+  // ".../predicate/sev-snp-guest/v2", ".../snp-tdx-multiplatform/v1").
+  const fmt = format.toLowerCase();
+  const hardware: string[] = [];
+  if (/sev|snp/.test(fmt)) hardware.push("AMD SEV-SNP");
+  if (/tdx/.test(fmt)) hardware.push("Intel TDX");
+  if (/nitro/.test(fmt)) hardware.push("AWS Nitro");
+
+  // Decode the report: base64, gunzipped when the gzip magic leads.
+  let report: Buffer | undefined;
+  if (typeof d.body === "string" && d.body) {
+    try {
+      let bytes = Buffer.from(d.body, "base64");
+      if (bytes[0] === 0x1f && bytes[1] === 0x8b) bytes = gunzipSync(bytes);
+      report = bytes;
+    } catch {
+      // undecodable body → treated as absent
+    }
+  }
+
+  // The SEV-SNP report layout puts report_data (64 bytes) at 0x50; Tinfoil packs
+  // the TLS-key hash into its first half. Only that predicate's layout is known,
+  // so other formats fall back to scanning the report for the live key's bytes.
+  const attestedTlsKeyFp =
+    /sev-snp-guest/.test(fmt) && report && report.length >= 0x90
+      ? report.subarray(0x50, 0x70).toString("hex")
+      : undefined;
+  const tlsKeyMatched =
+    !!liveTlsKeyFp &&
+    !!report &&
+    (attestedTlsKeyFp === liveTlsKeyFp || report.includes(Buffer.from(liveTlsKeyFp, "hex")));
+
+  return { host, format, hardware, attestedTlsKeyFp, liveTlsKeyFp, tlsKeyMatched, raw: doc };
+}
+
+// Posture mapping for Tinfoil, mirroring teePosture's structure. GREEN: a TEE
+// predicate plus the live TLS key found inside the attested report (the channel
+// demonstrably ends in the enclave). YELLOW: a report came back but the binding
+// couldn't be confirmed here. RED: no attestation material at all.
+export function tinfoilTeePosture(att: TinfoilAttestation): TeePosture {
+  if (att.hardware.length === 0 && !att.attestedTlsKeyFp) return "red";
+  if (att.hardware.length > 0 && att.tlsKeyMatched) return "green";
   return "yellow";
 }

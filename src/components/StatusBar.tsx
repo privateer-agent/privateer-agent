@@ -19,9 +19,9 @@ function ZdrBadge({ zdr }: { zdr?: ZdrState }) {
   return <Text color={theme.dim}>{`${SHIELD} ZDR? · `}</Text>;
 }
 
-// NEAR AI TEE shield: a colored "⛉ TEE" segment summarizing whether the selected
-// model's confidential-inference enclave attested successfully. Dim "⛉ TEE?" while
-// loading or when unknown (no key / fetch error); nothing for non-NEAR models.
+// TEE shield (NEAR AI / Tinfoil): a colored "⛉ TEE" segment summarizing whether the
+// selected model's confidential-inference enclave attested successfully. Dim "⛉ TEE?"
+// while loading or when unknown (no key / fetch error); nothing for non-TEE models.
 function TeeBadge({ tee }: { tee?: TeeState }) {
   if (!tee || tee.kind === "hidden") return null;
   if (tee.kind === "ready") {
@@ -93,7 +93,7 @@ export function StatusBar(props: {
   lastTurn?: UsageTotals;
   custom?: string; // settings-driven status line; overrides the default when set
   zdr?: ZdrState; // OpenRouter ZDR posture for the selected model (default line only)
-  tee?: TeeState; // NEAR AI TEE attestation posture for the selected model (default line only)
+  tee?: TeeState; // TEE attestation posture for the selected model (default line only)
   remote?: boolean; // /remote-access is on — the app can drive this terminal (default line only)
 }) {
   // Stay clear of the right edge (parent paddingX={1} plus a 2-col safety gap) so

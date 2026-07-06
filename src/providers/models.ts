@@ -103,8 +103,20 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
         .map((m) => ({ id: m.name.replace(/^models\//, ""), label: m.displayName }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
+    case "groq": {
+      // OpenAI listing shape, but the catalog mixes in audio (whisper/tts) and
+      // safety-classifier (guard) models that can't chat — drop those, the way the
+      // openai case keeps chat families.
+      if (!cfg.apiKey) throw new Error("no API key");
+      const json = (await getJson(`${base}/models`, {
+        authorization: `Bearer ${cfg.apiKey}`,
+      })) as { data?: { id: string }[] };
+      return (json.data ?? [])
+        .filter((m) => !/whisper|guard|tts/i.test(m.id))
+        .map((m) => ({ id: m.id }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
     case "xai":
-    case "groq":
     case "zai":
     case "moonshot":
     case "cerebras":

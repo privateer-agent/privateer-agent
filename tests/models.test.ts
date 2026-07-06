@@ -125,6 +125,23 @@ test("xai and groq list via the OpenAI shape with a bearer token", async () => {
   assert.equal(groqCalls[0].headers.authorization, "Bearer gsk_key");
 });
 
+test("groq listing drops non-chat entries (whisper, tts, guard models)", async () => {
+  mockFetch({
+    data: [
+      { id: "whisper-large-v3" },
+      { id: "moonshotai/kimi-k2-instruct" },
+      { id: "playai-tts" },
+      { id: "meta-llama/llama-guard-4-12b" },
+      { id: "llama-3.3-70b-versatile" },
+    ],
+  });
+  const groq = await listModels("groq", { apiKey: "gsk_key" });
+  assert.deepEqual(
+    groq.map((m) => m.id),
+    ["llama-3.3-70b-versatile", "moonshotai/kimi-k2-instruct"],
+  );
+});
+
 test("xai and groq listings require a key", async () => {
   await assert.rejects(() => listModels("xai", {}), /no API key/);
   await assert.rejects(() => listModels("groq", {}), /no API key/);

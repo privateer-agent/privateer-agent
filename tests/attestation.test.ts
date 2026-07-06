@@ -1,6 +1,12 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { fetchAttestation, teePosture } from "../src/providers/attestation.ts";
+import { gzipSync } from "node:zlib";
+import {
+  fetchAttestation,
+  fetchTinfoilAttestation,
+  teePosture,
+  tinfoilTeePosture,
+} from "../src/providers/attestation.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -85,5 +91,76 @@ test("teePosture: red when no signing key and no hardware evidence", () => {
   assert.equal(
     teePosture({ model: "m", nonce: "n", nonceEchoed: false, hardware: [], raw: {} }),
     "red",
+  );
+});
+
+// ── Tinfoil ──────────────────────────────────────────────────────────────────
+
+const SNP_FORMAT = "https://tinfoil.sh/predicate/sev-snp-guest/v2";
+const KEY_FP = "ab".repeat(32); // a fake sha256(SPKI) fingerprint, hex
+
+// A synthetic SEV-SNP report (1184 bytes) with the TLS-key hash packed into
+// report_data[0:32] at offset 0x50, gzipped + base64'd like the live endpoint.
+function snpDoc(tlsKeyFpHex: string) {
+  const report = Buffer.alloc(1184);
+  Buffer.from(tlsKeyFpHex, "hex").copy(report, 0x50);
+  return { format: SNP_FORMAT, body: gzipSync(report).toString("base64") };
+}
+
+test("fetchTinfoilAttestation: green when the live TLS key is the attested key", async () => {
+  const hosts: string[] = [];
+  const att = await fetchTinfoilAttestation({}, async (host) => {
+    hosts.push(host);
+    return { doc: snpDoc(KEY_FP), liveTlsKeyFp: KEY_FP };
+  });
+  assert.deepEqual(hosts, ["inference.tinfoil.sh"]); // default base URL, /v1 stripped
+  assert.deepEqual(att.hardware, ["AMD SEV-SNP"]);
+  assert.equal(att.attestedTlsKeyFp, KEY_FP);
+  assert.equal(att.tlsKeyMatched, true);
+  assert.equal(tinfoilTeePosture(att), "green");
+});
+
+test("fetchTinfoilAttestation: attests the configured endpoint's host", async () => {
+  const hosts: string[] = [];
+  await fetchTinfoilAttestation({ baseURL: "https://enclave.example.com:8443/v1" }, async (host) => {
+    hosts.push(host);
+    return { doc: snpDoc(KEY_FP), liveTlsKeyFp: KEY_FP };
+  });
+  assert.deepEqual(hosts, ["enclave.example.com:8443"]);
+});
+
+test("tinfoil posture: yellow when the live key doesn't match the attested key", async () => {
+  const att = await fetchTinfoilAttestation({}, async () => ({
+    doc: snpDoc(KEY_FP),
+    liveTlsKeyFp: "cd".repeat(32),
+  }));
+  assert.equal(att.tlsKeyMatched, false);
+  assert.equal(tinfoilTeePosture(att), "yellow");
+});
+
+test("tinfoil posture: yellow when the peer certificate was unavailable", async () => {
+  const att = await fetchTinfoilAttestation({}, async () => ({ doc: snpDoc(KEY_FP) }));
+  assert.equal(att.attestedTlsKeyFp, KEY_FP);
+  assert.equal(att.tlsKeyMatched, false);
+  assert.equal(tinfoilTeePosture(att), "yellow");
+});
+
+test("tinfoil posture: red when the document carries no attestation material", async () => {
+  const att = await fetchTinfoilAttestation({}, async () => ({
+    doc: { format: "something/else", body: "not base64 at all!!!" },
+    liveTlsKeyFp: KEY_FP,
+  }));
+  assert.deepEqual(att.hardware, []);
+  assert.equal(att.attestedTlsKeyFp, undefined);
+  assert.equal(tinfoilTeePosture(att), "red");
+});
+
+test("fetchTinfoilAttestation propagates transport failures", async () => {
+  await assert.rejects(
+    () =>
+      fetchTinfoilAttestation({}, async () => {
+        throw new Error("HTTP 503 Service Unavailable");
+      }),
+    /503/,
   );
 });

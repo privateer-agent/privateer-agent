@@ -15,7 +15,13 @@ import { ModeHint } from "./ModeHint.tsx";
 import { useZdrShield } from "./useZdrShield.ts";
 import { useTeeShield } from "./useTeeShield.ts";
 import { parseModelSpec } from "../providers/resolve.ts";
-import { fetchAttestation, fetchAttestationViaServer, teePosture } from "../providers/attestation.ts";
+import {
+  fetchAttestation,
+  fetchAttestationViaServer,
+  fetchTinfoilAttestation,
+  teePosture,
+  tinfoilTeePosture,
+} from "../providers/attestation.ts";
 import { RewindPicker } from "./RewindPicker.tsx";
 import { SessionPicker } from "./SessionPicker.tsx";
 import { CheckpointStore, type RewindScope } from "../memory/checkpoints.ts";
@@ -829,6 +835,43 @@ export function App({
       }
       case "verify": {
         const { provider, modelId } = parseModelSpec(modelSpec);
+        // Tinfoil attests the endpoint host, not a model: the document proves the
+        // gateway itself runs in an enclave, bound to the TLS key of the channel.
+        if (provider === "tinfoil") {
+          append({ kind: "notice", text: "Fetching TEE attestation from the Tinfoil endpoint…" });
+          void fetchTinfoilAttestation(config.providers.tinfoil ?? {})
+            .then((att) => {
+              const posture = tinfoilTeePosture(att);
+              const verdict =
+                posture === "green"
+                  ? "✓ Verified — TLS terminates inside a genuine TEE"
+                  : posture === "yellow"
+                    ? "~ Attested, but couldn't fully confirm here (see verifier)"
+                    : "✗ No attestation material returned";
+              const binding = att.tlsKeyMatched
+                ? "matches the attested key (channel ends in the enclave)"
+                : att.liveTlsKeyFp
+                  ? "did NOT match the attested key"
+                  : "unavailable on this connection";
+              const lines = [
+                `Tinfoil TEE attestation — ${att.host}`,
+                `  ${verdict}`,
+                `  Hardware:         ${att.hardware.length ? att.hardware.join(" + ") : "none detected"}`,
+                `  Attested TLS key: ${att.attestedTlsKeyFp ?? "not present"}`,
+                `  Live TLS key:     ${binding}`,
+                "",
+                "The attestation covers the endpoint: every model behind it is served from",
+                "hardware enclaves, and TLS terminates inside — no host, or Tinfoil, can read",
+                "your prompts. Full chain + code-measurement verification:",
+                "github.com/tinfoilsh/tinfoil-cli",
+              ];
+              append({ kind: "notice", text: lines.join("\n") });
+            })
+            .catch((err) => {
+              append({ kind: "notice", tone: "error", text: `Attestation failed: ${String(err)}` });
+            });
+          break;
+        }
         append({ kind: "notice", text: `Fetching TEE attestation for ${modelId}…` });
         // Account-billed NEAR models attest through the Privateer server proxy
         // (NEAR key stays server-side); BYO nearai:* hits the gateway directly.

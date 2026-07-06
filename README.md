@@ -61,9 +61,10 @@ included.
   `/remote-access` (off by default) and Allow/Deny every action remotely
 - **Zero-Data-Retention surfacing** for OpenRouter: a status-bar shield colors the selected
   model's retention posture, and `/zdr` pins routing to zero-retention endpoints
-- **Private, verifiable inference** via NEAR AI: every model runs in a TEE, a `⛉ TEE` status
-  shield reflects the live attestation, and `/verify` fetches the attestation report (validate
-  the raw quote chains with the NEAR Cloud Verifier for full cryptographic proof)
+- **Private, verifiable inference** via NEAR AI and Tinfoil: every model runs in a TEE, a
+  `⛉ TEE` status shield reflects the live attestation, and `/verify` fetches the attestation
+  on demand (validate the raw quote chains with each provider's full verifier for complete
+  cryptographic proof)
 - **Plan mode** (read-only → present a plan → approve), **checkpoint/rewind** of
   conversation and files, and **session branching** — rewinds fork a new branch (the
   discarded turns stay resumable) and `/fork` branches from the current point
@@ -87,7 +88,7 @@ First run walks you through picking a provider and default model. From there, ju
 
 ## Contents
 
-- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Model routing](#model-routing) · [Data retention (ZDR)](#data-retention-zdr) · [Private inference (NEAR AI)](#private-inference-near-ai) · [Privateer account](#privateer-account-billed-inference--what-it-sees) · [Usage](#usage)
+- [Requirements](#requirements) · [Install](#install) · [Configure a provider](#configure-a-provider) · [Model routing](#model-routing) · [Data retention (ZDR)](#data-retention-zdr) · [Private inference (NEAR AI & Tinfoil)](#private-inference-near-ai--tinfoil) · [Privateer account](#privateer-account-billed-inference--what-it-sees) · [Usage](#usage)
 - [The prompt](#the-prompt) · [Slash commands](#slash-commands) · [Tools](#tools)
 - [Customize & extend](#customize--extend) · [Permission modes](#permission-modes) · [Project context](#project-context)
 - [How it compares](#how-it-compares) · [Develop](#develop) · [Caveats](#caveats) · [Docs](#docs) · [License](#license)
@@ -347,7 +348,7 @@ endpoints (`provider.zdr` on every request), so yellow models go green — and a
 to let OpenRouter route freely. Enforcement applies to OpenRouter only; add an OpenRouter key
 with `/keys` first.
 
-## Private inference (NEAR AI)
+## Private inference (NEAR AI & Tinfoil)
 
 **NEAR AI Cloud** runs every model inside a **Trusted Execution Environment** — an Intel TDX
 confidential VM paired with an NVIDIA confidential-computing GPU. Your prompts are encrypted
@@ -359,24 +360,31 @@ signed by a key that never leaves the enclave and bound to a nonce you supply. (
 `/verify` does a pragmatic check of that report; full validation of the quote chains is done
 with the NEAR Cloud Verifier — see `/verify` below.)
 
-It's a drop-in OpenAI-compatible provider — pick a `nearai:*` model with `/model` (e.g.
-`nearai:zai-org/GLM-5.1-FP8`) and everything else works as usual.
+**Tinfoil** gives the same guarantee with a different proof: its gateway itself runs inside
+an AMD SEV-SNP enclave and publishes an attestation document whose signed report embeds the
+hash of the enclave's **TLS public key**. Privateer fetches that document and checks the hash
+against the key on the very connection that served it — proving the TLS channel your prompts
+travel over terminates inside attested hardware, with no key required.
 
-**The status-bar shield.** A `⛉ TEE` badge appears whenever a NEAR AI model is selected,
-colored by the live attestation for that model:
+Both are drop-in OpenAI-compatible providers — pick a `nearai:*` or `tinfoil:*` model with
+`/model` (e.g. `nearai:zai-org/GLM-5.1-FP8`) and everything else works as usual.
+
+**The status-bar shield.** A `⛉ TEE` badge appears whenever a NEAR AI or Tinfoil model is
+selected, colored by the live attestation:
 
 | Badge | Meaning |
 |---|---|
-| 🟢 `⛉ TEE` | A fresh attestation came back bound to our nonce, with a TEE signing key and NVIDIA + Intel hardware evidence — confidential **and** verifiable. |
-| 🟡 `⛉ TEE` | A report returned but couldn't be fully confirmed here (missing signing key, hardware marker, or nonce echo). |
+| 🟢 `⛉ TEE` | A fresh attestation came back and checks out — NEAR: bound to our nonce, with a TEE signing key and NVIDIA + Intel hardware evidence; Tinfoil: the live TLS key is the attested enclave key. Confidential **and** verifiable. |
+| 🟡 `⛉ TEE` | A report returned but couldn't be fully confirmed here (missing signing key, hardware marker, nonce echo, or TLS-key binding). |
 | 🔴 `⛉ TEE` | No attestation material returned. |
 | `⛉ TEE?` (dim) | Unknown — no NEAR AI key yet, still loading, or the lookup failed. |
 
-**`/verify`.** Run it on a NEAR AI model to fetch the attestation on demand and print the
-verdict, detected hardware, the enclave's signing address, and the nonce. Privateer does a
-pragmatic freshness + presence check suited to a terminal; for full validation of the raw
-NVIDIA/Intel quote chains, take the printed report to the
-[NEAR AI Cloud Verifier](https://github.com/nearai/cloud-verifier).
+**`/verify`.** Run it on a NEAR AI or Tinfoil model to fetch the attestation on demand and
+print the verdict plus the evidence (NEAR: detected hardware, the enclave's signing address,
+and the nonce; Tinfoil: the attested vs. live TLS key). Privateer does a pragmatic check
+suited to a terminal; for full validation of the quote chains and code measurements, take the
+printed report to the [NEAR AI Cloud Verifier](https://github.com/nearai/cloud-verifier) or
+the [Tinfoil verifier CLI](https://github.com/tinfoilsh/tinfoil-cli).
 
 ## Privateer account (billed inference) — what it sees
 
@@ -487,7 +495,7 @@ Built-ins (plus any custom commands you add):
 | `/routine [list\|pause\|resume\|rm\|run]` | manage scheduled routines |
 | `/output-style [name]` `/vim` `/verbose` | persona, modal editing, full tool output |
 | `/zdr` | toggle OpenRouter zero-data-retention enforcement (see [Data retention](#data-retention-zdr)) |
-| `/verify` | fetch the NEAR AI TEE attestation for the current model (see [Private inference](#private-inference-near-ai)) |
+| `/verify` | fetch the TEE attestation for the current model — NEAR AI or Tinfoil (see [Private inference](#private-inference-near-ai--tinfoil)) |
 | `/rewind` `/compact` `/clear` `/export` | restore a checkpoint, compact, clear, save transcript |
 | `/fork` | branch the conversation into a new session (this one stays intact) |
 | `/resume` `/sessions` | pick up an earlier session or branch in this directory |
