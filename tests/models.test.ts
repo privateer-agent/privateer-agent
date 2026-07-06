@@ -130,6 +130,21 @@ test("xai and groq listings require a key", async () => {
   await assert.rejects(() => listModels("groq", {}), /no API key/);
 });
 
+test("zai lists via the OpenAI shape against the Z.ai endpoint", async () => {
+  const calls = mockFetch({ data: [{ id: "glm-5" }, { id: "glm-4.7" }] });
+  const models = await listModels("zai", { apiKey: "zai-key" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["glm-4.7", "glm-5"],
+  );
+  assert.match(calls[0].url, /api\.z\.ai\/api\/paas\/v4\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer zai-key");
+});
+
+test("zai listing requires a key", async () => {
+  await assert.rejects(() => listModels("zai", {}), /no API key/);
+});
+
 test("mistral listing keeps chat models, maps vision, sends a bearer token", async () => {
   const calls = mockFetch({
     data: [

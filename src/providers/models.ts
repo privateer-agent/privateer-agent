@@ -1,5 +1,5 @@
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
-import { NEARAI_BASE_URL, TINFOIL_BASE_URL } from "./registry.ts";
+import { NEARAI_BASE_URL, TINFOIL_BASE_URL, ZAI_BASE_URL } from "./registry.ts";
 import { authedFetch, serverBaseUrl, DEFAULT_SERVER_URL } from "../auth/privateer.ts";
 
 // A model offered by a provider, as surfaced in the picker. `id` is the bare model
@@ -23,6 +23,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   xai: "https://api.x.ai/v1",
   groq: "https://api.groq.com/openai/v1",
   mistral: "https://api.mistral.ai/v1",
+  zai: ZAI_BASE_URL,
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://localhost:11434/api",
   nearai: NEARAI_BASE_URL,
@@ -97,8 +98,9 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
         .sort((a, b) => a.id.localeCompare(b.id));
     }
     case "xai":
-    case "groq": {
-      // Both speak the OpenAI listing shape.
+    case "groq":
+    case "zai": {
+      // All three speak the OpenAI listing shape.
       if (!cfg.apiKey) throw new Error("no API key");
       const json = (await getJson(`${base}/models`, {
         authorization: `Bearer ${cfg.apiKey}`,

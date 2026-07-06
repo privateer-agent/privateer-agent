@@ -63,6 +63,13 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "mistral:mistral-large-latest",
     keyHint: "console.mistral.ai → API Keys",
   },
+  zai: {
+    name: "zai",
+    label: "Z.ai (GLM)",
+    requiresKey: providerRequiresKey("zai"),
+    defaultModel: "zai:glm-5",
+    keyHint: "z.ai → API Keys (coding-plan subscribers: set the coding base URL in /keys)",
+  },
   tinfoil: {
     name: "tinfoil",
     label: "Tinfoil (private TEE inference)",

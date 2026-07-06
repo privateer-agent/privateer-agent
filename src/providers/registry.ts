@@ -22,6 +22,11 @@ export const NEARAI_BASE_URL = "https://cloud-api.near.ai/v1";
 // attestation protocol differs from NEAR's, so /verify doesn't cover it (yet).
 export const TINFOIL_BASE_URL = "https://inference.tinfoil.sh/v1";
 
+// Z.ai's (GLM) OpenAI-compatible pay-as-you-go endpoint. Coding-plan subscribers
+// get a separate quota-billed endpoint — point baseURL at
+// https://api.z.ai/api/coding/paas/v4 to spend the subscription instead.
+export const ZAI_BASE_URL = "https://api.z.ai/api/paas/v4";
+
 // Each factory turns provider credentials + a model id into an AI SDK LanguageModel.
 // This is the single seam that makes Privateer provider-agnostic: the agent loop,
 // tools, and UI never know or care which provider is behind the model.
@@ -36,6 +41,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   xai: true,
   groq: true,
   mistral: true,
+  zai: true,
   ollama: false,
   nearai: true,
   tinfoil: true,
@@ -68,6 +74,10 @@ const FACTORIES: Record<ProviderName, Factory> = {
     createGroq({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   mistral: (cfg, modelId) =>
     createMistral({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  zai: (cfg, modelId) =>
+    // OpenAI-compatible, Chat-Completions-only — `.chat()` pins the transport
+    // like nearai/tinfoil.
+    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? ZAI_BASE_URL }).chat(modelId),
   ollama: (cfg, modelId) =>
     createOllama({ baseURL: cfg.baseURL })(modelId),
   nearai: (cfg, modelId) =>
