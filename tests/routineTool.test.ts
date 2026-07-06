@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { routineTool } from "../src/tools/routine.ts";
@@ -76,6 +76,35 @@ test("routine tool: plain routine has no egress flags and no alwaysAsk", async (
     assert.ok(!/\[/.test(requests[0].detail), "no flag brackets in detail");
     assert.ok(!requests[0].alwaysAsk);
     assert.equal(loadRoutines()[0].tools, undefined);
+  });
+});
+
+test("routine tool: webhook delivery must reference a configured endpoint", async () => {
+  await withRoutineTool(async (execute, requests) => {
+    const res = await execute({
+      name: "digest",
+      cron: "0 8 * * *",
+      prompt: "p",
+      delivery: ["webhook:team"],
+    });
+    assert.match(String(res), /webhook not configured: team/);
+    assert.equal(requests.length, 0, "fails before the approval prompt");
+    assert.equal(loadRoutines().length, 0, "nothing saved");
+  });
+});
+
+test("routine tool: configured webhook is flagged with its host at approval", async () => {
+  await withRoutineTool(async (execute, requests) => {
+    writeFileSync(
+      join(process.env.PRIVATEER_HOME!, "config.json"),
+      JSON.stringify({ webhooks: { team: { url: "https://hooks.slack.com/services/T00/B00/x", format: "slack" } } }),
+      "utf8",
+    );
+    await execute({ name: "digest", cron: "0 8 * * *", prompt: "p", delivery: ["file", "webhook:team"] });
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].detail, /posts results off-machine to webhook: team → hooks\.slack\.com/);
+    assert.ok(!requests[0].alwaysAsk, "webhook flag alone does not force alwaysAsk");
+    assert.deepEqual(loadRoutines()[0].delivery, ["file", "webhook:team"]);
   });
 });
 

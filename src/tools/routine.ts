@@ -2,11 +2,22 @@ import { tool } from "ai";
 import { z } from "zod";
 import type { ToolContext } from "./context.ts";
 import { PermissionDeniedError } from "../permissions/gate.ts";
-import { DELIVERY_CHANNELS, newRoutineId, type Routine } from "../routines/schema.ts";
+import { DeliveryEntry, webhookName, newRoutineId, type Routine } from "../routines/schema.ts";
+import { loadConfig } from "../config/load.ts";
 import { triggerError, computeNextRun, describeTrigger } from "../routines/trigger.ts";
 import { splitRoutineTools } from "../routines/toolSelect.ts";
 import { upsertRoutine } from "../routines/store.ts";
 import { sendToDaemon, DaemonNotRunningError } from "../daemon/ipc.ts";
+
+// The host of a webhook URL, for the approval flag — enough for the human to judge
+// where results go without echoing tokens embedded in the path.
+function hostOf(url?: string): string {
+  try {
+    return url ? new URL(url).host : "(unknown)";
+  } catch {
+    return "(invalid url)";
+  }
+}
 
 // Lets the agent turn a request like "summarize world news every morning" or
 // "remind me at 3pm tomorrow" into a saved routine. Creating one is a persistent
@@ -33,9 +44,12 @@ export function routineTool(ctx: ToolContext) {
         .describe("One-off: ISO-8601 datetime, e.g. '2026-07-02T15:00:00'. Omit for recurring."),
       prompt: z.string().describe("Self-contained instruction the agent runs when it fires."),
       delivery: z
-        .array(z.enum(DELIVERY_CHANNELS))
+        .array(DeliveryEntry)
         .optional()
-        .describe("How to deliver the result. Defaults to ['file']. 'email' leaves the machine (opt-in)."),
+        .describe(
+          "How to deliver the result. Defaults to ['file']. 'email' and 'webhook:<name>' leave the " +
+            "machine (opt-in); webhook names must exist in the config `webhooks` section.",
+        ),
       cwd: z.string().optional().describe("Working directory for the run. Defaults to the current one."),
       model: z.string().optional().describe("Optional 'provider:model' override."),
       tools: z
@@ -52,6 +66,23 @@ export function routineTool(ctx: ToolContext) {
       if (err) return `Error: ${err}`;
 
       const chans = delivery && delivery.length > 0 ? delivery : ["file" as const];
+
+      // Webhook entries must reference endpoints already declared in config — the
+      // routine never carries a URL, and an unknown name fails here (at creation,
+      // with a human in the loop) rather than silently at fire time.
+      const hooks = chans.map(webhookName).filter((n): n is string => n !== null);
+      const configuredHooks = hooks.length > 0 ? (loadConfig().webhooks ?? {}) : {};
+      if (hooks.length > 0) {
+        const unknown = hooks.filter((n) => !configuredHooks[n]);
+        if (unknown.length > 0) {
+          return (
+            `Error: webhook${unknown.length > 1 ? "s" : ""} not configured: ${unknown.join(", ")}. ` +
+            `Declare endpoints under "webhooks" in settings.json first (e.g. ` +
+            `{"webhooks": {"${unknown[0]}": {"url": "https://…", "format": "slack"}}}).`
+          );
+        }
+      }
+
       const next = computeNextRun({ cron, at });
       const detail =
         `${name}: ${describeTrigger({ cron, at })}` +
@@ -64,6 +95,10 @@ export function routineTool(ctx: ToolContext) {
       const split = splitRoutineTools(tools);
       const flags: string[] = [];
       if (chans.includes("email")) flags.push("email leaves your machine");
+      if (hooks.length > 0) {
+        const targets = hooks.map((n) => `${n} → ${hostOf(configuredHooks[n]?.url)}`);
+        flags.push(`posts results off-machine to webhook${hooks.length > 1 ? "s" : ""}: ${targets.join(", ")}`);
+      }
       if (split.mcp.length > 0) flags.push(`grants external MCP tools, unattended: ${split.mcp.join(", ")}`);
       const decision = await ctx.gate.request({
         tool: "routine",

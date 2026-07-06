@@ -99,6 +99,19 @@ export const Config = z.object({
     .optional(),
   // Shell command whose stdout becomes the status line; receives session JSON on stdin.
   statusLine: z.string().optional(),
+  // Named webhook endpoints for routine delivery ("webhook:<name>" entries). Results
+  // are POSTed to `url`, wrapped per `format`. Declared here — not inline in a
+  // routine — so every egress URL lives in one reviewable place and a routine can
+  // only reference it by name. https only: results may contain repo content.
+  webhooks: z
+    .record(
+      z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/),
+      z.object({
+        url: z.string().refine((u) => u.startsWith("https://"), { message: "webhook url must be https" }),
+        format: z.enum(["slack", "discord", "json"]).default("json"),
+      }),
+    )
+    .optional(),
 })
   // Preserve unknown keys so layered settings files can carry forward-compatible
   // sections (hooks, mcpServers, statusLine, …) before they have explicit schemas.

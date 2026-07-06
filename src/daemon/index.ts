@@ -19,6 +19,7 @@ import type { Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigger.ts";
 import { splitRoutineTools, filterMcpTools } from "../routines/toolSelect.ts";
 import { deliver, type RelayPusher } from "../routines/delivery.ts";
+import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, type IpcRequest, type IpcResponse } from "./ipc.ts";
 
 // The safe, read-only-plus-web toolset for unattended runs. No write/edit/bash, so
@@ -237,7 +238,11 @@ export class Daemon {
     }
 
     const content = formatResult(routine, out, status, error);
-    const report = deliver(routine, content, status, { pushRelay: this.pushRelay });
+    const report = await deliver(routine, content, status, {
+      pushRelay: this.pushRelay,
+      webhooks: config.webhooks,
+      redact: (text) => redactText(text, collectSecrets(config.providers)),
+    });
     log(`  "${routine.name}" ${status}; delivered via ${report.delivered.join(", ") || "(none)"}`);
 
     // Recurring routines reschedule; one-offs disable themselves after firing.

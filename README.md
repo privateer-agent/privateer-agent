@@ -482,7 +482,7 @@ Built-ins (plus any custom commands you add):
 | `/permissions [mode]` `/cost` `/context` | permission mode, token usage, context window |
 | `/init` `/memory` `/todo` | write/show `PRIVATEER.md`; show the task list |
 | `/agents` `/mcp [logout]` `/hooks` | inspect sub-agents; MCP status / clear OAuth; hooks |
-| `/skills [list\|info\|install\|remove]` | manage skills (see [Customize & extend](#customize--extend)) |
+| `/skills [list\|info\|install\|update\|remove]` | manage skills (see [Customize & extend](#customize--extend)) |
 | `/routine [list\|pause\|resume\|rm\|run]` | manage scheduled routines |
 | `/output-style [name]` `/vim` `/verbose` | persona, modal editing, full tool output |
 | `/zdr` | toggle OpenRouter zero-data-retention enforcement (see [Data retention](#data-retention-zdr)) |
@@ -527,8 +527,13 @@ Everything below is optional and lives under `.privateer/` (project) or `~/.priv
   catalog of names and descriptions and loads a skill's full instructions on demand via
   the `skill` tool; `/skill-name` invokes one explicitly. Manage with `/skills`
   (`list`, `info <name>`, `install <owner/repo[/path]> [--project] [--all] [--force]`,
-  `remove <name>`) — install fetches from GitHub with a shallow clone and never executes
-  anything it downloads.
+  `update [<name> | --all]`, `remove <name>`) — install fetches from GitHub with a shallow
+  clone and never executes anything it downloads. Installs record their origin (repo, ref,
+  commit) in a `.privateer-skill.json` manifest inside the skill dir, so `/skills list`
+  shows where each skill came from and `/skills update` re-fetches changed skills and
+  reports `old-sha → new-sha`. Hand-authored skills have no manifest and are never
+  auto-updated; a manifest shipped inside a repo is ignored — only the installer writes
+  provenance.
 - **Hooks** — a `hooks` section in `settings.json` runs shell commands on `PreToolUse`,
   `PostToolUse`, `UserPromptSubmit`, and `Stop`. A hook blocks by exiting `2` or printing
   `{"decision":"block"}`; `UserPromptSubmit` can inject `additionalContext`. `/hooks` lists them.
@@ -556,8 +561,18 @@ Everything below is optional and lives under `.privateer/` (project) or `~/.priv
   morning") and approve; manage with `/routine` (list/pause/resume/rm/run). Runs use a safe
   read/web toolset by default; a routine's `tools` list can also grant specific MCP tools
   (`server__tool` or `server__*`) — flagged at approval, since they then run with no one
-  watching. See the [Sheet → WhatsApp recipe](docs/recipes/sheet-to-whatsapp.md) for a
-  full business automation built this way.
+  watching. Results deliver to a file by default; other channels are `notice` (next TUI
+  session), `relay` (the Privateer app), `email` (via a mail MCP tool, opt-in), and
+  `webhook:<name>` — an HTTPS POST (Slack/Discord/generic JSON) to an endpoint declared
+  under `webhooks` in `settings.json`:
+  ```json
+  { "webhooks": { "team": { "url": "https://hooks.slack.com/services/…", "format": "slack" } } }
+  ```
+  Routines reference webhooks by name only, so every egress URL stays in one reviewable
+  place; the target host is shown in the approval prompt, bodies pass through the secret
+  redactor before leaving the machine, and a failed post leaves a notice so the result is
+  never silently lost. See the [Sheet → WhatsApp recipe](docs/recipes/sheet-to-whatsapp.md)
+  for a full business automation built this way.
 - **Status line** — set `statusLine` to a shell command; it receives session JSON on stdin
   and its stdout becomes the status line.
 
@@ -618,8 +633,10 @@ deliberately simplified for now:
 - **Prompt caching and extended thinking are Anthropic-only.** Ephemeral cache breakpoints
   and the `thinkingBudget` setting apply to direct Anthropic models and OpenRouter routes to
   `anthropic/*`. Other providers ignore them (a harmless no-op).
-- **Checkpoints are in-memory.** `/rewind` is a within-session undo; snapshots live in memory
-  and aren't persisted across restarts.
+- **Checkpoints don't branch.** Checkpoints are persisted per session (content-addressed
+  snapshots on disk, so `/rewind` keeps working after a restart when you `--resume`), but
+  rewinding the conversation discards the turns after the chosen checkpoint rather than
+  forking a branch you could come back to.
 - **Remote MCP OAuth uses a fixed loopback port** (`7777` by default; override with
   `PRIVATEER_OAUTH_PORT`) so the redirect URI stays stable across runs. Set `PRIVATEER_NO_BROWSER=1`
   in headless environments to skip the auto-launch and use the printed URL.
