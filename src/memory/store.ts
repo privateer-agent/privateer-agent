@@ -5,6 +5,14 @@ import type { ModelMessage } from "ai";
 import { globalDir } from "../config/load.ts";
 import type { UsageTotals } from "../engine/events.ts";
 
+// Where a branched session split off from: the source session, the checkpoint it was
+// rewound to (absent for a `/fork` from "now"), and that checkpoint's label for display.
+export interface SessionParent {
+  id: string;
+  checkpointId?: string;
+  label?: string;
+}
+
 // Persisted conversation for a project. Each session is stored under its own id so the
 // `/resume` picker can browse history; `latest.json` mirrors the newest write so the
 // `--continue` flag keeps working without enumerating the sessions directory.
@@ -14,6 +22,7 @@ export interface SessionData {
   modelSpec: string;
   messages: ModelMessage[];
   usage: UsageTotals;
+  parent?: SessionParent;
 }
 
 // Lightweight summary used by the session picker, without loading every message.
@@ -23,6 +32,8 @@ export interface SessionMeta {
   modelSpec: string;
   messageCount: number;
   preview: string;
+  parentId?: string;
+  forkLabel?: string;
 }
 
 // A stable per-project key derived from the absolute cwd. Exported so other memory
@@ -120,6 +131,8 @@ export function listSessions(cwd: string): SessionMeta[] {
       modelSpec: data.modelSpec,
       messageCount: data.messages.length,
       preview: previewOf(data.messages),
+      parentId: data.parent?.id,
+      forkLabel: data.parent?.label,
     });
   }
   // Newest first; fall back to id when two writes share a millisecond.

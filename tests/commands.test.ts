@@ -57,6 +57,13 @@ test("/clear and /exit map to control results", () => {
   assert.deepEqual(runCommand("/exit", ctx), { type: "exit" });
 });
 
+test("/rewind, /fork and /resume map to session-control results", () => {
+  assert.deepEqual(runCommand("/rewind", ctx), { type: "rewind" });
+  assert.deepEqual(runCommand("/fork", ctx), { type: "fork" });
+  assert.deepEqual(runCommand("/resume", ctx), { type: "sessions" });
+  assert.deepEqual(runCommand("/sessions", ctx), { type: "sessions" });
+});
+
 test("/compact maps to a compact result", () => {
   assert.deepEqual(runCommand("/compact", ctx), { type: "compact" });
 });

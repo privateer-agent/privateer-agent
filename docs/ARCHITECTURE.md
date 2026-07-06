@@ -140,14 +140,21 @@ user `settings.json` → project `config.json` → project `settings.json` →
 schema (`config/schema.ts`) uses a catchall so forward-compatible sections (`hooks`,
 `mcpServers`, `statusLine`, …) survive parsing; `config/paths.ts` centralizes the
 `.privateer/` layout. The data dir is overridable via `PRIVATEER_HOME`. `memory/store.ts`
-persists the latest conversation per project (keyed by a hash of the cwd) so `--continue`
-can restore history.
+persists every conversation per project (keyed by a hash of the cwd) under its own session
+id; `latest.json` mirrors the newest write so `--continue` restores history without
+enumerating sessions. A session can carry a `parent` pointer (source session id +
+fork-point checkpoint) — that's how branches record their lineage, and how the `/resume`
+picker renders the session tree.
 
 `memory/checkpoints.ts` powers `/rewind`: before each turn it records the conversation
 length and the content of every session-modified file (write/edit call a `recordMutation`
 hook that captures each file's pre-touch baseline). Restoring resolves each touched file to
 its checkpoint snapshot or baseline, deleting files the session created. Snapshots are
-in-memory (within-session undo).
+persisted per session (a JSON index plus content-addressed blobs), so `/rewind` still works
+after a restart-and-resume. Rewinding the conversation doesn't truncate in place: the app
+mints a new session id, `branchTo` copies the checkpoint history (truncated at the branch
+point) into the new session's directory, and the original session keeps its later turns.
+`/fork` is the same branch without the rewind.
 
 ## Extensibility (`src/commands/`, `src/agents/`, `src/hooks/`, `src/mcp/`)
 

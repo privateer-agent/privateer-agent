@@ -115,6 +115,76 @@ test("retention cap drops old checkpoints and garbage-collects orphaned blobs", 
   }
 });
 
+test("branchTo copies history to a new dir, truncates past the branch point, and leaves the source intact", () => {
+  const work = mkdtempSync(join(tmpdir(), "priv-ckpt-branch-work-"));
+  const src = mkdtempSync(join(tmpdir(), "priv-ckpt-branch-src-"));
+  const dst = join(mkdtempSync(join(tmpdir(), "priv-ckpt-branch-dst-")), "branch");
+  try {
+    const f = join(work, "f.txt");
+    writeFileSync(f, "v0", "utf8");
+
+    const store = CheckpointStore.load(src);
+    const cp1 = store.create({ messagesLength: 0, committedLength: 0, label: "turn 1" });
+    mutate(store, f, "v1");
+    const cp2 = store.create({ messagesLength: 2, committedLength: 2, label: "turn 2" });
+    mutate(store, f, "v2");
+    store.create({ messagesLength: 4, committedLength: 4, label: "turn 3" });
+
+    // Branch at cp2: the store re-points at dst, keeping cp1..cp2 only.
+    store.branchTo(dst, cp2.id);
+    assert.deepEqual(store.list().map((c) => c.id), [cp1.id, cp2.id]);
+
+    // The branch persisted to disk: a fresh load from dst sees the truncated history
+    // and can restore files from copied blobs.
+    const branch = CheckpointStore.load(dst);
+    assert.deepEqual(branch.list().map((c) => c.label), ["turn 1", "turn 2"]);
+    branch.restoreFiles(branch.get(cp2.id)!);
+    assert.equal(readFileSync(f, "utf8"), "v1");
+    branch.restoreFiles(branch.get(cp1.id)!);
+    assert.equal(readFileSync(f, "utf8"), "v0");
+
+    // The source dir still has all three checkpoints — the session branched from
+    // keeps its own future.
+    const original = CheckpointStore.load(src);
+    assert.deepEqual(original.list().map((c) => c.label), ["turn 1", "turn 2", "turn 3"]);
+
+    // New mutations recorded after the branch persist to the branch dir, not src.
+    mutate(store, f, "v-branch");
+    store.create({ messagesLength: 2, committedLength: 2, label: "branch turn" });
+    assert.equal(CheckpointStore.load(dst).list().length, 3);
+    assert.equal(CheckpointStore.load(src).list().length, 3);
+    assert.equal(CheckpointStore.load(src).list()[2].label, "turn 3");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    rmSync(src, { recursive: true, force: true });
+    rmSync(dst, { recursive: true, force: true });
+  }
+});
+
+test("branchTo without a checkpoint id (/fork) carries the full history", () => {
+  const work = mkdtempSync(join(tmpdir(), "priv-ckpt-fork-work-"));
+  const src = mkdtempSync(join(tmpdir(), "priv-ckpt-fork-src-"));
+  const dst = join(mkdtempSync(join(tmpdir(), "priv-ckpt-fork-dst-")), "branch");
+  try {
+    const f = join(work, "f.txt");
+    writeFileSync(f, "v0", "utf8");
+
+    const store = CheckpointStore.load(src);
+    const cp = store.create({ messagesLength: 0, committedLength: 0, label: "only turn" });
+    mutate(store, f, "v1");
+
+    store.branchTo(dst);
+    const branch = CheckpointStore.load(dst);
+    assert.deepEqual(branch.list().map((c) => c.id), [cp.id]);
+    branch.restoreFiles(branch.get(cp.id)!);
+    assert.equal(readFileSync(f, "utf8"), "v0"); // original baseline blob was copied
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    rmSync(src, { recursive: true, force: true });
+    rmSync(dst, { recursive: true, force: true });
+  }
+});
+
 test("checkpoints record conversation lengths and a labelled list", () => {
   const store = new CheckpointStore();
   store.create({ messagesLength: 0, committedLength: 0, label: "  add   login   " });

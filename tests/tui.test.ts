@@ -18,6 +18,11 @@ import { emptyUsage } from "../src/engine/events.ts";
 import { Config } from "../src/config/schema.ts";
 import { privateerChannel } from "../src/providers/resolve.ts";
 
+// The model picker (and parts of the App) read the global data dir for Privateer
+// account credentials. Pin PRIVATEER_HOME to an empty temp dir so the suite renders
+// the signed-out state regardless of whether the machine running it is logged in.
+process.env.PRIVATEER_HOME = mkdtempSync(join(tmpdir(), "privateer-tui-home-"));
+
 // Smoke test: the App renders its full component tree (banner, status bar, input)
 // without crashing when a provider is configured. No network — session construction
 // is local. Verifies the Ink layout/props are wired correctly.
@@ -35,6 +40,53 @@ test("App renders banner, status bar, and prompt", async () => {
     assert.match(frame, /anthropic:claude-opus-4-8/);
     assert.match(frame, /privateer/); // status bar chip
     assert.match(frame, /type a prompt/); // input placeholder
+    unmount();
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// /fork branches a resumed conversation into a new session: a fresh id whose file
+// carries a parent pointer at the source session, with latest.json following the
+// branch. Drives the real input path (slash menu → command dispatch → persist).
+test("/fork branches the session and records lineage", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "privateer-fork-"));
+  try {
+    const { saveSession, loadSession, listSessions, loadLatest } = await import("../src/memory/store.ts");
+    const config = Config.parse({ providers: { anthropic: { apiKey: "x" } } });
+    const resume = {
+      id: "s-100",
+      updatedAt: new Date().toISOString(),
+      modelSpec: "anthropic:claude-opus-4-8",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi" },
+      ] as any,
+      usage: emptyUsage(),
+    };
+    saveSession(cwd, resume.id, resume);
+    const { lastFrame, stdin, unmount } = render(
+      React.createElement(App, { model: "anthropic:claude-opus-4-8", config, cwd, resume }),
+    );
+    await new Promise((r) => setTimeout(r, 50)); // session build + stdin attach
+    stdin.write("/fork");
+    await new Promise((r) => setTimeout(r, 30));
+    stdin.write("\r"); // accept the slash-menu candidate → "/fork "
+    await new Promise((r) => setTimeout(r, 30));
+    stdin.write("\r"); // submit
+    await new Promise((r) => setTimeout(r, 50));
+    assert.match(lastFrame() ?? "", /Forked into a new session branch/);
+
+    // A second session file now exists, pointing back at the source.
+    const metas = listSessions(cwd);
+    assert.equal(metas.length, 2);
+    const branch = metas.find((m) => m.id !== "s-100")!;
+    assert.equal(branch.parentId, "s-100");
+    const branchData = loadSession(cwd, branch.id)!;
+    assert.equal(branchData.messages.length, 2);
+    // The source keeps its own file, and --continue now follows the branch.
+    assert.ok(loadSession(cwd, "s-100"));
+    assert.equal(loadLatest(cwd)!.id, branch.id);
     unmount();
   } finally {
     rmSync(cwd, { recursive: true, force: true });

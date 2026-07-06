@@ -195,6 +195,15 @@ export class CheckpointStore {
     return cp;
   }
 
+  // Every blob hash the current index still references (originals + all checkpoints).
+  private liveHashes(): Set<string> {
+    const live = new Set<string>();
+    for (const s of this.original.values()) if (s.hash) live.add(s.hash);
+    for (const cp of this.checkpoints)
+      for (const s of Object.values(cp.files)) if (s.hash) live.add(s.hash);
+    return live;
+  }
+
   // Enforce the retention cap, dropping the oldest checkpoints and reclaiming any blobs
   // they alone referenced. Files first touched before the surviving window stay
   // rewindable: the oldest retained checkpoint falls back to the `original` baseline,
@@ -202,11 +211,28 @@ export class CheckpointStore {
   private trim(): void {
     if (this.checkpoints.length <= this.maxCheckpoints) return;
     this.checkpoints.splice(0, this.checkpoints.length - this.maxCheckpoints);
-    const live = new Set<string>();
-    for (const s of this.original.values()) if (s.hash) live.add(s.hash);
-    for (const cp of this.checkpoints)
-      for (const s of Object.values(cp.files)) if (s.hash) live.add(s.hash);
-    this.blobs.keep(live);
+    this.blobs.keep(this.liveHashes());
+  }
+
+  // Branch this store's history into `dir` and re-point at it, leaving the source
+  // directory untouched — the session being branched from keeps its own checkpoints.
+  // When `uptoCheckpointId` is given (branch-on-rewind), checkpoints after it are
+  // dropped from the branch: they describe a future the branch just diverged from.
+  // Blobs are content-addressed, so only those the branch still references are copied.
+  // Mutates in place (like adopt) so the engine's recordMutation closure stays valid.
+  branchTo(dir: string, uptoCheckpointId?: string): void {
+    if (uptoCheckpointId) {
+      const i = this.checkpoints.findIndex((c) => c.id === uptoCheckpointId);
+      if (i >= 0) this.checkpoints.splice(i + 1);
+    }
+    const source = this.blobs;
+    this.dir = dir;
+    this.blobs = new BlobStore(join(dir, "blobs"));
+    for (const hash of this.liveHashes()) {
+      const content = source.get(hash);
+      if (content != null) this.blobs.put(content);
+    }
+    this.persist();
   }
 
   list(): Checkpoint[] {

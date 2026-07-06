@@ -45,6 +45,8 @@ export type CommandResult =
   | { type: "export"; path?: string }
   // Open the checkpoint picker to rewind conversation and/or files.
   | { type: "rewind" }
+  // Branch the conversation from here into a new session (resolved by the App).
+  | { type: "fork" }
   // Open the session picker to browse and resume a past session.
   | { type: "sessions" }
   // Show live MCP server/tool status (resolved by the App).
@@ -328,6 +330,11 @@ const COMMANDS: CommandDef[] = [
     name: "rewind",
     summary: "restore an earlier checkpoint (conversation and/or files)",
     run: () => ({ type: "rewind" }),
+  },
+  {
+    name: "fork",
+    summary: "branch the conversation into a new session (this one stays intact)",
+    run: () => ({ type: "fork" }),
   },
   {
     name: "resume",

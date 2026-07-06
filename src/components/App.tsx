@@ -58,6 +58,7 @@ import {
   checkpointsDir,
   type SessionData,
   type SessionMeta,
+  type SessionParent,
 } from "../memory/store.ts";
 import { theme, toolDisplayName } from "./theme.ts";
 import { DOWN } from "./figures.ts";
@@ -225,6 +226,9 @@ export function App({
   // Stable id for the session being written this run; reused when resuming so a
   // continued session overwrites its own file instead of forking a new one.
   const sessionIdRef = useRef(resume?.id ?? newSessionId());
+  // Lineage pointer persisted with every save: set when this session was branched off
+  // another (rewind or /fork), carried through when resuming an already-branched one.
+  const parentRef = useRef<SessionParent | undefined>(resume?.parent);
   const seededRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   // Input history (↑/↓) and the type-ahead queue for messages entered while busy.
@@ -632,6 +636,7 @@ export function App({
         modelSpec,
         messages: eng.messages,
         usage: eng.usage,
+        parent: parentRef.current,
       });
     } catch {
       /* non-fatal */
@@ -967,6 +972,19 @@ export function App({
           setRewinding(true);
         }
         break;
+      case "fork": {
+        if ((engineRef.current?.messages.length ?? 0) === 0) {
+          append({ kind: "notice", text: "Nothing to fork yet — the conversation is empty." });
+          break;
+        }
+        branchSession();
+        persist();
+        append({
+          kind: "notice",
+          text: "Forked into a new session branch — turns from here save to the branch; the original stays under /resume.",
+        });
+        break;
+      }
       case "sessions": {
         // Exclude the in-progress session so the picker only offers prior ones.
         const list = listSessions(cwd).filter((s) => s.id !== sessionIdRef.current);
@@ -1380,20 +1398,45 @@ export function App({
     append({ kind: "notice", text: "Still in plan mode — ask about the plan or refine it." });
   }
 
+  // Mint a new session id descending from the current one and carry the checkpoint
+  // history over (truncated at `cp` when branching from a rewind). The source session's
+  // file and checkpoint dir are left intact, so its future stays resumable; the next
+  // persist() writes the branch — and latest.json — so `--continue` follows the branch.
+  function branchSession(cp?: { id: string; label: string }) {
+    const from = sessionIdRef.current;
+    const branchId = newSessionId();
+    sessionIdRef.current = branchId;
+    parentRef.current = cp ? { id: from, checkpointId: cp.id, label: cp.label } : { id: from };
+    checkpointsRef.current.branchTo(checkpointsDir(cwd, branchId), cp?.id);
+  }
+
   function restoreCheckpoint(id: string, scope: RewindScope) {
     setRewinding(false);
     const store = checkpointsRef.current;
     const cp = store.get(id);
     if (!cp) return;
     if (scope === "files" || scope === "both") store.restoreFiles(cp);
+    let branched = false;
     if (scope === "conversation" || scope === "both") {
       const eng = engineRef.current;
-      if (eng && eng.messages.length > cp.messagesLength) eng.messages.length = cp.messagesLength;
+      // Rewinding the conversation branches instead of truncating in place: the
+      // discarded turns stay in the source session, resumable later. A rewind that
+      // drops nothing (checkpoint at the current tip) doesn't mint a branch.
+      if (eng && eng.messages.length > cp.messagesLength) {
+        branchSession(cp);
+        branched = true;
+        eng.messages.length = cp.messagesLength;
+      }
       setCommitted(committedRef.current.slice(0, cp.committedLength));
       setLive([]);
     }
     persist();
-    append({ kind: "notice", text: `Rewound to "${cp.label}" (${scope}).` });
+    append({
+      kind: "notice",
+      text: branched
+        ? `Rewound to "${cp.label}" (${scope}) on a new branch — the original session keeps its later turns (/resume to get back).`
+        : `Rewound to "${cp.label}" (${scope}).`,
+    });
   }
 
   // Swap the live conversation for a stored one. Like startup --continue, this reseeds
@@ -1415,6 +1458,7 @@ export function App({
     setLive([]);
     todosRef.current?.set([]);
     sessionIdRef.current = data.id;
+    parentRef.current = data.parent;
     // Adopt the resumed session's checkpoints so /rewind acts on its history, not the
     // one we just left. Mutated in place so the engine's recordMutation closure stays
     // valid (the session isn't rebuilt on resume).

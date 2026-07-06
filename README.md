@@ -65,7 +65,8 @@ included.
   shield reflects the live attestation, and `/verify` fetches the attestation report (validate
   the raw quote chains with the NEAR Cloud Verifier for full cryptographic proof)
 - **Plan mode** (read-only → present a plan → approve), **checkpoint/rewind** of
-  conversation and files
+  conversation and files, and **session branching** — rewinds fork a new branch (the
+  discarded turns stay resumable) and `/fork` branches from the current point
 - A modal prompt with `/` command and `@` file autocomplete, `!` shell passthrough,
   `#` memory append, input history, optional **vim** mode, and **ctrl-r** history search
 - Layered `settings.json` (user → project → local → managed), **custom slash commands**
@@ -488,13 +489,19 @@ Built-ins (plus any custom commands you add):
 | `/zdr` | toggle OpenRouter zero-data-retention enforcement (see [Data retention](#data-retention-zdr)) |
 | `/verify` | fetch the NEAR AI TEE attestation for the current model (see [Private inference](#private-inference-near-ai)) |
 | `/rewind` `/compact` `/clear` `/export` | restore a checkpoint, compact, clear, save transcript |
-| `/resume` `/sessions` | pick up an earlier session in this directory |
+| `/fork` | branch the conversation into a new session (this one stays intact) |
+| `/resume` `/sessions` | pick up an earlier session or branch in this directory |
 | `/exit` | quit |
 
 - `/model` — open a picker of each provider's live models (or `/model provider:id` to set one directly).
 - `/init` — the agent explores the repo and writes a `PRIVATEER.md` for you
   (`/init --stub` just drops an empty template, no model call).
 - `/rewind` — pick an earlier checkpoint and restore the conversation, the files, or both.
+  Rewinding the conversation forks a **branch**: the turns you rewound past stay in the
+  original session, and `/resume` shows the whole tree (branches indented under the session
+  they forked from) so you can hop back to either line.
+- `/fork` — branch from right here without rewinding: further turns save to the new
+  branch while the original session stays as it was.
 - `/compact` — summarize older history to reclaim context (also happens automatically).
 
 ## Tools
@@ -633,10 +640,11 @@ deliberately simplified for now:
 - **Prompt caching and extended thinking are Anthropic-only.** Ephemeral cache breakpoints
   and the `thinkingBudget` setting apply to direct Anthropic models and OpenRouter routes to
   `anthropic/*`. Other providers ignore them (a harmless no-op).
-- **Checkpoints don't branch.** Checkpoints are persisted per session (content-addressed
-  snapshots on disk, so `/rewind` keeps working after a restart when you `--resume`), but
-  rewinding the conversation discards the turns after the chosen checkpoint rather than
-  forking a branch you could come back to.
+- **Branches share file snapshots, not working trees.** Rewinding or `/fork`ing branches
+  the conversation (checkpoints are content-addressed snapshots on disk, copied to the
+  branch, so `/rewind` keeps working after a restart), but all branches operate on the
+  same working directory — switching branches doesn't switch your files. Use `/rewind`'s
+  file scope (or git) to move the tree.
 - **Remote MCP OAuth uses a fixed loopback port** (`7777` by default; override with
   `PRIVATEER_OAUTH_PORT`) so the redirect URI stays stable across runs. Set `PRIVATEER_NO_BROWSER=1`
   in headless environments to skip the auto-launch and use the printed URL.
