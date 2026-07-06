@@ -35,6 +35,7 @@ export function collectSecrets(providers?: Record<string, { apiKey?: string } | 
     "GOOGLE_API_KEY",
     "XAI_API_KEY",
     "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
     "NEAR_AI_API_KEY",
     "NEARAI_API_KEY",
     "TINFOIL_API_KEY",

@@ -83,6 +83,7 @@ function applyEnv(cfg: ConfigT): ConfigT {
   );
   set("xai", "apiKey", process.env.XAI_API_KEY);
   set("groq", "apiKey", process.env.GROQ_API_KEY);
+  set("mistral", "apiKey", process.env.MISTRAL_API_KEY);
   set("ollama", "baseURL", process.env.OLLAMA_BASE_URL);
   set("nearai", "apiKey", process.env.NEAR_AI_API_KEY ?? process.env.NEARAI_API_KEY);
   set("tinfoil", "apiKey", process.env.TINFOIL_API_KEY);

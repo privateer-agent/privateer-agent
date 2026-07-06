@@ -56,6 +56,13 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "groq:llama-3.3-70b-versatile",
     keyHint: "console.groq.com/keys",
   },
+  mistral: {
+    name: "mistral",
+    label: "Mistral (EU)",
+    requiresKey: providerRequiresKey("mistral"),
+    defaultModel: "mistral:mistral-large-latest",
+    keyHint: "console.mistral.ai → API Keys",
+  },
   tinfoil: {
     name: "tinfoil",
     label: "Tinfoil (private TEE inference)",

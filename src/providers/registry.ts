@@ -4,6 +4,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createXai } from "@ai-sdk/xai";
 import { createGroq } from "@ai-sdk/groq";
+import { createMistral } from "@ai-sdk/mistral";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createOllama } from "ollama-ai-provider-v2";
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
@@ -34,6 +35,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   google: true,
   xai: true,
   groq: true,
+  mistral: true,
   ollama: false,
   nearai: true,
   tinfoil: true,
@@ -64,6 +66,8 @@ const FACTORIES: Record<ProviderName, Factory> = {
     createXai({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   groq: (cfg, modelId) =>
     createGroq({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  mistral: (cfg, modelId) =>
+    createMistral({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   ollama: (cfg, modelId) =>
     createOllama({ baseURL: cfg.baseURL })(modelId),
   nearai: (cfg, modelId) =>

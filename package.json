@@ -1,7 +1,7 @@
 {
   "name": "privateer-agent",
   "version": "0.2.1",
-  "description": "Privateer — a provider-agnostic terminal coding agent. Bring your own model (OpenRouter, Anthropic, OpenAI, Google, xAI, Groq, Ollama, NEAR AI, Tinfoil).",
+  "description": "Privateer — a provider-agnostic terminal coding agent. Bring your own model (OpenRouter, Anthropic, OpenAI, Google, xAI, Groq, Mistral, Ollama, NEAR AI, Tinfoil).",
   "type": "module",
   "license": "MIT",
   "author": "Patrick (zahnno)",
@@ -29,6 +29,7 @@
     "xai",
     "grok",
     "groq",
+    "mistral",
     "tinfoil"
   ],
   "bin": {
@@ -56,6 +57,7 @@
     "@ai-sdk/anthropic": "^2.0.0",
     "@ai-sdk/google": "^2.0.78",
     "@ai-sdk/groq": "^2.0.43",
+    "@ai-sdk/mistral": "^2.0.36",
     "@ai-sdk/openai": "^2.0.0",
     "@ai-sdk/xai": "^2.0.76",
     "@modelcontextprotocol/sdk": "^1.29.0",

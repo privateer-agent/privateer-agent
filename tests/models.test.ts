@@ -130,6 +130,27 @@ test("xai and groq listings require a key", async () => {
   await assert.rejects(() => listModels("groq", {}), /no API key/);
 });
 
+test("mistral listing keeps chat models, maps vision, sends a bearer token", async () => {
+  const calls = mockFetch({
+    data: [
+      { id: "mistral-large-latest", capabilities: { completion_chat: true } },
+      { id: "pixtral-large-latest", capabilities: { completion_chat: true, vision: true } },
+      { id: "mistral-embed", capabilities: { completion_chat: false } },
+    ],
+  });
+  const models = await listModels("mistral", { apiKey: "mistral-key" });
+  assert.deepEqual(models, [
+    { id: "mistral-large-latest", inputModalities: undefined },
+    { id: "pixtral-large-latest", inputModalities: ["text", "image"] },
+  ]);
+  assert.match(calls[0].url, /api\.mistral\.ai\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer mistral-key");
+});
+
+test("mistral listing requires a key", async () => {
+  await assert.rejects(() => listModels("mistral", {}), /no API key/);
+});
+
 test("custom listing hits the configured endpoint, key optional", async () => {
   const calls = mockFetch({ data: [{ id: "qwen3-coder" }, { id: "glm-air" }] });
   const models = await listModels("custom", { baseURL: "http://localhost:1234/v1" });

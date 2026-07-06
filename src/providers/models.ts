@@ -22,6 +22,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   google: "https://generativelanguage.googleapis.com/v1beta",
   xai: "https://api.x.ai/v1",
   groq: "https://api.groq.com/openai/v1",
+  mistral: "https://api.mistral.ai/v1",
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://localhost:11434/api",
   nearai: NEARAI_BASE_URL,
@@ -104,6 +105,24 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
       })) as { data?: { id: string }[] };
       return (json.data ?? [])
         .map((m) => ({ id: m.id }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+    case "mistral": {
+      // OpenAI listing shape plus a `capabilities` object: keep chat-capable models
+      // (the list also carries embed/moderation/OCR entries) and surface the vision
+      // flag as an image modality so the router knows which models can see.
+      if (!cfg.apiKey) throw new Error("no API key");
+      const json = (await getJson(`${base}/models`, {
+        authorization: `Bearer ${cfg.apiKey}`,
+      })) as {
+        data?: { id: string; capabilities?: { completion_chat?: boolean; vision?: boolean } }[];
+      };
+      return (json.data ?? [])
+        .filter((m) => m.capabilities?.completion_chat ?? true)
+        .map((m) => ({
+          id: m.id,
+          inputModalities: m.capabilities?.vision ? ["text", "image"] : undefined,
+        }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
     case "openrouter": {
