@@ -60,6 +60,7 @@ import {
   saveSession,
   loadSession,
   listSessions,
+  deleteSession,
   newSessionId,
   checkpointsDir,
   type SessionData,
@@ -158,6 +159,12 @@ function serializeTranscript(entries: Entry[]): string {
   return lines.join("\n");
 }
 
+// Status-bar branch text: the user-given name when there is one, a bare "branch"
+// marker for an unnamed branch, nothing for an unnamed root session.
+function badgeOf(name: string | undefined, parent: SessionParent | undefined): string | undefined {
+  return name ?? (parent ? "branch" : undefined);
+}
+
 export function App({
   model,
   config: initialConfig,
@@ -235,6 +242,16 @@ export function App({
   // Lineage pointer persisted with every save: set when this session was branched off
   // another (rewind or /fork), carried through when resuming an already-branched one.
   const parentRef = useRef<SessionParent | undefined>(resume?.parent);
+  // User-given session name (/fork <name>, /rename), persisted with every save. The
+  // ref is the source of truth for persist(); branchBadge mirrors it (plus branch
+  // status) as state so the status bar re-renders when either changes.
+  const nameRef = useRef<string | undefined>(resume?.name);
+  const [branchBadge, setBranchBadge] = useState<string | undefined>(
+    badgeOf(resume?.name, resume?.parent),
+  );
+  function refreshBranchBadge() {
+    setBranchBadge(badgeOf(nameRef.current, parentRef.current));
+  }
   const seededRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   // Input history (↑/↓) and the type-ahead queue for messages entered while busy.
@@ -643,6 +660,7 @@ export function App({
         messages: eng.messages,
         usage: eng.usage,
         parent: parentRef.current,
+        name: nameRef.current,
       });
     } catch {
       /* non-fatal */
@@ -1020,12 +1038,19 @@ export function App({
           append({ kind: "notice", text: "Nothing to fork yet — the conversation is empty." });
           break;
         }
-        branchSession();
+        branchSession(undefined, res.name);
         persist();
         append({
           kind: "notice",
-          text: "Forked into a new session branch — turns from here save to the branch; the original stays under /resume.",
+          text: `Forked into a new session branch${res.name ? ` "${res.name}"` : ""} — turns from here save to the branch; the original stays under /resume.`,
         });
+        break;
+      }
+      case "renameSession": {
+        nameRef.current = res.name;
+        refreshBranchBadge();
+        persist();
+        append({ kind: "notice", text: `Session named "${res.name}".` });
         break;
       }
       case "sessions": {
@@ -1445,11 +1470,14 @@ export function App({
   // history over (truncated at `cp` when branching from a rewind). The source session's
   // file and checkpoint dir are left intact, so its future stays resumable; the next
   // persist() writes the branch — and latest.json — so `--continue` follows the branch.
-  function branchSession(cp?: { id: string; label: string }) {
+  function branchSession(cp?: { id: string; label: string }, name?: string) {
     const from = sessionIdRef.current;
     const branchId = newSessionId();
     sessionIdRef.current = branchId;
     parentRef.current = cp ? { id: from, checkpointId: cp.id, label: cp.label } : { id: from };
+    // A branch is a new session: it doesn't inherit the source's name.
+    nameRef.current = name;
+    refreshBranchBadge();
     checkpointsRef.current.branchTo(checkpointsDir(cwd, branchId), cp?.id);
   }
 
@@ -1502,12 +1530,28 @@ export function App({
     todosRef.current?.set([]);
     sessionIdRef.current = data.id;
     parentRef.current = data.parent;
+    nameRef.current = data.name;
+    refreshBranchBadge();
     // Adopt the resumed session's checkpoints so /rewind acts on its history, not the
     // one we just left. Mutated in place so the engine's recordMutation closure stays
     // valid (the session isn't rebuilt on resume).
     checkpointsRef.current.adopt(checkpointsDir(cwd, data.id));
     persist();
-    append({ kind: "notice", text: `Resumed session (${data.messages.length} messages).` });
+    append({
+      kind: "notice",
+      text: `Resumed session${data.name ? ` "${data.name}"` : ""} (${data.messages.length} messages).`,
+    });
+  }
+
+  // Delete a stored session (file + checkpoints; latest pin cleared when it pointed
+  // there) from the picker, then refresh the list in place. The live session is never
+  // offered for deletion — it's excluded from the picker's list.
+  function removeSession(id: string) {
+    deleteSession(cwd, id);
+    const list = listSessions(cwd).filter((s) => s.id !== sessionIdRef.current);
+    setSessions(list);
+    if (list.length === 0) setSessionsPicking(false);
+    append({ kind: "notice", text: "Deleted the session and its checkpoints." });
   }
 
   // Entry point from the prompt input. While a turn is running, messages are
@@ -1662,6 +1706,7 @@ export function App({
           zdr={zdr}
           tee={tee}
           remote={remoteEnabled}
+          branch={branchBadge}
         />
 
         {picking ? (
@@ -1715,6 +1760,7 @@ export function App({
           <SessionPicker
             sessions={sessions}
             onResume={resumeSession}
+            onDelete={removeSession}
             onCancel={() => setSessionsPicking(false)}
           />
         ) : planReady ? (

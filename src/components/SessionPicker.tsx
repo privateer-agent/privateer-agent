@@ -51,26 +51,39 @@ export function sessionTreeRows(sessions: SessionMeta[]): SessionTreeRow[] {
 }
 
 // Lists past sessions (newest first), branches indented under the session they
-// forked from. Move with ↑/↓ (or j/k); Enter resumes the selected session, Esc
-// cancels.
+// forked from. Move with ↑/↓ (or j/k); Enter resumes the selected session, `d`
+// then `y` deletes it (any other key cancels the confirm), Esc closes.
 export function SessionPicker({
   sessions,
   onResume,
+  onDelete,
   onCancel,
 }: {
   sessions: SessionMeta[];
   onResume: (id: string) => void;
+  onDelete?: (id: string) => void;
   onCancel: () => void;
 }) {
   const rows = sessionTreeRows(sessions);
   const [sel, setSel] = useState(0);
+  // Id (not index) of the row awaiting delete confirmation, so a list refresh
+  // can't shift the pending confirm onto a different session.
+  const [confirmDelete, setConfirmDelete] = useState<string | undefined>(undefined);
 
   useInput((input, key) => {
     if (key.escape) return void onCancel();
     if (rows.length === 0) return;
+    const current = rows[Math.min(sel, rows.length - 1)].meta;
+    if (confirmDelete) {
+      // Only y (on the same row) deletes; d keeps asking; anything else backs out.
+      if (input === "y" && confirmDelete === current.id) onDelete?.(current.id);
+      setConfirmDelete(input === "d" ? current.id : undefined);
+      return;
+    }
     if (key.upArrow || input === "k") return void setSel((s) => (s - 1 + rows.length) % rows.length);
     if (key.downArrow || input === "j") return void setSel((s) => (s + 1) % rows.length);
-    if (key.return) return void onResume(rows[Math.min(sel, rows.length - 1)].meta.id);
+    if (key.return) return void onResume(current.id);
+    if (input === "d" && onDelete) return void setConfirmDelete(current.id);
   });
 
   if (rows.length === 0) {
@@ -94,15 +107,23 @@ export function SessionPicker({
               {active ? POINTER : " "}
             </Text>
             {fork ? <Text color={theme.dim}>{fork.trim()}</Text> : null}
+            {s.name ? <Text color={active ? theme.accent : undefined} bold>{`[${s.name}]`}</Text> : null}
             <Text color={active ? theme.accent : undefined}>{s.preview}</Text>
             <Text color={theme.dim}>
               ({ago(s.updatedAt)}, {s.messageCount} msg{s.messageCount === 1 ? "" : "s"})
             </Text>
+            {confirmDelete === s.id ? <Text color={theme.error}>delete? y/n</Text> : null}
           </Box>
         );
       })}
       <Text color={theme.dim}>
-        <Text color={theme.accent}>↑↓</Text> move · <Text color={theme.accent}>enter</Text> resume · esc cancel
+        <Text color={theme.accent}>↑↓</Text> move · <Text color={theme.accent}>enter</Text> resume ·{" "}
+        {onDelete ? (
+          <>
+            <Text color={theme.accent}>d</Text> delete ·{" "}
+          </>
+        ) : null}
+        esc cancel
       </Text>
     </Box>
   );

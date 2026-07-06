@@ -38,6 +38,14 @@ function RemoteBadge({ remote }: { remote?: boolean }) {
   return <Text color={theme.success}>{`${DOT} remote · `}</Text>;
 }
 
+// Branch badge: a "⑂ name" segment shown when the session is a branch (rewind or
+// /fork) or was named with /rename, so it's always clear which line of history the
+// next turn saves to. Nothing for an unnamed root session.
+function BranchBadge({ branch }: { branch?: string }) {
+  if (!branch) return null;
+  return <Text color={theme.accent}>{`⑂ ${branch} · `}</Text>;
+}
+
 // Compact token count: 100, 1k, 1m, 1b — one decimal place above 1k, trimmed of
 // trailing ".0", so 1500 → "1.5k" and 2000 → "2k".
 export function formatTokens(n: number): string {
@@ -95,6 +103,7 @@ export function StatusBar(props: {
   zdr?: ZdrState; // OpenRouter ZDR posture for the selected model (default line only)
   tee?: TeeState; // TEE attestation posture for the selected model (default line only)
   remote?: boolean; // /remote-access is on — the app can drive this terminal (default line only)
+  branch?: string; // session branch name/marker when on a branch (default line only)
 }) {
   // Stay clear of the right edge (parent paddingX={1} plus a 2-col safety gap) so
   // the line never reaches the final column and the terminal never reflows it.
@@ -119,6 +128,7 @@ export function StatusBar(props: {
         <ZdrBadge zdr={props.zdr} />
         <TeeBadge tee={props.tee} />
         <RemoteBadge remote={props.remote} />
+        <BranchBadge branch={props.branch} />
         <Text color={theme.accent}>⚓ privateer</Text>
         {diag ? <Text color={theme.dim}>{` [${diag}]`}</Text> : null}
         <Text color={theme.dim}> (shift+tab to cycle)</Text>

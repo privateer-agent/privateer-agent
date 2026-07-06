@@ -59,9 +59,20 @@ test("/clear and /exit map to control results", () => {
 
 test("/rewind, /fork and /resume map to session-control results", () => {
   assert.deepEqual(runCommand("/rewind", ctx), { type: "rewind" });
-  assert.deepEqual(runCommand("/fork", ctx), { type: "fork" });
+  assert.deepEqual(runCommand("/fork", ctx), { type: "fork", name: undefined });
+  assert.deepEqual(runCommand("/fork try-zustand", ctx), { type: "fork", name: "try-zustand" });
   assert.deepEqual(runCommand("/resume", ctx), { type: "sessions" });
   assert.deepEqual(runCommand("/sessions", ctx), { type: "sessions" });
+});
+
+test("/rename names the session; bare /rename explains usage", () => {
+  assert.deepEqual(runCommand("/rename auth-experiment", ctx), {
+    type: "renameSession",
+    name: "auth-experiment",
+  });
+  const bare = runCommand("/rename", ctx) as { type: string; tone?: string };
+  assert.equal(bare.type, "notice");
+  assert.equal(bare.tone, "error");
 });
 
 test("/compact maps to a compact result", () => {

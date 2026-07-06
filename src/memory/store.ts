@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { ModelMessage } from "ai";
 import { globalDir } from "../config/load.ts";
@@ -23,6 +23,8 @@ export interface SessionData {
   messages: ModelMessage[];
   usage: UsageTotals;
   parent?: SessionParent;
+  // User-given branch name (`/fork <name>` or `/rename`) — display only.
+  name?: string;
 }
 
 // Lightweight summary used by the session picker, without loading every message.
@@ -34,6 +36,7 @@ export interface SessionMeta {
   preview: string;
   parentId?: string;
   forkLabel?: string;
+  name?: string;
 }
 
 // A stable per-project key derived from the absolute cwd. Exported so other memory
@@ -116,6 +119,17 @@ export function loadSession(cwd: string, id: string): SessionData | null {
   return readSessionFile(sessionPath(cwd, id));
 }
 
+// Remove a stored session: its file, its checkpoint directory (index + blobs), and —
+// when latest.json mirrors it — the latest pin, so --continue can't resurrect it.
+// Branches that forked off the deleted session keep their own files; the picker
+// renders them as top-level rows once the parent is gone.
+export function deleteSession(cwd: string, id: string): void {
+  rmSync(sessionPath(cwd, id), { force: true });
+  rmSync(checkpointsDir(cwd, id), { recursive: true, force: true });
+  const latest = readSessionFile(latestPath(cwd));
+  if (latest?.id === id) rmSync(latestPath(cwd), { force: true });
+}
+
 // Summaries of every stored session for this project, newest first.
 export function listSessions(cwd: string): SessionMeta[] {
   const dir = sessionsDir(cwd);
@@ -133,6 +147,7 @@ export function listSessions(cwd: string): SessionMeta[] {
       preview: previewOf(data.messages),
       parentId: data.parent?.id,
       forkLabel: data.parent?.label,
+      name: data.name,
     });
   }
   // Newest first; fall back to id when two writes share a millisecond.

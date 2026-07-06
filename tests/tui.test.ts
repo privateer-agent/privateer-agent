@@ -356,3 +356,44 @@ test("ModelPicker lists all providers, Privateer first, and routes unconfigured 
   assert.equal(setup, "openrouter");
   unmount();
 });
+
+// Branch badge: resuming a named branch shows "⑂ name" in the status bar, and
+// /rename (typed through the real input path) names the live session in place.
+test("status bar shows the branch badge and /rename updates it", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "privateer-badge-"));
+  try {
+    const { loadSession } = await import("../src/memory/store.ts");
+    const config = Config.parse({ providers: { anthropic: { apiKey: "x" } } });
+    const resume = {
+      id: "s-200",
+      updatedAt: new Date().toISOString(),
+      modelSpec: "anthropic:claude-opus-4-8",
+      messages: [{ role: "user", content: "hello" }] as any,
+      usage: emptyUsage(),
+      parent: { id: "s-100" },
+    };
+    const { lastFrame, stdin, unmount } = render(
+      React.createElement(App, { model: "anthropic:claude-opus-4-8", config, cwd, resume }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    // Unnamed branch → bare marker.
+    assert.match(lastFrame() ?? "", /⑂ branch/);
+
+    stdin.write("/rename");
+    await new Promise((r) => setTimeout(r, 30));
+    stdin.write("\r"); // accept the slash-menu candidate → "/rename "
+    await new Promise((r) => setTimeout(r, 30));
+    stdin.write("auth-experiment");
+    await new Promise((r) => setTimeout(r, 30));
+    stdin.write("\r"); // submit
+    await new Promise((r) => setTimeout(r, 50));
+    const frame = lastFrame() ?? "";
+    assert.match(frame, /Session named "auth-experiment"/);
+    assert.match(frame, /⑂ auth-experiment/);
+    // The name persisted to the session file.
+    assert.equal(loadSession(cwd, "s-200")!.name, "auth-experiment");
+    unmount();
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

@@ -67,7 +67,8 @@ included.
   cryptographic proof)
 - **Plan mode** (read-only → present a plan → approve), **checkpoint/rewind** of
   conversation and files, and **session branching** — rewinds fork a new branch (the
-  discarded turns stay resumable) and `/fork` branches from the current point
+  discarded turns stay resumable), `/fork [name]` branches from the current point, and
+  the status bar shows which branch you're on
 - A modal prompt with `/` command and `@` file autocomplete, `!` shell passthrough,
   `#` memory append, input history, optional **vim** mode, and **ctrl-r** history search
 - Layered `settings.json` (user → project → local → managed), **custom slash commands**
@@ -497,8 +498,9 @@ Built-ins (plus any custom commands you add):
 | `/zdr` | toggle OpenRouter zero-data-retention enforcement (see [Data retention](#data-retention-zdr)) |
 | `/verify` | fetch the TEE attestation for the current model — NEAR AI or Tinfoil (see [Private inference](#private-inference-near-ai--tinfoil)) |
 | `/rewind` `/compact` `/clear` `/export` | restore a checkpoint, compact, clear, save transcript |
-| `/fork` | branch the conversation into a new session (this one stays intact) |
-| `/resume` `/sessions` | pick up an earlier session or branch in this directory |
+| `/fork [name]` | branch the conversation into a new session (this one stays intact), optionally named |
+| `/rename <name>` | name the current session branch (shows in `/resume` and the status bar) |
+| `/resume` `/sessions` | pick up an earlier session or branch in this directory (`d` deletes one) |
 | `/exit` | quit |
 
 - `/model` — open a picker of each provider's live models (or `/model provider:id` to set one directly).
@@ -507,9 +509,12 @@ Built-ins (plus any custom commands you add):
 - `/rewind` — pick an earlier checkpoint and restore the conversation, the files, or both.
   Rewinding the conversation forks a **branch**: the turns you rewound past stay in the
   original session, and `/resume` shows the whole tree (branches indented under the session
-  they forked from) so you can hop back to either line.
-- `/fork` — branch from right here without rewinding: further turns save to the new
-  branch while the original session stays as it was.
+  they forked from) so you can hop back to either line. In the picker, `d` (then `y`)
+  deletes the selected session and its checkpoints.
+- `/fork [name]` — branch from right here without rewinding: further turns save to the new
+  branch while the original session stays as it was. Name it inline (`/fork try-zustand`)
+  or later with `/rename <name>` — a `⑂ name` badge in the status bar shows which branch
+  the next turn saves to (a bare `⑂ branch` when unnamed).
 - `/compact` — summarize older history to reclaim context (also happens automatically).
 
 ## Tools

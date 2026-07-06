@@ -46,7 +46,9 @@ export type CommandResult =
   // Open the checkpoint picker to rewind conversation and/or files.
   | { type: "rewind" }
   // Branch the conversation from here into a new session (resolved by the App).
-  | { type: "fork" }
+  | { type: "fork"; name?: string }
+  // Name the current session branch (persisted; shows in /resume and the status bar).
+  | { type: "renameSession"; name: string }
   // Open the session picker to browse and resume a past session.
   | { type: "sessions" }
   // Show live MCP server/tool status (resolved by the App).
@@ -333,8 +335,23 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: "fork",
-    summary: "branch the conversation into a new session (this one stays intact)",
-    run: () => ({ type: "fork" }),
+    summary: "branch the conversation into a new session (this one stays intact); `/fork <name>` names the branch",
+    run: (args) => ({ type: "fork", name: args.trim() || undefined }),
+  },
+  {
+    name: "rename",
+    summary: "name the current session branch (shows in /resume and the status bar)",
+    run: (args) => {
+      const name = args.trim();
+      if (!name) {
+        return {
+          type: "notice",
+          tone: "error",
+          text: "Usage: /rename <name> — names the current session branch.",
+        };
+      }
+      return { type: "renameSession", name };
+    },
   },
   {
     name: "resume",
