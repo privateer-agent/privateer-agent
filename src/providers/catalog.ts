@@ -95,6 +95,19 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "cerebras:gpt-oss-120b",
     keyHint: "cloud.cerebras.ai → API Keys",
   },
+  fireworks: {
+    name: "fireworks",
+    label: "Fireworks (no-retention inference)",
+    requiresKey: providerRequiresKey("fireworks"),
+    defaultModel: "fireworks:accounts/fireworks/models/glm-5p2",
+    // Honest copy: ZDR is Fireworks's default for open models (prompts live in
+    // volatile memory only), but it's policy, not hardware — TEE-attested
+    // inference is nearai/tinfoil. Fireworks's own proprietary models (f1,
+    // FireFunction) may log for analytics; the listing flags them.
+    keyHint:
+      "fireworks.ai → API Keys (open models: zero retention by default, not TEE-attested; Fireworks's own f1/FireFunction may log)",
+    privacy: ["zdr"],
+  },
   deepseek: {
     name: "deepseek",
     label: "DeepSeek",

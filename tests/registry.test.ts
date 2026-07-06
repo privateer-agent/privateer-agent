@@ -26,6 +26,7 @@ test("buildModel constructs a model for each new provider", () => {
     ["zai", "glm-5"],
     ["moonshot", "kimi-k2.7-code"],
     ["cerebras", "gpt-oss-120b"],
+    ["fireworks", "accounts/fireworks/models/glm-5p2"],
     ["deepseek", "deepseek-v4-flash"],
     ["minimax", "MiniMax-M3"],
     ["qwen", "qwen3.7-max"],

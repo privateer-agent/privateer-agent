@@ -8,7 +8,7 @@ const PLACEHOLDER = "«redacted»";
 // Common API-key shapes, masked even when we don't have the exact value on hand:
 // OpenAI `sk-…`, Anthropic `sk-ant-…`, OpenRouter `sk-or-v1-…`, Google `AIza…`,
 // xAI `xai-…`, Groq `gsk_…`, Z.ai/Zhipu `<32 hex>.<suffix>`, Cerebras `csk-…`,
-// Venice `vapi_…`, and bare
+// Venice `vapi_…`, Fireworks `fw_…`, and bare
 // "Bearer <token>" / "x-api-key: <token>" / "x-goog-api-key: <token>" header
 // fragments. (Mistral keys are prefix-less, so they rely on exact-value masking
 // and the header patterns.)
@@ -19,6 +19,7 @@ const KEY_PATTERNS: RegExp[] = [
   /\bgsk_[A-Za-z0-9_-]{16,}\b/g,
   /\bcsk-[A-Za-z0-9_-]{16,}\b/g,
   /\bvapi_[A-Za-z0-9_-]{16,}\b/g,
+  /\bfw_[A-Za-z0-9_-]{16,}\b/g,
   /\b[a-f0-9]{32}\.[A-Za-z0-9]{10,}\b/g,
   /\b(authorization|x-api-key|x-goog-api-key)\b\s*[:=]\s*(bearer\s+)?["']?[A-Za-z0-9_\-.]{16,}["']?/gi,
 ];
@@ -46,6 +47,7 @@ export function collectSecrets(providers?: Record<string, { apiKey?: string } | 
     "Z_AI_API_KEY",
     "MOONSHOT_API_KEY",
     "CEREBRAS_API_KEY",
+    "FIREWORKS_API_KEY",
     "DEEPSEEK_API_KEY",
     "MINIMAX_API_KEY",
     "DASHSCOPE_API_KEY",

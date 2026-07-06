@@ -26,6 +26,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   zai: ZAI_BASE_URL,
   moonshot: "https://api.moonshot.ai/v1",
   cerebras: "https://api.cerebras.ai/v1",
+  fireworks: "https://api.fireworks.ai/inference/v1",
   deepseek: "https://api.deepseek.com",
   minimax: MINIMAX_BASE_URL,
   qwen: QWEN_BASE_URL,
@@ -130,6 +131,27 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
       })) as { data?: { id: string }[] };
       return (json.data ?? [])
         .map((m) => ({ id: m.id }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+    case "fireworks": {
+      // OpenAI listing shape plus Fireworks extras: `supports_chat` separates chat
+      // models from embeddings/audio (kept when the field is absent), and
+      // `supports_image_input` marks vision models. Open models run zero-retention
+      // by default, but Fireworks's own proprietary family (f1, FireFunction) may
+      // log for analytics — flagged in the label so the picker stays honest.
+      if (!cfg.apiKey) throw new Error("no API key");
+      const json = (await getJson(`${base}/models`, {
+        authorization: `Bearer ${cfg.apiKey}`,
+      })) as {
+        data?: { id: string; supports_chat?: boolean; supports_image_input?: boolean }[];
+      };
+      return (json.data ?? [])
+        .filter((m) => m.supports_chat ?? true)
+        .map((m) => ({
+          id: m.id,
+          label: /\b(f1|firefunction)/i.test(m.id) ? `${m.id} (may log — Fireworks proprietary)` : undefined,
+          inputModalities: m.supports_image_input ? ["text", "image"] : undefined,
+        }))
         .sort((a, b) => a.id.localeCompare(b.id));
     }
     case "mistral": {

@@ -7,6 +7,7 @@ import { createGroq } from "@ai-sdk/groq";
 import { createMistral } from "@ai-sdk/mistral";
 import { createMoonshotAI } from "@ai-sdk/moonshotai";
 import { createCerebras } from "@ai-sdk/cerebras";
+import { createFireworks } from "@ai-sdk/fireworks";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createOllama } from "ollama-ai-provider-v2";
@@ -80,6 +81,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   zai: true,
   moonshot: true,
   cerebras: true,
+  fireworks: true,
   deepseek: true,
   minimax: true,
   qwen: true,
@@ -126,6 +128,10 @@ const FACTORIES: Record<ProviderName, Factory> = {
     createMoonshotAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   cerebras: (cfg, modelId) =>
     createCerebras({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  fireworks: (cfg, modelId) =>
+    // Open models run zero-data-retention by default (volatile memory only); the
+    // dedicated package supplies the inference base URL and key header.
+    createFireworks({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   deepseek: (cfg, modelId) =>
     // The dedicated package maps the reasoner mode's non-standard
     // `reasoning_content` field into AI SDK reasoning parts.

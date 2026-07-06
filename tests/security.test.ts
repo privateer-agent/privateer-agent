@@ -81,6 +81,9 @@ test("redactText masks known secret strings and key shapes", () => {
 
   const withSecret = redactText("token=supersecretvalue123 leaked", ["supersecretvalue123"]);
   assert.ok(!withSecret.includes("supersecretvalue123"));
+
+  const fw = redactText("fireworks key fw_abcdefghijklmnop1234 rejected");
+  assert.ok(!fw.includes("fw_abcdefghijklmnop1234"), "fw_ key should be scrubbed");
 });
 
 test("collectSecrets pulls provider keys above the length floor", () => {

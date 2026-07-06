@@ -192,6 +192,36 @@ test("cerebras listing requires a key", async () => {
   await assert.rejects(() => listModels("cerebras", {}), /no API key/);
 });
 
+test("fireworks listing keeps chat models, flags proprietary loggers, maps vision", async () => {
+  const calls = mockFetch({
+    data: [
+      { id: "accounts/fireworks/models/qwen3-vl-235b", supports_chat: true, supports_image_input: true },
+      { id: "accounts/fireworks/models/nomic-embed-text", supports_chat: false },
+      { id: "accounts/fireworks/models/firefunction-v2", supports_chat: true },
+      { id: "accounts/fireworks/models/glm-5p2" }, // no supports_chat field → kept
+    ],
+  });
+  const models = await listModels("fireworks", { apiKey: "fw_key" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    [
+      "accounts/fireworks/models/firefunction-v2",
+      "accounts/fireworks/models/glm-5p2",
+      "accounts/fireworks/models/qwen3-vl-235b",
+    ],
+  );
+  // Fireworks's own proprietary family may log prompts — the label says so.
+  assert.match(models[0].label ?? "", /may log/);
+  assert.equal(models[1].label, undefined);
+  assert.deepEqual(models[2].inputModalities, ["text", "image"]);
+  assert.match(calls[0].url, /api\.fireworks\.ai\/inference\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer fw_key");
+});
+
+test("fireworks listing requires a key", async () => {
+  await assert.rejects(() => listModels("fireworks", {}), /no API key/);
+});
+
 test("deepseek lists via the OpenAI shape against the DeepSeek endpoint", async () => {
   const calls = mockFetch({ data: [{ id: "deepseek-v4-pro" }, { id: "deepseek-v4-flash" }] });
   const models = await listModels("deepseek", { apiKey: "sk-ds" });

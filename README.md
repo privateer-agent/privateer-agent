@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
-  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Google%20·%20xAI%20·%20Groq%20·%20Mistral%20·%20Z.ai%20·%20Moonshot%20·%20Cerebras%20·%20DeepSeek%20·%20MiniMax%20·%20Qwen%20·%20Ollama%20·%20NEAR%20AI%20·%20Tinfoil%20·%20Venice-5b8def" alt="Providers" />
+  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Google%20·%20xAI%20·%20Groq%20·%20Mistral%20·%20Z.ai%20·%20Moonshot%20·%20Cerebras%20·%20Fireworks%20·%20DeepSeek%20·%20MiniMax%20·%20Qwen%20·%20Ollama%20·%20NEAR%20AI%20·%20Tinfoil%20·%20Venice-5b8def" alt="Providers" />
   <img src="https://img.shields.io/badge/built%20on-Vercel%20AI%20SDK-black" alt="Vercel AI SDK" />
 </p>
 
@@ -27,7 +27,7 @@ npx privateer-agent                                 # or run it instantly, nothi
 ```
 
 Switch between **OpenRouter**, **Anthropic**, **OpenAI**, **Google**, **xAI**, **Groq**,
-**Mistral**, **Z.ai** (GLM), **Moonshot** (Kimi), **Cerebras**, **DeepSeek**, **MiniMax**, **Qwen**, local **Ollama**, **NEAR AI** or **Tinfoil** (private TEE inference), **Venice** (no-retention inference), and any **custom
+**Mistral**, **Z.ai** (GLM), **Moonshot** (Kimi), **Cerebras**, **Fireworks** (no-retention inference), **DeepSeek**, **MiniMax**, **Qwen**, local **Ollama**, **NEAR AI** or **Tinfoil** (private TEE inference), **Venice** (no-retention inference), and any **custom
 OpenAI-compatible endpoint** (LM Studio, vLLM, llama.cpp…) with one command. Built on the Vercel AI SDK, so tool-calling
 and streaming work identically across every provider — no model lock-in, no separate code paths.
 MCP servers, Claude Code-compatible skills, scheduled routines, and approval from your phone
@@ -137,6 +137,7 @@ export MISTRAL_API_KEY=...               # Mistral (EU-hosted)
 export ZAI_API_KEY=...                   # Z.ai (GLM; also Z_AI_API_KEY)
 export MOONSHOT_API_KEY=sk-...           # Moonshot (Kimi)
 export CEREBRAS_API_KEY=csk-...          # Cerebras (fast inference)
+export FIREWORKS_API_KEY=fw_...          # Fireworks (open models: zero retention by default)
 export DEEPSEEK_API_KEY=sk-...           # DeepSeek (see privacy note below)
 export MINIMAX_API_KEY=sk-...            # MiniMax (intl platform)
 export DASHSCOPE_API_KEY=sk-...          # Qwen via Alibaba Model Studio intl (also QWEN_API_KEY)
@@ -171,6 +172,12 @@ can verify (for that, use `nearai` or `tinfoil`). Venice's catalog also carries
 "anonymized" models (Claude, GPT, Gemini…) that are proxied to the upstream
 provider, which does process your prompt; the model picker labels these.
 
+**Fireworks privacy note** — Fireworks runs its open models with zero data retention
+*by default*: prompts and generations exist only in volatile memory for the duration
+of the request, never in persistent storage. Like Venice, that's policy rather than
+attested hardware. The exception is Fireworks's own proprietary family (f1,
+FireFunction), which may log for analytics — the model picker labels those.
+
 ### Provider reference
 
 Model specs are `provider:model`. Every provider entry in `config.json` accepts an
@@ -189,6 +196,7 @@ regional endpoints, and subscription plans (see the Z.ai example below).
 | Z.ai (GLM) | `zai:` | `ZAI_API_KEY` (or `Z_AI_API_KEY`) | `https://api.z.ai/api/paas/v4` |
 | Moonshot (Kimi) | `moonshot:` | `MOONSHOT_API_KEY` | SDK default |
 | Cerebras | `cerebras:` | `CEREBRAS_API_KEY` | SDK default |
+| Fireworks | `fireworks:` | `FIREWORKS_API_KEY` | SDK default (`https://api.fireworks.ai/inference/v1`) |
 | DeepSeek | `deepseek:` | `DEEPSEEK_API_KEY` | SDK default |
 | MiniMax | `minimax:` | `MINIMAX_API_KEY` | `https://api.minimax.io/v1` (intl platform) |
 | Qwen (Alibaba) | `qwen:` | `DASHSCOPE_API_KEY` (or `QWEN_API_KEY`) | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
@@ -622,7 +630,7 @@ context — conventions, architecture notes, anything it should always know.
 There are excellent terminal coding agents already. What this one does differently:
 
 - **Provider-agnostic by construction, not adaptation.** One agent loop over the Vercel AI
-  SDK; all eighteen providers — from OpenRouter and the frontier labs to local Ollama, TEE
+  SDK; all nineteen providers — from OpenRouter and the frontier labs to local Ollama, TEE
   inference, and your own OpenAI-compatible endpoint — are interchangeable at
   `/model` time, including mid-session. No vendor's models are privileged.
 - **Retention posture is a UI element.** ZDR status is visible before you send and
