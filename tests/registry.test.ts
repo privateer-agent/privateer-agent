@@ -28,6 +28,7 @@ test("buildModel constructs a model for each new provider", () => {
     ["cerebras", "gpt-oss-120b"],
     ["deepseek", "deepseek-v4-flash"],
     ["minimax", "MiniMax-M3"],
+    ["qwen", "qwen3.7-max"],
     ["tinfoil", "deepseek-v4-pro"],
   ] as const) {
     const model = buildModel(provider, { apiKey: "test-key" }, id);

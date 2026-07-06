@@ -46,6 +46,8 @@ export function collectSecrets(providers?: Record<string, { apiKey?: string } | 
     "CEREBRAS_API_KEY",
     "DEEPSEEK_API_KEY",
     "MINIMAX_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "QWEN_API_KEY",
     "NEAR_AI_API_KEY",
     "NEARAI_API_KEY",
     "TINFOIL_API_KEY",

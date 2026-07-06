@@ -205,6 +205,21 @@ test("minimax listing requires a key", async () => {
   await assert.rejects(() => listModels("minimax", {}), /no API key/);
 });
 
+test("qwen lists via the OpenAI shape against the DashScope intl endpoint", async () => {
+  const calls = mockFetch({ data: [{ id: "qwen3.7-max" }, { id: "qwen3-coder-plus" }] });
+  const models = await listModels("qwen", { apiKey: "sk-qw" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["qwen3-coder-plus", "qwen3.7-max"],
+  );
+  assert.match(calls[0].url, /dashscope-intl\.aliyuncs\.com\/compatible-mode\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer sk-qw");
+});
+
+test("qwen listing requires a key", async () => {
+  await assert.rejects(() => listModels("qwen", {}), /no API key/);
+});
+
 test("mistral listing keeps chat models, maps vision, sends a bearer token", async () => {
   const calls = mockFetch({
     data: [

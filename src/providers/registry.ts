@@ -36,6 +36,11 @@ export const ZAI_BASE_URL = "https://api.z.ai/api/paas/v4";
 // package exists to split it out.
 export const MINIMAX_BASE_URL = "https://api.minimax.io/v1";
 
+// Qwen via Alibaba Cloud Model Studio's international ("classic" DashScope)
+// OpenAI-compatible endpoint, hosted in the Singapore region. Newer docs are
+// migrating to workspace-scoped URLs — users on those can override baseURL.
+export const QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+
 // Each factory turns provider credentials + a model id into an AI SDK LanguageModel.
 // This is the single seam that makes Privateer provider-agnostic: the agent loop,
 // tools, and UI never know or care which provider is behind the model.
@@ -55,6 +60,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   cerebras: true,
   deepseek: true,
   minimax: true,
+  qwen: true,
   ollama: false,
   nearai: true,
   tinfoil: true,
@@ -105,6 +111,10 @@ const FACTORIES: Record<ProviderName, Factory> = {
     // OpenAI-compatible, Chat-Completions-only — `.chat()` pins the transport
     // like nearai/tinfoil/zai.
     createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? MINIMAX_BASE_URL }).chat(modelId),
+  qwen: (cfg, modelId) =>
+    // OpenAI-compatible, Chat-Completions-only — `.chat()` pins the transport
+    // like nearai/tinfoil/zai/minimax.
+    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? QWEN_BASE_URL }).chat(modelId),
   ollama: (cfg, modelId) =>
     createOllama({ baseURL: cfg.baseURL })(modelId),
   nearai: (cfg, modelId) =>

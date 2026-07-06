@@ -102,6 +102,13 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     // publish whether API inputs are retained or used for training.
     keyHint: "platform.minimax.io → API Keys (Singapore-based intl platform; retention/training posture unpublished)",
   },
+  qwen: {
+    name: "qwen",
+    label: "Qwen (Alibaba)",
+    requiresKey: providerRequiresKey("qwen"),
+    defaultModel: "qwen:qwen3.7-max",
+    keyHint: "Alibaba Cloud Model Studio (intl) → API Keys (Singapore region; Alibaba states API data isn't used for training)",
+  },
   tinfoil: {
     name: "tinfoil",
     label: "Tinfoil (private TEE inference)",
