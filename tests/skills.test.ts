@@ -209,7 +209,7 @@ test("/skills lists skills and warnings; install/remove return skillOp", () => {
     const ctx = cmdCtx(proj, loadSkills(proj).skills);
     const list = runCommand("/skills", ctx);
     assert.ok(list && list.type === "notice");
-    assert.ok((list as any).text.includes("ok (project)"));
+    assert.ok((list as any).text.includes("ok (project, local)"));
     assert.ok((list as any).text.includes("Warnings:"));
 
     const info = runCommand("/skills info ok", ctx);
@@ -228,6 +228,13 @@ test("/skills lists skills and warnings; install/remove return skillOp", () => {
 
     const rm = runCommand("/skills remove ok", ctx);
     assert.deepEqual(rm, { type: "skillOp", op: "remove", arg: "ok", project: false });
+
+    const upd = runCommand("/skills update ok", ctx);
+    assert.ok(upd && upd.type === "skillOp" && (upd as any).op === "update" && (upd as any).arg === "ok");
+    const updAll = runCommand("/skills update --all", ctx);
+    assert.ok(updAll && updAll.type === "skillOp" && (updAll as any).op === "update" && (updAll as any).arg === "");
+    const updBad = runCommand("/skills update", ctx);
+    assert.ok(updBad && updBad.type === "notice" && (updBad as any).tone === "error");
 
     const bad = runCommand("/skills install", ctx);
     assert.ok(bad && bad.type === "notice" && (bad as any).tone === "error");

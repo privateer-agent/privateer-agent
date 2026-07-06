@@ -7,6 +7,7 @@ import { expandCommand, type CustomCommand } from "./custom.ts";
 import { loadOutputStyles } from "../context/outputStyles.ts";
 import { loadAgents } from "../agents/loader.ts";
 import { loadSkills, type SkillDefinition } from "../skills/loader.ts";
+import { readManifest } from "../skills/installer.ts";
 import { loadHooks } from "../hooks/engine.ts";
 import { configuredProviders, parseModelSpec } from "../providers/resolve.ts";
 import { currentUser, serverBaseUrl } from "../auth/privateer.ts";
@@ -61,8 +62,9 @@ export type CommandResult =
   // Manage routines via the daemon (resolved in the App over IPC).
   // action defaults to "list"; arg is the routine name/id for the targeted actions.
   | { type: "routine"; action: "list" | "pause" | "resume" | "remove" | "run"; arg?: string }
-  // Install or remove an agent skill (async fetch/fs work, resolved by the App).
-  | { type: "skillOp"; op: "install" | "remove"; arg: string; project?: boolean; all?: boolean; force?: boolean };
+  // Install, remove, or update agent skills (async fetch/fs work, resolved by the
+  // App). For "update", arg is a skill name or "" meaning all.
+  | { type: "skillOp"; op: "install" | "remove" | "update"; arg: string; project?: boolean; all?: boolean; force?: boolean };
 
 export interface CommandContext {
   config: Config;
@@ -409,7 +411,7 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: "skills",
-    summary: "list agent skills, or install/remove one (install <src> | info | remove <name>)",
+    summary: "list agent skills, or manage them (install <src> | info | update [<name>|--all] | remove <name>)",
     run: (args, ctx) => {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const flags = new Set(parts.filter((p) => p.startsWith("--")));
@@ -427,9 +429,11 @@ const COMMANDS: CommandDef[] = [
                 "or install one with /skills install <owner/repo[/path]>.",
             };
           }
-          const lines = skills.map(
-            (s) => `  ${s.name} (${s.scope})\n    ${s.description.split("\n")[0]}`,
-          );
+          const lines = skills.map((s) => {
+            const m = readManifest(s.dir);
+            const origin = m ? `${m.source}${m.commit ? ` @ ${m.commit.slice(0, 7)}` : ""}` : "local";
+            return `  ${s.name} (${s.scope}, ${origin})\n    ${s.description.split("\n")[0]}`;
+          });
           const warn = warnings.length ? `\n\nWarnings:\n${warnings.map((w) => `  ${w}`).join("\n")}` : "";
           return { type: "notice", text: `Skills:\n${lines.join("\n")}${warn}` };
         }
@@ -458,6 +462,12 @@ const COMMANDS: CommandDef[] = [
           }
           return { type: "skillOp", op: "install", arg: words[1], project, all: flags.has("--all"), force: flags.has("--force") };
         }
+        case "update": {
+          if (!words[1] && !flags.has("--all")) {
+            return { type: "notice", tone: "error", text: "Usage: /skills update <name> | --all" };
+          }
+          return { type: "skillOp", op: "update", arg: words[1] ?? "" };
+        }
         case "remove": {
           if (!words[1]) return { type: "notice", tone: "error", text: "Usage: /skills remove <name> [--project]" };
           return { type: "skillOp", op: "remove", arg: words[1], project };
@@ -466,7 +476,7 @@ const COMMANDS: CommandDef[] = [
           return {
             type: "notice",
             tone: "error",
-            text: `Unknown subcommand "${sub}". Use /skills [list | info <name> | install <src> | remove <name>].`,
+            text: `Unknown subcommand "${sub}". Use /skills [list | info <name> | install <src> | update [<name> | --all] | remove <name>].`,
           };
       }
     },

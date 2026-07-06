@@ -43,7 +43,7 @@ import type { Routine } from "../routines/schema.ts";
 import { isSlashCommand } from "./promptModel.ts";
 import { loadCustomCommands } from "../commands/custom.ts";
 import { loadSkills } from "../skills/loader.ts";
-import { installSkills, removeSkill } from "../skills/installer.ts";
+import { installSkills, removeSkill, updateSkills } from "../skills/installer.ts";
 import { saveGlobalConfig } from "../config/load.ts";
 import { logout as privateerLogout, hasCredentials, onSessionExpired, warmSession } from "../auth/privateer.ts";
 import { RelayClient } from "../remote/relayClient.ts";
@@ -754,7 +754,24 @@ export function App({
         break;
       case "skillOp": {
         const scope = res.project ? ("project" as const) : ("user" as const);
-        if (res.op === "install") {
+        if (res.op === "update") {
+          const targets = res.arg ? [res.arg] : ("all" as const);
+          append({ kind: "notice", text: `Checking ${res.arg || "all skills"} for updates…` });
+          void updateSkills(targets, { cwd })
+            .then((results) => {
+              if (results.length === 0) {
+                append({ kind: "notice", text: "No skills installed." });
+                return;
+              }
+              const lines = results.map((r) => `  ${r.name}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`);
+              const failed = results.some((r) => r.status === "error");
+              append({ kind: "notice", tone: failed ? "error" : undefined, text: lines.join("\n") });
+              if (results.some((r) => r.status === "updated")) setSkillsEpoch((e) => e + 1);
+            })
+            .catch((err) => {
+              append({ kind: "notice", tone: "error", text: err instanceof Error ? err.message : String(err) });
+            });
+        } else if (res.op === "install") {
           append({ kind: "notice", text: `Installing skill(s) from ${res.arg}…` });
           void installSkills(res.arg, { scope, all: res.all, force: res.force, cwd })
             .then((installed) => {
