@@ -160,6 +160,21 @@ test("moonshot listing requires a key", async () => {
   await assert.rejects(() => listModels("moonshot", {}), /no API key/);
 });
 
+test("cerebras lists via the OpenAI shape against the Cerebras endpoint", async () => {
+  const calls = mockFetch({ data: [{ id: "zai-glm-4.7" }, { id: "gpt-oss-120b" }] });
+  const models = await listModels("cerebras", { apiKey: "csk-key" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["gpt-oss-120b", "zai-glm-4.7"],
+  );
+  assert.match(calls[0].url, /api\.cerebras\.ai\/v1\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer csk-key");
+});
+
+test("cerebras listing requires a key", async () => {
+  await assert.rejects(() => listModels("cerebras", {}), /no API key/);
+});
+
 test("mistral listing keeps chat models, maps vision, sends a bearer token", async () => {
   const calls = mockFetch({
     data: [

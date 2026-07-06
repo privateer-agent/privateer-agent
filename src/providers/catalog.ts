@@ -77,6 +77,13 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "moonshot:kimi-k2.7-code",
     keyHint: "platform.moonshot.ai → API Keys",
   },
+  cerebras: {
+    name: "cerebras",
+    label: "Cerebras (fast inference)",
+    requiresKey: providerRequiresKey("cerebras"),
+    defaultModel: "cerebras:gpt-oss-120b",
+    keyHint: "cloud.cerebras.ai → API Keys",
+  },
   tinfoil: {
     name: "tinfoil",
     label: "Tinfoil (private TEE inference)",

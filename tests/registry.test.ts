@@ -25,6 +25,7 @@ test("buildModel constructs a model for each new provider", () => {
     ["mistral", "mistral-large-latest"],
     ["zai", "glm-5"],
     ["moonshot", "kimi-k2.7-code"],
+    ["cerebras", "gpt-oss-120b"],
     ["tinfoil", "deepseek-v4-pro"],
   ] as const) {
     const model = buildModel(provider, { apiKey: "test-key" }, id);

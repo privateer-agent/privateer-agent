@@ -6,6 +6,7 @@ import { createXai } from "@ai-sdk/xai";
 import { createGroq } from "@ai-sdk/groq";
 import { createMistral } from "@ai-sdk/mistral";
 import { createMoonshotAI } from "@ai-sdk/moonshotai";
+import { createCerebras } from "@ai-sdk/cerebras";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createOllama } from "ollama-ai-provider-v2";
 import type { ProviderConfig, ProviderName } from "../config/schema.ts";
@@ -44,6 +45,7 @@ const REQUIRES_KEY: Record<ProviderName, boolean> = {
   mistral: true,
   zai: true,
   moonshot: true,
+  cerebras: true,
   ollama: false,
   nearai: true,
   tinfoil: true,
@@ -84,6 +86,8 @@ const FACTORIES: Record<ProviderName, Factory> = {
     // The dedicated package (not plain createOpenAI) maps Kimi thinking models'
     // non-standard `reasoning_content` field into AI SDK reasoning parts.
     createMoonshotAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
+  cerebras: (cfg, modelId) =>
+    createCerebras({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   ollama: (cfg, modelId) =>
     createOllama({ baseURL: cfg.baseURL })(modelId),
   nearai: (cfg, modelId) =>

@@ -17,7 +17,7 @@
   </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
-  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Google%20·%20xAI%20·%20Groq%20·%20Mistral%20·%20Z.ai%20·%20Moonshot%20·%20Ollama%20·%20NEAR%20AI%20·%20Tinfoil-5b8def" alt="Providers" />
+  <img src="https://img.shields.io/badge/providers-OpenRouter%20·%20Anthropic%20·%20OpenAI%20·%20Google%20·%20xAI%20·%20Groq%20·%20Mistral%20·%20Z.ai%20·%20Moonshot%20·%20Cerebras%20·%20Ollama%20·%20NEAR%20AI%20·%20Tinfoil-5b8def" alt="Providers" />
   <img src="https://img.shields.io/badge/built%20on-Vercel%20AI%20SDK-black" alt="Vercel AI SDK" />
 </p>
 
@@ -27,7 +27,7 @@ npx privateer-agent                                 # or run it instantly, nothi
 ```
 
 Switch between **OpenRouter**, **Anthropic**, **OpenAI**, **Google**, **xAI**, **Groq**,
-**Mistral**, **Z.ai** (GLM), **Moonshot** (Kimi), local **Ollama**, **NEAR AI** or **Tinfoil** (private TEE inference), and any **custom
+**Mistral**, **Z.ai** (GLM), **Moonshot** (Kimi), **Cerebras**, local **Ollama**, **NEAR AI** or **Tinfoil** (private TEE inference), and any **custom
 OpenAI-compatible endpoint** (LM Studio, vLLM, llama.cpp…) with one command. Built on the Vercel AI SDK, so tool-calling
 and streaming work identically across every provider — no model lock-in, no separate code paths.
 MCP servers, Claude Code-compatible skills, scheduled routines, and approval from your phone
@@ -133,6 +133,7 @@ export GROQ_API_KEY=gsk_...              # Groq (fast inference)
 export MISTRAL_API_KEY=...               # Mistral (EU-hosted)
 export ZAI_API_KEY=...                   # Z.ai (GLM; also Z_AI_API_KEY)
 export MOONSHOT_API_KEY=sk-...           # Moonshot (Kimi)
+export CEREBRAS_API_KEY=csk-...          # Cerebras (fast inference)
 export OLLAMA_BASE_URL=http://localhost:11434/api   # optional; defaults to this
 export NEAR_AI_API_KEY=...               # private TEE inference (cloud.near.ai)
 export TINFOIL_API_KEY=...               # private TEE inference (tinfoil.sh)
