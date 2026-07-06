@@ -175,6 +175,21 @@ test("cerebras listing requires a key", async () => {
   await assert.rejects(() => listModels("cerebras", {}), /no API key/);
 });
 
+test("deepseek lists via the OpenAI shape against the DeepSeek endpoint", async () => {
+  const calls = mockFetch({ data: [{ id: "deepseek-v4-pro" }, { id: "deepseek-v4-flash" }] });
+  const models = await listModels("deepseek", { apiKey: "sk-ds" });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["deepseek-v4-flash", "deepseek-v4-pro"],
+  );
+  assert.match(calls[0].url, /api\.deepseek\.com\/models$/);
+  assert.equal(calls[0].headers.authorization, "Bearer sk-ds");
+});
+
+test("deepseek listing requires a key", async () => {
+  await assert.rejects(() => listModels("deepseek", {}), /no API key/);
+});
+
 test("mistral listing keeps chat models, maps vision, sends a bearer token", async () => {
   const calls = mockFetch({
     data: [

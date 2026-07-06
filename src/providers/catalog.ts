@@ -84,6 +84,15 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     defaultModel: "cerebras:gpt-oss-120b",
     keyHint: "cloud.cerebras.ai → API Keys",
   },
+  deepseek: {
+    name: "deepseek",
+    label: "DeepSeek",
+    requiresKey: providerRequiresKey("deepseek"),
+    defaultModel: "deepseek:deepseek-v4-flash",
+    // Honest copy, per the privacy brand: DeepSeek's own policy says API data is
+    // stored on servers in China and may be used for training unless opted out.
+    keyHint: "platform.deepseek.com → API Keys (data stored in China; inputs may train models unless opted out)",
+  },
   tinfoil: {
     name: "tinfoil",
     label: "Tinfoil (private TEE inference)",

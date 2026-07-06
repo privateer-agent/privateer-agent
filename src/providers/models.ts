@@ -26,6 +26,7 @@ const DEFAULT_BASE: Record<ProviderName, string> = {
   zai: ZAI_BASE_URL,
   moonshot: "https://api.moonshot.ai/v1",
   cerebras: "https://api.cerebras.ai/v1",
+  deepseek: "https://api.deepseek.com",
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://localhost:11434/api",
   nearai: NEARAI_BASE_URL,
@@ -103,7 +104,8 @@ export async function listModels(name: ProviderName, cfg: ProviderConfig): Promi
     case "groq":
     case "zai":
     case "moonshot":
-    case "cerebras": {
+    case "cerebras":
+    case "deepseek": {
       // These all speak the OpenAI listing shape.
       if (!cfg.apiKey) throw new Error("no API key");
       const json = (await getJson(`${base}/models`, {
