@@ -70,6 +70,17 @@ let s = {}; try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
 if (s.quietStartup === undefined) { s.quietStartup = true; fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n"); }
 ' "$AGENT_DIR/settings.json" 2>/dev/null || true
 
-exec "$NODE_BIN" --env-file="$REPO/.env" "$CLI" \
-  --model "${PRIVATEER_MODEL:-openrouter/openai/gpt-4o-mini}" \
-  "$@"
+# Default model: when signed in to a Privateer account, default to GLM 5.1 on the
+# account's NEAR confidential-compute (TEE) channel — attestable, strongest privacy
+# tier. Otherwise (BYO key, no account) fall back to a cheap OpenRouter model. An
+# explicit PRIVATEER_MODEL always wins.
+CRED="${PRIVATEER_HOME:-$HOME/.privateer}/credentials.json"
+if [ -n "${PRIVATEER_MODEL:-}" ]; then
+  MODEL="$PRIVATEER_MODEL"
+elif [ -f "$CRED" ]; then
+  MODEL="privateer/near/zai-org/GLM-5.1-FP8"
+else
+  MODEL="openrouter/openai/gpt-4o-mini"
+fi
+
+exec "$NODE_BIN" --env-file="$REPO/.env" "$CLI" --model "$MODEL" "$@"
