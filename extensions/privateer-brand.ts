@@ -49,13 +49,14 @@ const YELLOW = `${ESC}33m`;
 // own model" meets lock-and-key privacy, echoing the app's anchor+padlock logo. Every
 // line is the same visible width (11) so the text column beside it stays aligned.
 const ANCHOR = [
-  "    .-.    ",
-  "   | o |   ",
-  "   |___|   ",
-  "  ---+---  ",
-  "     |     ",
-  "  \\  |  /  ",
-  "   \\_|_/   ",
+  "    .-.    ", // shackle arch
+  "   |   |   ", // shackle legs
+  "  .-----.  ", // lock body top (the shackle's base)
+  "  |  o  |  ", // lock body + keyhole
+  "  '--+--'  ", // lock body base, shank exits
+  "  ---+---  ", // stock (crossbar)
+  "  \\  |  /  ", // arms
+  "   \\_|_/   ", // flukes
 ];
 
 // Visible width = characters after stripping SGR escapes. Everything we render inside
@@ -89,8 +90,10 @@ function accountLine(modelProvider?: string): string {
 
 // Compose the framed banner: anchor column + text column, inside a rounded accent box.
 function renderBanner(width: number, modelProvider?: string): string[] {
-  // A leading blank vertically centers the wordmark against the taller lock-anchor mark.
+  // Leading blanks drop the text block so the wordmark sits beside the lock body and
+  // the shackle rises above it (one entry per anchor line — 8 total).
   const right = [
+    "",
     "",
     `${BOLD}${OCEAN_LIGHT}✻ ${OCEAN}P${OCEAN_LIGHT}RIVATEER${RESET}`,
     `${DIM}Chart your own course privately.${RESET}`,
