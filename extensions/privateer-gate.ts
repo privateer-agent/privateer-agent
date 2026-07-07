@@ -50,6 +50,19 @@ export default function privateerControl(pi: any): void {
   piRef = pi;
   gate(pi); // tool_call (block/allow) + tool_result (redact)
 
+  // Subagents (and print/rpc) run as headless child `pi` processes with no UI. There
+  // no one can approve, so a "default" gate would fail-closed on every tool and the
+  // subagent couldn't work. Instead switch to bypass: auto-approve within the agent's
+  // OWN restricted tool set (pi-subagents' per-role `tools:` allowlist), while
+  // decideAuto STILL forces dangerous shell / secret-exfil / destructive actions to
+  // "ask" → headless → denied. So delegation is gated in the parent (the spawn tool
+  // call), and the subagent is bounded by its role + danger detection. The TUI
+  // (mode "tui") keeps the interactive default gate.
+  pi.on("session_start", (_e: any, ctx: any) => {
+    const m = ctx?.mode;
+    if (m && m !== "tui" && (process.env.PRIVATEER_MODE ?? "") === "") mode = "bypass";
+  });
+
   // Forward turn events to the app. The relay only sends when a controller is
   // attached, so this is safe on every turn (local or remote).
   const adapter = createEngineEventAdapter();

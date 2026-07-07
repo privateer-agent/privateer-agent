@@ -16,6 +16,7 @@ import type { PermissionRequest } from "../permissions/gate.ts";
 import { ModeGate, type AskOutcome } from "../permissions/modeGate.ts";
 import { classifyToolCall } from "../permissions/classify.ts";
 import { redactText } from "../util/redact.ts";
+import { DEFAULT_DENYLIST } from "../permissions/danger.ts";
 
 // The per-tool_call hook context we read (structural subset of Pi's ctx — kept
 // local so the gate stays import-order-safe and unit-testable).
@@ -86,7 +87,10 @@ export async function decideToolCall(
     setMode: ctrl.setMode,
     allowlist: ctrl.allowlist,
     allowedOutsideRoots: ctrl.allowedOutsideRoots,
-    denylist: ctrl.denylist,
+    // Default to the built-in dangerous-command patterns so bypass / no-quarter /
+    // headless-subagent runs still force dangerous shell + secret-exfil to "ask"
+    // (→ headless deny). A controller can extend, but never silently disable, this.
+    denylist: ctrl.denylist ?? DEFAULT_DENYLIST,
     ask,
     getRemote: ctrl.getRemote,
     getNoQuarter: ctrl.getNoQuarter,

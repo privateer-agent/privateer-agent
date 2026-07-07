@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Launch Pi's full interactive TUI with the Privateer moat loaded as extensions —
-# the real UI (Phase 6). Pi provides transcript / editor / pickers / tool-approval;
-# our extensions provide the permission gate, the 20-provider surface + TEE/ZDR
-# attestation (pi-privacy), and the account channel.
+# Launch Pi's full interactive TUI with the Privateer moat + tool packs. The moat is
+# installed as re-export SHIMS in the agent dir's extensions/, so BOTH this TUI and
+# any subagents it spawns (which run as child `pi` processes reading the agent dir)
+# load the identical set — including our permission gate. So subagent tool calls are
+# gated too (the gate runs bypass-within-restricted-tools headlessly; danger.ts still
+# blocks destructive shell). One source of truth via discovery — no -e (which would
+# double-load vs discovery).
 #
 # Runs in the current directory. Model via PRIVATEER_MODEL=provider/id.
-# Symlink onto your PATH under any name (NOT `privateer` — that's the 0.2 CLI).
 set -euo pipefail
-# Resolve through symlinks (this is usually invoked via a PATH symlink) so REPO
-# points at the actual repo, not the symlink's directory.
+# Resolve through symlinks so REPO points at the real repo, not the symlink dir.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -28,16 +29,26 @@ pick_node() {
   echo "node"
 }
 
+AGENT_DIR="${PRIVATEER_HOME:-$HOME/.privateer}/agent"
+EXT_DIR="$AGENT_DIR/extensions"
+mkdir -p "$EXT_DIR"
+
+# Install/refresh the moat + tool-pack shims. Each shim re-exports its target by
+# ABSOLUTE path so the target's own relative imports resolve from the repo (a plain
+# symlink would resolve them relative to the shim's location and break).
+shim() { printf 'export { default } from "%s";\n' "$2" > "$EXT_DIR/$1.ts"; }
+shim privateer-gate    "$REPO/extensions/privateer-gate.ts"
+shim privateer-account "$REPO/extensions/privateer-account.ts"
+shim privateer-posture "$REPO/extensions/privateer-posture.ts"
+shim pi-privacy        "$REPO/node_modules/pi-privacy/extensions/pi-privacy.ts"
+shim pi-web-access     "$REPO/node_modules/pi-web-access/index.ts"
+shim pi-mcp-adapter    "$REPO/node_modules/pi-mcp-adapter/index.ts"
+shim pi-hypa           "$REPO/node_modules/@hypabolic/pi-hypa/extensions/index.ts"
+shim pi-subagents      "$REPO/node_modules/pi-subagents/src/extension/index.ts"
+
 CLI="$REPO/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
-export PI_CODING_AGENT_DIR="${PRIVATEER_HOME:-$HOME/.privateer}/agent"
+export PI_CODING_AGENT_DIR="$AGENT_DIR"
 
 exec "$(pick_node)" --env-file="$REPO/.env" "$CLI" \
-  -e "$REPO/extensions/privateer-gate.ts" \
-  -e "$REPO/extensions/privateer-account.ts" \
-  -e "$REPO/extensions/privateer-posture.ts" \
-  -e "$REPO/node_modules/pi-privacy/extensions/pi-privacy.ts" \
-  -e "$REPO/node_modules/pi-web-access/index.ts" \
-  -e "$REPO/node_modules/pi-mcp-adapter/index.ts" \
-  -e "$REPO/node_modules/@hypabolic/pi-hypa/extensions/index.ts" \
   --model "${PRIVATEER_MODEL:-openrouter/openai/gpt-4o-mini}" \
   "$@"
