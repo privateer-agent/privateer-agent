@@ -35,13 +35,19 @@ mkdir -p "$EXT_DIR"
 
 # Install/refresh the moat + tool-pack shims. Each shim re-exports its target by
 # ABSOLUTE path so the target's own relative imports resolve from the repo (a plain
-# symlink would resolve them relative to the shim's location and break).
+# symlink would resolve them relative to the shim's location and break). We remove
+# any shim we previously managed first, so a dropped package can't linger and reload.
+MANAGED="privateer-gate privateer-account privateer-posture pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
+for name in $MANAGED; do rm -f "$EXT_DIR/$name.ts"; done
 shim() { printf 'export { default } from "%s";\n' "$2" > "$EXT_DIR/$1.ts"; }
 shim privateer-gate    "$REPO/extensions/privateer-gate.ts"
 shim privateer-account "$REPO/extensions/privateer-account.ts"
 shim privateer-posture "$REPO/extensions/privateer-posture.ts"
 shim pi-privacy        "$REPO/node_modules/pi-privacy/extensions/pi-privacy.ts"
-shim pi-web-access     "$REPO/node_modules/pi-web-access/index.ts"
+# Privacy-aligned web tools: pluggable backends (SearXNG self-hosted = private; no
+# WebView). Pick the backend with /web-tools, or set SEARXNG_URL. Replaces
+# pi-web-access (opened a WebView + defaulted to Exa, a 3rd-party search).
+shim rpiv-web-tools    "$REPO/node_modules/@juicesharp/rpiv-web-tools/index.ts"
 shim pi-mcp-adapter    "$REPO/node_modules/pi-mcp-adapter/index.ts"
 shim pi-hypa           "$REPO/node_modules/@hypabolic/pi-hypa/extensions/index.ts"
 shim pi-subagents      "$REPO/node_modules/pi-subagents/src/extension/index.ts"

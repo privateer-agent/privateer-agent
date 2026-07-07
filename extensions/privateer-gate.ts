@@ -58,9 +58,15 @@ export default function privateerControl(pi: any): void {
   // "ask" → headless → denied. So delegation is gated in the parent (the spawn tool
   // call), and the subagent is bounded by its role + danger detection. The TUI
   // (mode "tui") keeps the interactive default gate.
+  // Explicit ALLOWLIST of headless run modes — never an "anything but tui" denylist,
+  // so an unexpected/undefined mode in the interactive TUI can't silently drop us into
+  // bypass (which would run tools ungated). Only switch when we're *sure* it's headless
+  // and the user hasn't pinned a mode via PRIVATEER_MODE.
+  const HEADLESS = new Set(["json", "print", "rpc"]);
   pi.on("session_start", (_e: any, ctx: any) => {
-    const m = ctx?.mode;
-    if (m && m !== "tui" && (process.env.PRIVATEER_MODE ?? "") === "") mode = "bypass";
+    if (ctx?.mode && HEADLESS.has(ctx.mode) && (process.env.PRIVATEER_MODE ?? "") === "") {
+      mode = "bypass";
+    }
   });
 
   // Forward turn events to the app. The relay only sends when a controller is
