@@ -55,7 +55,7 @@ const NON_GATED = new Set([
 // Read-ish builtins: gated ONLY when the target resolves outside scope.
 const READ_TOOLS = new Set(["read", "cat", "grep", "find", "glob", "ls", "tree", "view"]);
 const EDIT_TOOLS = new Set(["edit", "edit_file", "str_replace", "str_replace_editor", "apply_patch", "patch"]);
-const WRITE_TOOLS = new Set(["write", "write_file", "create_file", "create"]);
+const WRITE_TOOLS = new Set(["write", "write_file", "create_file", "create", "save_attachment"]);
 const BASH_TOOLS = new Set(["bash", "shell", "run", "exec", "sh"]);
 
 export function classifyToolCall(

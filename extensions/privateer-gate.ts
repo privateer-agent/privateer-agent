@@ -15,6 +15,8 @@ import { createEngineEventAdapter } from "../src/bridge/engineAdapter.ts";
 import { RemoteBridge } from "../src/remote/remoteBridge.ts";
 import { RelayClient } from "../src/remote/relayClient.ts";
 import { makeSendFileTool } from "../src/tools/sendFile.ts";
+import { makeSaveAttachmentTool } from "../src/tools/saveAttachment.ts";
+import { AttachmentStore, type StoredAttachment } from "../src/util/attachmentStore.ts";
 import * as priv from "../src/auth/privateer.ts";
 import type { PermissionMode } from "../src/config/permissionMode.ts";
 
@@ -28,10 +30,25 @@ const allowedOutsideRoots: string[] = [];
 let piRef: any = null;
 let relay: any = null;
 
+// Inbound app→CLI files land here (keyed by "#n"); save_attachment persists them.
+const attachments = new AttachmentStore();
+let sinceLastPrompt: StoredAttachment[] = [];
+
 const bridge = new RemoteBridge({
-  onPrompt: (text) => piRef?.sendUserMessage?.(text), // drive a turn in Pi's TUI
+  onPrompt: (text) => {
+    // Fold any files the app sent since the last prompt into a reference note so the
+    // model knows they exist and can save_attachment them.
+    const atts = sinceLastPrompt;
+    sinceLastPrompt = [];
+    const note = atts.length
+      ? `\n\n[Files attached from the app: ${atts.map((a) => `#${a.n} ${a.name} (${a.mediaType})`).join(", ")}. ` +
+        `Use the save_attachment tool with the ref number to write one to disk.]`
+      : "";
+    piRef?.sendUserMessage?.(text + note); // drive a turn in Pi's TUI
+  },
   onInterrupt: () => {}, // Pi owns interrupt; best-effort no-op
   onControllerAttached: () => relay?.sendSnapshot([{ kind: "notice", text: "Privateer terminal connected." }]),
+  onAttachment: (file) => sinceLastPrompt.push(attachments.register(file)),
   onStatus: () => {},
 });
 
@@ -51,9 +68,11 @@ export default function privateerControl(pi: any): void {
   piRef = pi;
   gate(pi); // tool_call (block/allow) + tool_result (redact)
 
-  // send_file_to_client: stream a disk file up to the connected app (via the bridge's
-  // relay). Lives here because it needs the same RemoteBridge as remote access.
+  // File transfer both ways: send_file_to_client (CLI→app, via the bridge's relay) and
+  // save_attachment (app→CLI, from the AttachmentStore inbound files land in). Both
+  // live here because they share the RemoteBridge / its attachment stream.
   pi.registerTool?.(makeSendFileTool(bridge));
+  pi.registerTool?.(makeSaveAttachmentTool(attachments));
 
   // Subagents (and print/rpc) run as headless child `pi` processes with no UI. There
   // no one can approve, so a "default" gate would fail-closed on every tool and the

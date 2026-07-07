@@ -40,6 +40,9 @@ export interface RemoteBridgeConfig {
   // A controller (re)attached — the owner should push a transcript snapshot.
   onControllerAttached?: () => void;
   onStatus?: (text: string) => void;
+  // A file finished transferring down from the app. The owner registers it (e.g. into
+  // an AttachmentStore) so the save_attachment tool can persist it.
+  onAttachment?: (file: RemoteAttachment) => void;
 }
 
 export class RemoteBridge {
@@ -78,7 +81,10 @@ export class RemoteBridge {
       this.relay?.sendNoQuarter(on); // echo the ack back so the app's toggle syncs
     },
     onControllerAttached: () => this.cfg.onControllerAttached?.(),
-    onAttachment: (file) => this.pendingAttachments.push(file),
+    onAttachment: (file) => {
+      this.pendingAttachments.push(file);
+      this.cfg.onAttachment?.(file);
+    },
     onStatus: (text) => this.cfg.onStatus?.(text),
     onDisconnected: () => {
       this.remote = false;
