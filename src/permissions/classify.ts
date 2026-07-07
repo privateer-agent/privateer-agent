@@ -69,6 +69,24 @@ export function classifyToolCall(
 
   if (NON_GATED.has(name)) return null;
 
+  // Creating a routine is a persistent mutation; surface the trigger + delivery, and
+  // force a human decision (alwaysAsk) when it grants off-machine egress.
+  if (name === "create_routine" || name === "routine") {
+    const label = str(obj.name) || "routine";
+    const trigger = obj.cron ? `cron ${str(obj.cron)}` : obj.at ? `at ${str(obj.at)}` : "(no trigger)";
+    const delivery = Array.isArray(obj.delivery) ? (obj.delivery as unknown[]).map(String) : ["file"];
+    const egress: string[] = [];
+    if (delivery.includes("email")) egress.push("email leaves the machine");
+    if (delivery.some((d) => d.startsWith("webhook:"))) egress.push("posts to a webhook off-machine");
+    return {
+      tool: toolName,
+      kind: "write",
+      title: "Create routine",
+      detail: `${label}: ${trigger} → ${delivery.join(",")}${egress.length ? ` [${egress.join("] [")}]` : ""}`,
+      alwaysAsk: egress.length > 0,
+    };
+  }
+
   // Shell — the whole command is the detail (danger scanning runs on it).
   if (BASH_TOOLS.has(name)) {
     const command = str(obj.command ?? obj.cmd ?? obj.script);

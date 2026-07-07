@@ -72,6 +72,18 @@ test("allowedOutsideRoots suppress the outside flag", () => {
   assert.equal(r?.outside, false);
 });
 
+test("create_routine → write-kind, trigger detail, email/webhook forces alwaysAsk", () => {
+  const r = classifyToolCall("create_routine", { name: "brief", cron: "0 8 * * *", delivery: ["file"] }, scope);
+  assert.equal(r?.kind, "write");
+  assert.match(r!.title, /Create routine/);
+  assert.match(r!.detail, /brief.*cron 0 8/);
+  assert.ok(!r?.alwaysAsk); // file delivery → no off-machine egress
+  const email = classifyToolCall("create_routine", { name: "y", at: "2026-01-01T00:00:00", delivery: ["email"] }, scope);
+  assert.equal(email?.alwaysAsk, true); // email egress must reach the human, above bypass
+  const hook = classifyToolCall("create_routine", { name: "z", cron: "* * * * *", delivery: ["webhook:slack"] }, scope);
+  assert.equal(hook?.alwaysAsk, true);
+});
+
 test("confineToCwd:false disables outside gating", () => {
   const s = { cwd: CWD, confineToCwd: false };
   assert.equal(isOutsideScope(s, "/anywhere/a.ts"), false);
