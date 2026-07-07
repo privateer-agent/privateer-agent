@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.log
+.privateer/
+.DS_Store
+
+# Reference checkouts (pi source, etc.) — never published
+.reference/
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+
+# Spike/scratch working dirs
+work/
