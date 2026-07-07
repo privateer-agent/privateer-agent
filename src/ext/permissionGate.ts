@@ -1,100 +1,175 @@
 // The permission gate — the safe-by-default moat, as a Pi extension.
 //
-// Promoted from the inline gate in ../../ pi-spike/spike-b.mjs (spike-B proven:
-// a `pi.on("tool_call")` handler SUSPENDS the turn while an approval round-trips,
-// deny blocks the tool, allow lets it run). This is the Phase-2 skeleton; the
-// full policy (tree-cli/src/permissions/{gate,danger,protected,mode,uiGate}.ts)
-// ports into `decide` in Phase 2 — local path → ctx.ui, remote path → await the
-// relay — per docs/pi-migration-plan.md §2 Phase 2.
+// Phase 2. Ties together the ported policy: a `tool_call` hook classifies the
+// call (./…/classify.ts), runs it through the ModeGate policy engine
+// (./…/modeGate.ts → decideAuto), and blocks the tool when the decision is deny.
+// The gate SUSPENDS the turn while an approval is pending (spike-B proven), routes
+// to a LOCAL prompt (ctx.ui) or a REMOTE approver (the relay, Phase 4), and is
+// FAIL-CLOSED: any throw, timeout, or abort blocks the tool. A `tool_result` hook
+// redacts secrets from output before it reaches the model / relay.
 //
-// Fail-closed is the invariant: any throw, timeout, or missing decider blocks the
-// tool. That is also Pi's own default, and we never weaken it.
+// The load-bearing decision path is `decideToolCall`, kept pure and Pi-free so the
+// ported tests exercise it without a live session.
 
-export type PermissionDecision = "allow" | "deny";
+import type { PermissionMode } from "../config/permissionMode.ts";
+import type { PermissionRequest } from "../permissions/gate.ts";
+import { ModeGate, type AskOutcome } from "../permissions/modeGate.ts";
+import { classifyToolCall } from "../permissions/classify.ts";
+import { redactText } from "../util/redact.ts";
 
-export interface GateRequest {
-  tool: string;
-  input: unknown;
+// The per-tool_call hook context we read (structural subset of Pi's ctx — kept
+// local so the gate stays import-order-safe and unit-testable).
+export interface ToolCallCtx {
+  signal?: AbortSignal;
+  hasUI?: boolean;
+  mode?: "tui" | "rpc" | "json" | "print" | string;
+  ui?: {
+    select?: (opts: {
+      message: string;
+      options: Array<{ label: string; value: string }>;
+    }) => Promise<string | undefined>;
+    confirm?: (opts: { message: string }) => Promise<boolean>;
+  };
 }
 
-// Injected decision source. Phase 2 supplies two concrete deciders:
-//   - local:  prompt via ctx.ui and return the user's choice
-//   - remote: send an approval_request over RelayClient and await the response
-// `signal` lets a hung remote approver be aborted so it can't wedge the turn.
-export type Decider = (
-  req: GateRequest,
-  signal?: AbortSignal,
-) => Promise<PermissionDecision>;
-
-export interface GateOptions {
-  decide: Decider;
-  // Optional redactor applied to tool results before they leave the process
-  // (ported from tree-cli/src/util/redact.ts in Phase 2). Identity by default.
-  redact?: (text: string) => string;
-  // Hard ceiling on how long we wait for a decision before failing closed.
+// Session-scoped state + askers. Mutable fields (mode/allowlist/allowedOutsideRoots)
+// persist across tool_calls; the askers are invoked per call.
+export interface GateController {
+  getMode(): PermissionMode;
+  setMode(mode: PermissionMode): void;
+  allowlist: string[];
+  allowedOutsideRoots: string[];
+  denylist?: string[];
+  cwd: string;
+  confineToCwd?: boolean;
+  getRemote?(): boolean;
+  getNoQuarter?(): boolean;
+  // Local interactive approval via the per-call ctx. Default provided below.
+  localAsk(req: PermissionRequest, ctx: ToolCallCtx): Promise<AskOutcome>;
+  // Remote (relay) approval. Optional until Phase 4; when absent, a remote turn
+  // falls back to localAsk.
+  remoteAsk?(req: PermissionRequest, signal?: AbortSignal): Promise<AskOutcome>;
+  // Secret redactor for tool output. Defaults to redactText.
+  redact?(text: string): string;
+  // Hard ceiling on waiting for a decision before failing closed.
   approvalTimeoutMs?: number;
 }
 
-// Minimal structural view of the Pi extension API this handler uses. Kept local
-// (not a hard Pi import) so the gate stays import-order-safe and testable; the
-// real types are asserted by the ported tests in Phase 2.
-interface PiExtensionApi {
-  on(
-    event: "tool_call",
-    handler: (
-      event: { toolName: string; input: unknown },
-      ctx: { signal?: AbortSignal },
-    ) => Promise<{ block: true; reason: string } | undefined>,
-  ): void;
-  on(
-    event: "tool_result",
-    handler: (
-      event: {
-        toolName: string;
-        toolCallId: string;
-        // Content parts sent back to the model — NOT a bare string. The hook
-        // returns a partial patch; omitted fields keep their current values.
-        content: Array<{ type: string; text?: string; [k: string]: unknown }>;
-        details?: unknown;
-        isError?: boolean;
-      },
-      ctx: unknown,
-    ) => { content?: unknown[] } | undefined,
-  ): void;
+export interface GateBlock {
+  block: true;
+  reason: string;
 }
 
-// Build the extension factory. Usage: extensionFactories: [makePermissionGate({ decide })]
-export function makePermissionGate(opts: GateOptions) {
-  const { decide, redact = (t) => t, approvalTimeoutMs } = opts;
+// THE decision path. Classify → policy → decision, fail-closed on any error.
+// Returns a block directive to deny, or undefined to let the tool run.
+export async function decideToolCall(
+  ctrl: GateController,
+  toolName: string,
+  input: unknown,
+  ctx: ToolCallCtx,
+): Promise<GateBlock | undefined> {
+  const req = classifyToolCall(toolName, input, {
+    cwd: ctrl.cwd,
+    confineToCwd: ctrl.confineToCwd,
+    allowedOutsideRoots: ctrl.allowedOutsideRoots,
+  });
+  if (!req) return undefined; // no gate needed — read-only/in-scope/meta
+
+  // Route the ask: a remote-driven turn goes to the relay approver (if wired),
+  // otherwise the local UI. ModeGate decides *whether* to ask; this decides *who*.
+  const ask = (r: PermissionRequest): Promise<AskOutcome> =>
+    ctrl.getRemote?.() && ctrl.remoteAsk
+      ? ctrl.remoteAsk(r, ctx.signal)
+      : ctrl.localAsk(r, ctx);
+
+  const gate = new ModeGate({
+    getMode: ctrl.getMode,
+    setMode: ctrl.setMode,
+    allowlist: ctrl.allowlist,
+    allowedOutsideRoots: ctrl.allowedOutsideRoots,
+    denylist: ctrl.denylist,
+    ask,
+    getRemote: ctrl.getRemote,
+    getNoQuarter: ctrl.getNoQuarter,
+  });
+
+  let decision: "allow" | "deny";
+  try {
+    decision = await withTimeout(gate.request(req), ctrl.approvalTimeoutMs, ctx.signal);
+  } catch (err) {
+    // Fail closed: a thrown/aborted/timed-out approval blocks the tool.
+    return {
+      block: true,
+      reason: `Approval unavailable (${(err as Error)?.message ?? "error"}) — blocked by default`,
+    };
+  }
+  if (decision === "deny") {
+    return { block: true, reason: `${req.title} denied by permission gate` };
+  }
+  return undefined;
+}
+
+// Default local asker: prompt via ctx.ui when a UI is present; fail closed
+// (deny) when headless (no UI) — the gate is the real safety, never auto-trust.
+// TODO(verify) the exact ctx.ui.select/confirm API shape against Pi when the TUI
+// is wired (Phase 6); coded defensively for now.
+export async function defaultLocalAsk(req: PermissionRequest, ctx: ToolCallCtx): Promise<AskOutcome> {
+  if (!ctx.hasUI || !ctx.ui) return "deny";
+  const message = `${req.title}: ${req.detail}`;
+  if (typeof ctx.ui.select === "function") {
+    const choice = await ctx.ui.select({
+      message,
+      options: [
+        { label: "Allow once", value: "allow" },
+        { label: "Allow and remember", value: "always" },
+        { label: "Deny", value: "deny" },
+      ],
+    });
+    return choice === "allow" || choice === "always" || choice === "deny" ? choice : "deny";
+  }
+  if (typeof ctx.ui.confirm === "function") {
+    return (await ctx.ui.confirm({ message })) ? "allow" : "deny";
+  }
+  return "deny";
+}
+
+// Build the extension factory. Pass to DefaultResourceLoader({ extensionFactories }).
+export function makePermissionGate(ctrl: GateController) {
+  const redact = ctrl.redact ?? redactText;
+  if (!ctrl.localAsk) ctrl.localAsk = defaultLocalAsk;
+
+  // Structural view of the Pi extension API surface we use (documented at
+  // pi.dev/docs/latest/extensions).
+  interface PiExtensionApi {
+    on(
+      event: "tool_call",
+      handler: (
+        event: { toolName: string; toolCallId: string; input: unknown },
+        ctx: ToolCallCtx,
+      ) => Promise<GateBlock | undefined>,
+    ): void;
+    on(
+      event: "tool_result",
+      handler: (
+        event: {
+          toolName: string;
+          toolCallId: string;
+          content: Array<{ type: string; text?: string; [k: string]: unknown }>;
+          details?: unknown;
+          isError?: boolean;
+        },
+        ctx: unknown,
+      ) => { content?: unknown[] } | undefined,
+    ): void;
+  }
 
   return function permissionGate(pi: PiExtensionApi): void {
-    pi.on("tool_call", async (event, ctx) => {
-      let decision: PermissionDecision;
-      try {
-        decision = await withTimeout(
-          decide({ tool: event.toolName, input: event.input }, ctx.signal),
-          approvalTimeoutMs,
-          ctx.signal,
-        );
-      } catch (err) {
-        // Fail closed: a thrown decider, an abort, or a timeout blocks the tool.
-        return {
-          block: true,
-          reason: `Approval unavailable (${(err as Error)?.message ?? "error"}) — blocked by default`,
-        };
-      }
-      if (decision !== "allow") {
-        return { block: true, reason: "Denied by permission gate" };
-      }
-      // allow → undefined lets execution proceed.
-      return undefined;
-    });
+    pi.on("tool_call", (event, ctx) => decideToolCall(ctrl, event.toolName, event.input, ctx));
 
     // Redact secrets from tool output before it reaches the model / relay.
-    // tool_result delivers content PARTS (per the Pi extension contract, doc:
-    // /docs/latest/extensions), not a bare string — patch text parts and return
-    // a partial { content }; omitted fields keep their current values. Phase 2
-    // swaps `redact` for the real redactText.
+    // tool_result delivers content PARTS (per the Pi extension contract), not a
+    // bare string — patch text parts and return a partial { content }; omitted
+    // fields keep their current values.
     pi.on("tool_result", (event) => {
       let touched = false;
       const content = event.content.map((part) => {
@@ -110,11 +185,7 @@ export function makePermissionGate(opts: GateOptions) {
   };
 }
 
-function withTimeout<T>(
-  p: Promise<T>,
-  ms: number | undefined,
-  signal?: AbortSignal,
-): Promise<T> {
+function withTimeout<T>(p: Promise<T>, ms: number | undefined, signal?: AbortSignal): Promise<T> {
   if (!ms && !signal) return p;
   return new Promise<T>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined;

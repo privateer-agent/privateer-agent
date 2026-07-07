@@ -1,0 +1,78 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { classifyToolCall, isOutsideScope } from "../src/permissions/classify.ts";
+
+// The NEW glue for the Pi rewrite: map a Pi tool_call { toolName, input } to a
+// PermissionRequest (or null when no gate is needed). Pure — no live session.
+
+const CWD = "/work/proj";
+const scope = { cwd: CWD };
+
+test("bash → bash-kind with the command as detail", () => {
+  const r = classifyToolCall("bash", { command: "rm -rf /" }, scope);
+  assert.equal(r?.kind, "bash");
+  assert.equal(r?.detail, "rm -rf /");
+});
+
+test("write inside cwd → write-kind, not outside, not protected", () => {
+  const r = classifyToolCall("write", { path: "src/a.ts", content: "x" }, scope);
+  assert.equal(r?.kind, "write");
+  assert.equal(r?.outside, false);
+  assert.equal(r?.protected, false);
+  assert.equal(r?.path, "/work/proj/src/a.ts");
+});
+
+test("write to a protected file → protected flag set", () => {
+  const r = classifyToolCall("write", { path: ".env" }, scope);
+  assert.equal(r?.protected, true);
+});
+
+test("edit outside cwd → outside flag + absolute path detail", () => {
+  const r = classifyToolCall("edit", { file_path: "/elsewhere/a.ts" }, scope);
+  assert.equal(r?.kind, "edit");
+  assert.equal(r?.outside, true);
+  assert.equal(r?.path, "/elsewhere/a.ts");
+  assert.equal(r?.detail, "/elsewhere/a.ts");
+});
+
+test("read inside scope → null (no gate)", () => {
+  assert.equal(classifyToolCall("read", { path: "src/a.ts" }, scope), null);
+});
+
+test("read outside scope → read-kind outside request", () => {
+  const r = classifyToolCall("read", { path: "/etc/hosts" }, scope);
+  assert.equal(r?.kind, "read");
+  assert.equal(r?.outside, true);
+});
+
+test("grep with no path → null (in-cwd, no gate)", () => {
+  assert.equal(classifyToolCall("grep", { pattern: "TODO" }, scope), null);
+});
+
+test("web fetch → fetch-kind with url detail", () => {
+  const r = classifyToolCall("web_fetch", { url: "https://x.dev" }, scope);
+  assert.equal(r?.kind, "fetch");
+  assert.equal(r?.detail, "https://x.dev");
+});
+
+test("known meta tool (todo) → null", () => {
+  assert.equal(classifyToolCall("todowrite", { items: [] }, scope), null);
+});
+
+test("unknown/custom tool → safe-by-default bash-kind ask", () => {
+  const r = classifyToolCall("some_mcp_tool", { foo: 1 }, scope);
+  assert.equal(r?.kind, "bash"); // asks in default, denies in plan
+  assert.equal(r?.tool, "some_mcp_tool");
+});
+
+test("allowedOutsideRoots suppress the outside flag", () => {
+  const s = { cwd: CWD, allowedOutsideRoots: ["/elsewhere"] };
+  assert.equal(isOutsideScope(s, "/elsewhere/a.ts"), false);
+  const r = classifyToolCall("edit", { path: "/elsewhere/a.ts" }, s);
+  assert.equal(r?.outside, false);
+});
+
+test("confineToCwd:false disables outside gating", () => {
+  const s = { cwd: CWD, confineToCwd: false };
+  assert.equal(isOutsideScope(s, "/anywhere/a.ts"), false);
+});

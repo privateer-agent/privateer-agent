@@ -13,19 +13,25 @@ need zero changes**; this is a CLI-only re-host.
 
 Full plan and file-by-file disposition: [`docs/pi-migration-plan.md`](docs/pi-migration-plan.md).
 
-## Status — Phase 1 skeleton
+## Status — Phases 1–2 verified
 
-Scaffold + the two load-bearing seams promoted from the de-risking spike
-(`../pi-spike`, both risks spike-verified 2026-07-07):
+Scaffold + the load-bearing seams, promoted from the de-risking spike
+(`../pi-spike`) and the 0.2 codebase (`../tree-cli`), each verified live:
 
 | Module | Role | Source |
 |---|---|---|
 | `src/boot.ts` | Pins `PI_CODING_AGENT_DIR` + installs the attestation dispatcher **before any Pi import** | new (the ordering contract) |
 | `src/attest/dispatcher.ts` | Out-of-band undici global dispatcher; captures enclave TLS SPKI hash | `pi-spike/spike-a.mjs` |
 | `src/bridge/engineAdapter.ts` | Pi `session.subscribe` events → privateer `EngineEvent`s | `pi-spike/adapter.mjs` |
-| `src/ext/permissionGate.ts` | `pi.on("tool_call")` gate, fail-closed, local + remote deciders | `pi-spike/spike-b.mjs` |
 | `src/session.ts` | Thin headless session wrapper → `subscribeAsEngineEvents()` | Phase 1 |
 | `src/engine/events.ts` | The `EngineEvent` relay wire vocabulary | KEEP from `tree-cli` |
+| `src/permissions/{mode,modeGate,danger,protected}.ts` | The safe-by-default policy engine (mode/allowlist/remote/no-quarter) | KEEP/ADAPT from `tree-cli` |
+| `src/permissions/classify.ts` | Pi `tool_call` `{toolName,input}` → `PermissionRequest` (new glue) | Phase 2 |
+| `src/ext/permissionGate.ts` | `pi.on("tool_call")` gate: classify → policy → block; fail-closed; local `ctx.ui` + remote relay deciders; `tool_result` redaction | Phase 2 |
+
+**Verify:** `npm test` (43 pure tests: policy + classify + fail-closed/routing) on
+Node ≥ 22, plus two live smokes — `scripts/smoke-headless.ts` (Phase 1 adapter) and
+`scripts/smoke-gate.ts` (Phase 2 gate blocks/permits a real `tool_call`).
 
 ## The one rule: boot before Pi
 
