@@ -1,12 +1,20 @@
-// The permission gate as a standalone Pi extension, for loading into Pi's own
-// interactive TUI via `-e`. Reuses makePermissionGate; approvals render through
-// Pi's native UI (ctx.ui) via defaultLocalAsk. A /mode command toggles the mode.
+// The Privateer control extension for Pi's TUI (Phase 6): the permission gate PLUS
+// remote access, so the app can drive the real TUI (not just the lean REPL).
 //
-// This is how the moat rides on Pi's full TUI (Phase 6) instead of a hand-built one:
-// Pi provides transcript/editor/pickers/approval-UI; our extension provides the
-// safe-by-default policy.
+//   - gate: tool_call → block/allow via Pi's native approval UI (ctx.ui); /mode command.
+//   - remote access: /remote-access on connects the relay; the bridge routes the
+//     gate's approvals to the phone (getRemote/remoteAsk) and drives turns from app
+//     prompts (pi.sendUserMessage). Turn events forward to the app via the adapter —
+//     the same pi.on(...) stream the adapter already speaks.
+//
+// The gate + bridge share one extension so the gate's remote branch and the relay
+// are wired to the same state.
 
 import { makePermissionGate, defaultLocalAsk } from "../src/ext/permissionGate.ts";
+import { createEngineEventAdapter } from "../src/bridge/engineAdapter.ts";
+import { RemoteBridge } from "../src/remote/remoteBridge.ts";
+import { RelayClient } from "../src/remote/relayClient.ts";
+import * as priv from "../src/auth/privateer.ts";
 import type { PermissionMode } from "../src/config/permissionMode.ts";
 
 const MODES: PermissionMode[] = ["default", "acceptEdits", "bypass", "plan"];
@@ -16,6 +24,16 @@ let mode: PermissionMode = MODES.includes(process.env.PRIVATEER_MODE as Permissi
 const allowlist: string[] = [];
 const allowedOutsideRoots: string[] = [];
 
+let piRef: any = null;
+let relay: any = null;
+
+const bridge = new RemoteBridge({
+  onPrompt: (text) => piRef?.sendUserMessage?.(text), // drive a turn in Pi's TUI
+  onInterrupt: () => {}, // Pi owns interrupt; best-effort no-op
+  onControllerAttached: () => relay?.sendSnapshot([{ kind: "notice", text: "Privateer terminal connected." }]),
+  onStatus: () => {},
+});
+
 const gate = makePermissionGate({
   getMode: () => mode,
   setMode: (m) => (mode = m),
@@ -23,10 +41,31 @@ const gate = makePermissionGate({
   allowedOutsideRoots,
   cwd: process.cwd(),
   localAsk: defaultLocalAsk,
+  getRemote: bridge.getRemote,
+  getNoQuarter: bridge.getNoQuarter,
+  remoteAsk: bridge.remoteAsk,
 });
 
-export default function privateerGate(pi: any): void {
-  gate(pi); // wires the tool_call (block/allow) + tool_result (redact) hooks
+export default function privateerControl(pi: any): void {
+  piRef = pi;
+  gate(pi); // tool_call (block/allow) + tool_result (redact)
+
+  // Forward turn events to the app. The relay only sends when a controller is
+  // attached, so this is safe on every turn (local or remote).
+  const adapter = createEngineEventAdapter();
+  const fwd = (ev: any) => {
+    for (const ee of adapter.toEngineEvents(ev)) bridge.forwardEvent(ee);
+  };
+  pi.on("message_update", (ev: any) => fwd(ev));
+  pi.on("tool_execution_start", (ev: any) => fwd(ev));
+  pi.on("tool_execution_end", (ev: any) => fwd(ev));
+  pi.on("turn_end", (ev: any) => fwd(ev));
+  // A remote-initiated agent run ends here → clear the remote flag so a later
+  // locally-typed turn isn't treated as remote.
+  pi.on("agent_end", (ev: any) => {
+    fwd(ev);
+    bridge.settleTurn();
+  });
 
   pi.registerCommand?.("mode", {
     description: "Show or set the permission mode: default | acceptEdits | bypass | plan",
@@ -35,6 +74,24 @@ export default function privateerGate(pi: any): void {
       if (m && MODES.includes(m)) mode = m;
       else if (m) return ctx.ui?.notify?.(`unknown mode "${m}" — use ${MODES.join(" | ")}`, "warning");
       ctx.ui?.notify?.(`permission mode: ${mode}`, "info");
+    },
+  });
+
+  pi.registerCommand?.("remote-access", {
+    description: "Drive this terminal from the Privateer app: /remote-access on | off",
+    handler: async (args: string, ctx: any) => {
+      const off = String(args ?? "").trim().toLowerCase() === "off";
+      if (off) {
+        relay?.stop();
+        relay = null;
+        return ctx.ui?.notify?.("remote access off", "info");
+      }
+      if (relay) return ctx.ui?.notify?.("remote access already on", "info");
+      if (!priv.hasCredentials()) return ctx.ui?.notify?.("Not signed in to Privateer.", "warning");
+      relay = new RelayClient(bridge.callbacks, { label: "privateer-cli" });
+      bridge.attachRelay(relay);
+      await relay.start();
+      ctx.ui?.notify?.("Remote access on — approve this terminal in the Privateer app, then drive it from there.", "info");
     },
   });
 }
