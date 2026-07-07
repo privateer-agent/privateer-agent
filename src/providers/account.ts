@@ -18,6 +18,7 @@ import {
   spawnAccountCredentials,
   refreshAccountCredentials,
 } from "../auth/privateer.ts";
+import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 
 // Fallback model if the account listing can't be reached (kept from the 0.2 catalog
 // default — a NEAR confidential-compute model, the strongest privacy tier).
@@ -80,6 +81,42 @@ export const privateerOAuthProvider = {
     return creds.access;
   },
 };
+
+// Which privacy channel an account model routes through: NEAR confidential-compute
+// (TEE, attestable) for `near/`-prefixed ids, else a server-side ZDR channel.
+// Ported from tree-cli resolve.ts.
+export function privateerChannel(modelId: string): "tee" | "zdr" {
+  return modelId.startsWith("near/") ? "tee" : "zdr";
+}
+
+export interface AccountPosture {
+  tier: PrivacyTier;
+  teePosture?: "green" | "yellow" | "red";
+  error?: string;
+}
+
+// Posture for an account-channel model. NEAR models are cryptographically verified
+// via the server-proxy attestation (the account's NEAR key stays server-side; the
+// server mints the nonce and returns the report, which we interpret exactly like a
+// direct attestation). ZDR-channel models route to zero-retention endpoints
+// server-side, which we can't observe from here — honestly a policy claim.
+export async function accountPosture(modelId: string): Promise<AccountPosture> {
+  if (privateerChannel(modelId) === "zdr") {
+    return { tier: "zdr-policy" };
+  }
+  try {
+    const res = await authedFetch(
+      `${serverBaseUrl()}/api/models/near/attestation?model=${encodeURIComponent(modelId)}`,
+    );
+    if (!res.ok) return { tier: "tee-unverified", error: `HTTP ${res.status}` };
+    const data = (await res.json()) as { nonce?: string; report?: unknown };
+    const att = interpretReport(modelId, data.nonce ?? "", data.report ?? {});
+    const tp = teePosture(att);
+    return { tier: tierFromTeePosture(tp), teePosture: tp };
+  } catch (e) {
+    return { tier: "tee-unverified", error: (e as Error).message };
+  }
+}
 
 // Extension factory: registers the account provider (with its live model list) when
 // a machine login exists. No login → nothing registered (BYO-key only).

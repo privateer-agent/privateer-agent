@@ -26,7 +26,7 @@ async function main() {
   const { RemoteBridge } = await import("../remote/remoteBridge.ts");
   const { RelayClient } = await import("../remote/relayClient.ts");
   const priv = await import("../auth/privateer.ts");
-  const { makeAccountProvider } = await import("../providers/account.ts");
+  const { makeAccountProvider, accountPosture } = await import("../providers/account.ts");
 
   const spec = process.env.PRIVATEER_MODEL ?? "openrouter/openai/gpt-4o-mini";
   const slash = spec.indexOf("/");
@@ -154,9 +154,14 @@ async function main() {
   });
 
   async function showPosture() {
-    const res = await verifyModelPosture(provider, modelId, {
-      apiKey: provider === "nearai" ? process.env.NEARAI_API_KEY ?? process.env.NEAR_AI_API_KEY : undefined,
-    });
+    // The account channel has its own posture (server-proxy attestation for near/,
+    // ZDR policy otherwise); other providers go through pi-privacy.
+    const res =
+      provider === "privateer"
+        ? await accountPosture(modelId)
+        : await verifyModelPosture(provider, modelId, {
+            apiKey: provider === "nearai" ? process.env.NEARAI_API_KEY ?? process.env.NEAR_AI_API_KEY : undefined,
+          });
     const t = TIERS[res.tier];
     const color = t.posture === "green" ? GREEN : t.posture === "yellow" ? YELLOW : DIM;
     console.log(`\n${color}⛉ ${t.label}${RESET} ${DIM}(${res.tier}${res.teePosture ? "/" + res.teePosture : ""}) — ${t.blurb}${RESET}${res.error ? `\n${RED}  ${res.error}${RESET}` : ""}`);
