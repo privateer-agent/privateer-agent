@@ -37,14 +37,16 @@ mkdir -p "$EXT_DIR"
 # ABSOLUTE path so the target's own relative imports resolve from the repo (a plain
 # symlink would resolve them relative to the shim's location and break). We remove
 # any shim we previously managed first, so a dropped package can't linger and reload.
-MANAGED="privateer-gate privateer-account privateer-posture privateer-tools pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
+MANAGED="privateer-gate privateer-account privateer-posture privateer-tools privateer-privacy pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
 for name in $MANAGED; do rm -f "$EXT_DIR/$name.ts"; done
 shim() { printf 'export { default } from "%s";\n' "$2" > "$EXT_DIR/$1.ts"; }
 shim privateer-gate    "$REPO/extensions/privateer-gate.ts"
 shim privateer-account "$REPO/extensions/privateer-account.ts"
 shim privateer-posture "$REPO/extensions/privateer-posture.ts"
 shim privateer-tools   "$REPO/extensions/privateer-tools.ts"
-shim pi-privacy        "$REPO/node_modules/pi-privacy/extensions/pi-privacy.ts"
+# pi-privacy wrapped with the account-channel tier resolver (privateer/near… = TEE),
+# so it replaces loading pi-privacy's default entry.
+shim privateer-privacy "$REPO/extensions/privateer-privacy.ts"
 # Privacy-aligned web tools: pluggable backends (SearXNG self-hosted = private; no
 # WebView). Pick the backend with /web-tools, or set SEARXNG_URL. Replaces
 # pi-web-access (opened a WebView + defaulted to Exa, a 3rd-party search).
