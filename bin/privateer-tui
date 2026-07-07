@@ -34,6 +34,7 @@ export PI_CODING_AGENT_DIR="${PRIVATEER_HOME:-$HOME/.privateer}/agent"
 exec "$(pick_node)" --env-file="$REPO/.env" "$CLI" \
   -e "$REPO/extensions/privateer-gate.ts" \
   -e "$REPO/extensions/privateer-account.ts" \
+  -e "$REPO/extensions/privateer-posture.ts" \
   -e "$REPO/node_modules/pi-privacy/extensions/pi-privacy.ts" \
   --model "${PRIVATEER_MODEL:-openrouter/openai/gpt-4o-mini}" \
   "$@"
