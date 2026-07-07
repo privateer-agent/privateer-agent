@@ -43,10 +43,26 @@ never Pi. Keep it that way.
 
 ## Develop
 
+**Requires Node ≥ 22.19.0.** This is a hard floor for the whole Pi stack, not
+just the TUI: `pi-coding-agent`'s bundled undici calls `webidl.util.markAsUncloneable`,
+which only exists on Node ≥ 22, so it throws at import on Node 20. `.nvmrc` pins it.
+
 ```sh
+nvm use          # -> 22.19.0
 npm install
 npm run typecheck
 npm start        # prints the resolved boot state (Phase 1 skeleton)
 ```
 
-Requires Node ≥ 20.
+### Phase 1 live verify
+
+Drives a real headless turn through boot → session → adapter and asserts the
+`EngineEvent` stream shape. Needs an `OPENROUTER_API_KEY` in a gitignored `.env`:
+
+```sh
+PRIVATEER_HOME=./tests/fixtures node --env-file=.env --import tsx scripts/smoke-headless.ts
+```
+
+Two legs (text-only, tool-call) against `openrouter/openai/gpt-4o-mini`; asserts
+`text/usage/finish` and `tool-call → tool-result` ordering. Verified 2026-07-07
+against Pi 0.80.3 — the adapter's core event-name mappings match.

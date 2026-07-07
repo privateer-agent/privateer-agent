@@ -46,7 +46,7 @@
     "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.3",

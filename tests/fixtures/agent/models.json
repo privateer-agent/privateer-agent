@@ -1,0 +1,20 @@
+{
+  "providers": {
+    "openrouter": {
+      "name": "OpenRouter",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "api": "openai-completions",
+      "apiKey": "${OPENROUTER_API_KEY}",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "openai/gpt-4o-mini",
+          "name": "GPT-4o mini (via OpenRouter)",
+          "contextWindow": 128000,
+          "maxTokens": 4096,
+          "input": ["text"]
+        }
+      ]
+    }
+  }
+}
