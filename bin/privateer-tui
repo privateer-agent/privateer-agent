@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Launch Pi's full interactive TUI with the Privateer moat loaded as extensions —
+# the real UI (Phase 6). Pi provides transcript / editor / pickers / tool-approval;
+# our extensions provide the permission gate, the 20-provider surface + TEE/ZDR
+# attestation (pi-privacy), and the account channel.
+#
+# Runs in the current directory. Model via PRIVATEER_MODEL=provider/id.
+# Symlink onto your PATH under any name (NOT `privateer` — that's the 0.2 CLI).
+set -euo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+pick_node() {
+  if command -v node >/dev/null 2>&1 \
+     && node -e 'process.exit((+process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
+    command -v node; return
+  fi
+  for c in "$HOME"/.nvm/versions/node/v22*/bin/node; do
+    [ -x "$c" ] && { echo "$c"; return; }
+  done
+  echo "node"
+}
+
+CLI="$REPO/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+export PI_CODING_AGENT_DIR="${PRIVATEER_HOME:-$HOME/.privateer}/agent"
+
+exec "$(pick_node)" --env-file="$REPO/.env" "$CLI" \
+  -e "$REPO/extensions/privateer-gate.ts" \
+  -e "$REPO/extensions/privateer-account.ts" \
+  -e "$REPO/node_modules/pi-privacy/extensions/pi-privacy.ts" \
+  --model "${PRIVATEER_MODEL:-openrouter/openai/gpt-4o-mini}" \
+  "$@"
