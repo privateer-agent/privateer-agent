@@ -49,9 +49,17 @@ interface PiExtensionApi {
   on(
     event: "tool_result",
     handler: (
-      event: { toolName: string; result: unknown },
+      event: {
+        toolName: string;
+        toolCallId: string;
+        // Content parts sent back to the model — NOT a bare string. The hook
+        // returns a partial patch; omitted fields keep their current values.
+        content: Array<{ type: string; text?: string; [k: string]: unknown }>;
+        details?: unknown;
+        isError?: boolean;
+      },
       ctx: unknown,
-    ) => unknown,
+    ) => { content?: unknown[] } | undefined,
   ): void;
 }
 
@@ -82,13 +90,22 @@ export function makePermissionGate(opts: GateOptions) {
       return undefined;
     });
 
-    // Redact secrets from tool output before it can leave the process (relay /
-    // transcript). Phase 2 swaps `redact` for the real redactText.
+    // Redact secrets from tool output before it reaches the model / relay.
+    // tool_result delivers content PARTS (per the Pi extension contract, doc:
+    // /docs/latest/extensions), not a bare string — patch text parts and return
+    // a partial { content }; omitted fields keep their current values. Phase 2
+    // swaps `redact` for the real redactText.
     pi.on("tool_result", (event) => {
-      if (typeof event.result === "string") {
-        return { ...event, result: redact(event.result) };
-      }
-      return undefined;
+      let touched = false;
+      const content = event.content.map((part) => {
+        if (typeof part.text === "string") {
+          const red = redact(part.text);
+          if (red !== part.text) touched = true;
+          return { ...part, text: red };
+        }
+        return part;
+      });
+      return touched ? { content } : undefined;
     });
   };
 }
