@@ -1,0 +1,134 @@
+// The wiring between the relay and the rest of the agent — NEW code for the Pi
+// rewrite. It connects three things that were built to meet here:
+//   - the Phase-1 adapter's EngineEvents  → up to the app (relay.sendEvent)
+//   - the Phase-2 gate's remote branch    → each tool relayed to the app for
+//     allow/deny via `remoteAsk` + `getRemote` (the slots makePermissionGate stubbed)
+//   - the app's prompts/interrupts        → down into the turn loop (cfg callbacks)
+//
+// The RelayClient itself is KEEP (verbatim 0.2); this bridge is the only new part,
+// so it's what the tests exercise (against a fake relay). Fail-closed throughout:
+// no controller, a disconnect, or an aborted turn all resolve a pending approval
+// to "deny".
+
+import { randomUUID } from "node:crypto";
+import type { EngineEvent } from "../engine/events.ts";
+import type { PermissionRequest } from "../permissions/gate.ts";
+import type { AskOutcome } from "../permissions/modeGate.ts";
+import type { RelayCallbacks } from "./relayClient.ts";
+
+// The outbound surface the bridge needs; RelayClient implements all of it.
+export interface RelayLike {
+  requestApproval(id: string, req: PermissionRequest): void;
+  sendEvent(ev: EngineEvent): void;
+  isConnected(): boolean;
+  sendNoQuarter(on: boolean): void;
+}
+
+export interface RemoteAttachment {
+  name: string;
+  mediaType: string;
+  base64: string;
+}
+
+export interface RemoteBridgeConfig {
+  // A prompt arrived from the app — drive the turn loop (tagged remote). Any files
+  // the app sent ahead of the prompt ride along.
+  onPrompt: (text: string, attachments: RemoteAttachment[]) => void;
+  onInterrupt?: () => void;
+  onTerminate?: () => void;
+  // A controller (re)attached — the owner should push a transcript snapshot.
+  onControllerAttached?: () => void;
+  onStatus?: (text: string) => void;
+}
+
+export class RemoteBridge {
+  private relay?: RelayLike;
+  private remote = false;
+  private noQuarter = false;
+  private readonly pending = new Map<string, (d: AskOutcome) => void>();
+  private pendingAttachments: RemoteAttachment[] = [];
+
+  constructor(private readonly cfg: RemoteBridgeConfig) {}
+
+  // Wire the outbound relay once it's constructed (RelayClient needs `callbacks`
+  // at construction, so the relay is attached right after).
+  attachRelay(relay: RelayLike): void {
+    this.relay = relay;
+  }
+
+  // Hand this to `new RelayClient(bridge.callbacks)`. Typed Required so every hook
+  // (including the ones RelayCallbacks marks optional) is defined — the bridge wires
+  // them all.
+  readonly callbacks: Required<RelayCallbacks> = {
+    onPrompt: (text) => {
+      this.remote = true; // a remote turn is now in flight → gate relays each action
+      const attachments = this.pendingAttachments;
+      this.pendingAttachments = [];
+      this.cfg.onPrompt(text, attachments);
+    },
+    onInterrupt: () => this.cfg.onInterrupt?.(),
+    onTerminate: () => this.cfg.onTerminate?.(),
+    onApprovalResponse: (id, decision) => {
+      const resolve = this.pending.get(id);
+      if (resolve) resolve(decision);
+    },
+    onNoQuarter: (on) => {
+      this.noQuarter = on;
+      this.relay?.sendNoQuarter(on); // echo the ack back so the app's toggle syncs
+    },
+    onControllerAttached: () => this.cfg.onControllerAttached?.(),
+    onAttachment: (file) => this.pendingAttachments.push(file),
+    onStatus: (text) => this.cfg.onStatus?.(text),
+    onDisconnected: () => {
+      this.remote = false;
+      // Any approval waiting on a now-gone controller fails closed.
+      this.rejectAllPending();
+    },
+  };
+
+  // ── gate hooks (passed into the GateController) ─────────────────────────────
+
+  getRemote = (): boolean => this.remote;
+  getNoQuarter = (): boolean => this.noQuarter;
+
+  // The gate's remote approver: relay the request to the app and await its
+  // allow/deny. Fail closed if no controller, on abort, or on disconnect. (The gate
+  // also wraps this in its own timeout, so a silent app can't wedge the turn.)
+  remoteAsk = (req: PermissionRequest, signal?: AbortSignal): Promise<AskOutcome> => {
+    if (!this.relay || !this.relay.isConnected()) return Promise.resolve("deny");
+    const id = randomUUID();
+    return new Promise<AskOutcome>((resolve) => {
+      const onAbort = () => settle("deny");
+      const settle = (d: AskOutcome) => {
+        this.pending.delete(id);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(d);
+      };
+      this.pending.set(id, settle);
+      if (signal) {
+        if (signal.aborted) return onAbort();
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.relay!.requestApproval(id, req);
+    });
+  };
+
+  // ── turn lifecycle + event forwarding ───────────────────────────────────────
+
+  // Mark the end of a turn so the next (possibly local) turn isn't treated as
+  // remote. Call after each driven turn completes.
+  settleTurn(): void {
+    this.remote = false;
+  }
+
+  // Forward an EngineEvent up to the app. Safe to call for every event of every
+  // turn (local included) — the relay only sends when a socket is open.
+  forwardEvent(ev: EngineEvent): void {
+    this.relay?.sendEvent(ev);
+  }
+
+  private rejectAllPending(): void {
+    for (const resolve of this.pending.values()) resolve("deny");
+    this.pending.clear();
+  }
+}
