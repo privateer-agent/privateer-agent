@@ -36,14 +36,16 @@ function seedModel(id: string) {
   };
 }
 
-// Fetch the account channel's live model list (OpenAI-compat /models), authed with a
-// child session. Falls back to DEFAULT_MODELS on any failure.
+// Fetch the account channel's enabled model catalog. `GET /api/models` is the server's
+// public list of billable models (`{ models: [{ modelId }] }`) — the same set the app
+// shows. (The `/api/agent/v1` base only implements chat/completions, no /models route.)
+// Falls back to DEFAULT_MODELS on any failure.
 export async function fetchAccountModels(): Promise<string[]> {
   try {
-    const res = await authedFetch(`${serverBaseUrl()}/api/agent/v1/models`);
+    const res = await fetch(`${serverBaseUrl()}/api/models`);
     if (!res.ok) return DEFAULT_MODELS;
-    const data = (await res.json()) as { data?: { id?: string }[] };
-    const ids = (data.data ?? []).map((m) => m.id).filter((x): x is string => !!x);
+    const data = (await res.json()) as { models?: { modelId?: string }[] };
+    const ids = (data.models ?? []).map((m) => m.modelId).filter((x): x is string => !!x);
     return ids.length ? ids : DEFAULT_MODELS;
   } catch {
     return DEFAULT_MODELS;
@@ -118,20 +120,35 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
   }
 }
 
-// Extension factory: registers the account provider (with its live model list) when
-// a machine login exists. No login → nothing registered (BYO-key only).
+// Extension factory: registers the account provider when a machine login exists. No
+// login → nothing registered (BYO-key only).
+//
+// Registration is SYNCHRONOUS (seeded with the fallback), then refined once the live
+// catalog is fetched. This matters: Pi flushes provider registrations made during the
+// synchronous extension-init pass before it binds extensions, so the `privateer`
+// provider (and its OAuth login path) exist immediately — before the model picker can
+// open. If we instead awaited the network fetch first, the registration could land
+// after the picker built its list, and privateer models would be missing until reopen.
+// registerProvider replaces the provider's models on the second call, and the picker's
+// refresh() re-applies registered providers, so the full list appears once fetched.
 export function makeAccountProvider() {
-  return async (pi: {
+  return (pi: {
     registerProvider?: (name: string, config: unknown) => void;
-  }): Promise<void> => {
+  }): void => {
     if (!hasCredentials() || typeof pi.registerProvider !== "function") return;
-    const ids = await fetchAccountModels();
-    pi.registerProvider("privateer", {
-      name: "Privateer account",
-      baseUrl: `${serverBaseUrl()}/api/agent/v1`,
-      api: "openai-completions",
-      oauth: privateerOAuthProvider,
-      models: ids.map(seedModel),
-    });
+    const register = (ids: string[]): void =>
+      pi.registerProvider!("privateer", {
+        name: "Privateer account",
+        baseUrl: `${serverBaseUrl()}/api/agent/v1`,
+        api: "openai-completions",
+        oauth: privateerOAuthProvider,
+        models: ids.map(seedModel),
+      });
+    register(DEFAULT_MODELS); // immediate: provider exists this tick
+    void fetchAccountModels()
+      .then((ids) => ids.length && register(ids)) // refine to the live catalog
+      .catch(() => {
+        /* keep the fallback model */
+      });
   };
 }

@@ -59,7 +59,17 @@ shim pi-subagents      "$REPO/node_modules/pi-subagents/src/extension/index.ts"
 
 CLI="$REPO/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 export PI_CODING_AGENT_DIR="$AGENT_DIR"
+NODE_BIN="$(pick_node)"
 
-exec "$(pick_node)" --env-file="$REPO/.env" "$CLI" \
+# Quiet Pi's built-in startup resource listing ([Extensions]/[Context]/[Skills]/…) by
+# default — our banner is the intended startup surface, and the extension list is noise.
+# Only set it when unset, so a later `--verbose` or a user's own settings toggle sticks.
+"$NODE_BIN" -e '
+const fs = require("fs"), p = process.argv[1];
+let s = {}; try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+if (s.quietStartup === undefined) { s.quietStartup = true; fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n"); }
+' "$AGENT_DIR/settings.json" 2>/dev/null || true
+
+exec "$NODE_BIN" --env-file="$REPO/.env" "$CLI" \
   --model "${PRIVATEER_MODEL:-openrouter/openai/gpt-4o-mini}" \
   "$@"
