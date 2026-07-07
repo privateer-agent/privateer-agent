@@ -7,7 +7,15 @@
 # Runs in the current directory. Model via PRIVATEER_MODEL=provider/id.
 # Symlink onto your PATH under any name (NOT `privateer` — that's the 0.2 CLI).
 set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve through symlinks (this is usually invoked via a PATH symlink) so REPO
+# points at the actual repo, not the symlink's directory.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [ "${SOURCE#/}" = "$SOURCE" ] && SOURCE="$DIR/$SOURCE"
+done
+REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
 pick_node() {
   if command -v node >/dev/null 2>&1 \

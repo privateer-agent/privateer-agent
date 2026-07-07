@@ -4,7 +4,14 @@
 # Symlink this onto your PATH under whatever name you like (it does NOT have to be
 # `pv`), e.g.:  ln -s "$PWD/bin/pv" /usr/local/bin/pv
 set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve through symlinks so REPO points at the real repo, not the symlink dir.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [ "${SOURCE#/}" = "$SOURCE" ] && SOURCE="$DIR/$SOURCE"
+done
+REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
 pick_node() {
   if command -v node >/dev/null 2>&1 \
