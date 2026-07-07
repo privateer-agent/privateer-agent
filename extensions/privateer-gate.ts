@@ -14,6 +14,7 @@ import { makePermissionGate, defaultLocalAsk } from "../src/ext/permissionGate.t
 import { createEngineEventAdapter } from "../src/bridge/engineAdapter.ts";
 import { RemoteBridge } from "../src/remote/remoteBridge.ts";
 import { RelayClient } from "../src/remote/relayClient.ts";
+import { makeSendFileTool } from "../src/tools/sendFile.ts";
 import * as priv from "../src/auth/privateer.ts";
 import type { PermissionMode } from "../src/config/permissionMode.ts";
 
@@ -49,6 +50,10 @@ const gate = makePermissionGate({
 export default function privateerControl(pi: any): void {
   piRef = pi;
   gate(pi); // tool_call (block/allow) + tool_result (redact)
+
+  // send_file_to_client: stream a disk file up to the connected app (via the bridge's
+  // relay). Lives here because it needs the same RemoteBridge as remote access.
+  pi.registerTool?.(makeSendFileTool(bridge));
 
   // Subagents (and print/rpc) run as headless child `pi` processes with no UI. There
   // no one can approve, so a "default" gate would fail-closed on every tool and the

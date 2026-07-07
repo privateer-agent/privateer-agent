@@ -23,6 +23,7 @@ function makeFakeRelay() {
     sendEvent(ev) { events.push(ev); },
     isConnected() { return connected; },
     sendNoQuarter(on) { noQuarter.push(on); },
+    async sendFile() { return { ok: connected }; },
   };
   return relay;
 }

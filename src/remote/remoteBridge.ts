@@ -22,6 +22,7 @@ export interface RelayLike {
   sendEvent(ev: EngineEvent): void;
   isConnected(): boolean;
   sendNoQuarter(on: boolean): void;
+  sendFile(file: { name: string; mediaType: string; base64: string; size: number }): Promise<{ ok: boolean; reason?: string }>;
 }
 
 export interface RemoteAttachment {
@@ -125,6 +126,17 @@ export class RemoteBridge {
   // turn (local included) — the relay only sends when a socket is open.
   forwardEvent(ev: EngineEvent): void {
     this.relay?.sendEvent(ev);
+  }
+
+  // Is a controller actually reachable right now? (Relay socket open.)
+  isConnected(): boolean {
+    return !!this.relay?.isConnected();
+  }
+
+  // Stream a file up to the connected app (the send_file_to_client tool).
+  async sendFile(file: { name: string; mediaType: string; base64: string; size: number }): Promise<{ ok: boolean; reason?: string }> {
+    if (!this.relay) return { ok: false, reason: "remote access is not enabled" };
+    return this.relay.sendFile(file);
   }
 
   private rejectAllPending(): void {
