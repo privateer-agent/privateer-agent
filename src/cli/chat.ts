@@ -23,6 +23,9 @@ async function main() {
   const { makePermissionGate } = await import("../ext/permissionGate.ts");
   const { makePiPrivacyExtension, verifyModelPosture, TIERS } = await import("pi-privacy");
   const { agentDir } = await import("../config/paths.ts");
+  const { RemoteBridge } = await import("../remote/remoteBridge.ts");
+  const { RelayClient } = await import("../remote/relayClient.ts");
+  const priv = await import("../auth/privateer.ts");
 
   const spec = process.env.PRIVATEER_MODEL ?? "openrouter/openai/gpt-4o-mini";
   const slash = spec.indexOf("/");
@@ -46,7 +49,41 @@ async function main() {
       });
     });
 
-  // The gate, approved from the terminal. default mode → every mutation/shell asks.
+  // Session + remote state, declared up front so the gate and the relay bridge can
+  // reference them (they're assigned/used later, only at runtime).
+  let session: any = null;
+  let relay: any = null;
+  let turnActive = false;
+
+  // The relay bridge: wires the app (when /remote-access is on) to the same gate +
+  // turn loop. Its gate hooks (getRemote/remoteAsk) are handed to the gate below,
+  // so a remote-driven turn relays each tool to the phone instead of the terminal.
+  const bridge = new RemoteBridge({
+    onPrompt: (text) => void runTurn(text, true),
+    onInterrupt: () => void session?.abort?.(),
+    onControllerAttached: () => relay?.sendSnapshot([]),
+    onStatus: (t) => console.log(`\n${DIM}⟿ ${t}${RESET}`),
+  });
+
+  // Serialize turns so a remote prompt and a locally-typed one can't overlap.
+  async function runTurn(text: string, remote: boolean): Promise<void> {
+    if (turnActive) {
+      console.log(`\n${DIM}(busy — a turn is already running)${RESET}`);
+      return;
+    }
+    turnActive = true;
+    if (remote) console.log(`\n${DIM}⟿ [app] ${text.slice(0, 80)}${RESET}`);
+    try {
+      await session.prompt(text);
+    } catch (e) {
+      console.log(`\n${RED}${(e as Error).message}${RESET}`);
+    } finally {
+      turnActive = false;
+      if (remote) bridge.settleTurn();
+    }
+  }
+
+  // The gate: local terminal approval, plus the remote branch via the bridge.
   let mode: "default" | "acceptEdits" | "bypass" | "plan" = "default";
   const gate: GateController = {
     getMode: () => mode,
@@ -58,6 +95,9 @@ async function main() {
       const a = (await ask(`\n${YELLOW}⚠ Allow ${req.title}: ${req.detail}?${RESET} [y/N/a] `)).trim().toLowerCase();
       return a === "y" || a === "yes" ? "allow" : a === "a" || a === "always" ? "always" : "deny";
     },
+    getRemote: bridge.getRemote,
+    getNoQuarter: bridge.getNoQuarter,
+    remoteAsk: bridge.remoteAsk,
   };
 
   console.log(`${DIM}privateer-agent — lean REPL. Loading ${provider}/${modelId}…${RESET}`);
@@ -79,16 +119,18 @@ async function main() {
     process.exit(1);
   }
 
-  const { session } = await createAgentSessionFromServices({
+  ({ session } = await createAgentSessionFromServices({
     services,
     sessionManager: SessionManager.inMemory(cwd),
     model,
-  } as any);
+  } as any));
 
-  // Stream the turn as EngineEvents.
+  // Stream the turn as EngineEvents — printed locally AND forwarded to the app
+  // (the relay only sends when a controller is attached, so this is safe always).
   const adapter = createEngineEventAdapter();
   session.subscribe((ev: any) => {
     for (const ee of adapter.toEngineEvents(ev)) {
+      bridge.forwardEvent(ee);
       if (ee.type === "text") process.stdout.write(ee.text);
       else if (ee.type === "reasoning") process.stdout.write(`${DIM}${ee.text}${RESET}`);
       else if (ee.type === "tool-call") process.stdout.write(`\n${CYAN}⏺ ${ee.name}${RESET} ${DIM}${JSON.stringify(ee.input).slice(0, 120)}${RESET}\n`);
@@ -108,13 +150,50 @@ async function main() {
     console.log(`\n${color}⛉ ${t.label}${RESET} ${DIM}(${res.tier}${res.teePosture ? "/" + res.teePosture : ""}) — ${t.blurb}${RESET}${res.error ? `\n${RED}  ${res.error}${RESET}` : ""}`);
   }
 
-  console.log(`${DIM}Ready. Type a prompt. Commands: /models [filter]  /verify  /mode <default|acceptEdits|bypass|plan>  /quit${RESET}`);
+  async function remoteAccess(on: boolean) {
+    if (on) {
+      if (relay) return console.log(`${DIM}remote access already on${RESET}`);
+      if (!priv.hasCredentials()) return console.log(`${RED}Not signed in.${RESET} Run /login first.`);
+      relay = new RelayClient(bridge.callbacks, { label: "privateer-cli" });
+      bridge.attachRelay(relay);
+      await relay.start();
+      console.log(`${DIM}Remote access enabling — approve this terminal in the Privateer app, then drive it from there.${RESET}`);
+    } else {
+      relay?.stop();
+      relay = null;
+      console.log(`${DIM}remote access off${RESET}`);
+    }
+  }
+
+  async function login() {
+    console.log(`${DIM}Requesting a device code…${RESET}`);
+    try {
+      const user = await priv.runDeviceLogin({
+        onCode: (code: any) => {
+          console.log(`\n${CYAN}Approve this terminal in the Privateer app:${RESET}`);
+          console.log(`  code: ${YELLOW}${code.user_code}${RESET}`);
+          if (code.verification_uri_complete) console.log(`  or open: ${DIM}${code.verification_uri_complete}${RESET}`);
+          console.log(`${DIM}  waiting for approval…${RESET}`);
+        },
+      });
+      console.log(`${GREEN}Signed in as ${user.email ?? user.id}.${RESET}`);
+    } catch (e) {
+      console.log(`${RED}${(e as Error).message}${RESET}`);
+    }
+  }
+
+  const HELP = "Commands: /remote-access <on|off>  /login  /models [filter]  /verify  /mode <…>  /quit";
+  console.log(`${DIM}Ready. Type a prompt. ${HELP}${RESET}`);
   await showPosture();
 
   for (;;) {
     const line = (await ask(`\n${CYAN}›${RESET} `)).trim();
     if (line === "/quit" || line === "/exit") break;
     if (line === "/verify") { await showPosture(); continue; }
+    if (line === "/remote-access" || line === "/remote-access on" || line === "/remote") { await remoteAccess(true); continue; }
+    if (line === "/remote-access off") { await remoteAccess(false); continue; }
+    if (line === "/login") { await login(); continue; }
+    if (line === "/help" || line === "?") { console.log(`${DIM}${HELP}${RESET}`); continue; }
     if (line.startsWith("/models")) {
       const filter = line.slice(7).trim().toLowerCase();
       const all: any[] = (services.modelRegistry as any).getAvailable ? await (services.modelRegistry as any).getAvailable() : [];
@@ -124,12 +203,9 @@ async function main() {
     }
     if (line.startsWith("/mode ")) { mode = line.slice(6).trim() as typeof mode; console.log(`${DIM}mode → ${mode}${RESET}`); continue; }
     if (!line) continue;
-    try {
-      await session.prompt(line);
-    } catch (e) {
-      console.log(`\n${RED}${(e as Error).message}${RESET}`);
-    }
+    await runTurn(line, false);
   }
+  relay?.stop();
   rl.close();
   console.log(`${DIM}bye.${RESET}`);
   process.exit(0);
