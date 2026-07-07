@@ -23,12 +23,11 @@ export interface ToolCallCtx {
   signal?: AbortSignal;
   hasUI?: boolean;
   mode?: "tui" | "rpc" | "json" | "print" | string;
+  // Pi's ExtensionUIContext shape (verified against pi-coding-agent 0.80):
+  // select(title, options: string[]) → chosen string | undefined; confirm(title, message).
   ui?: {
-    select?: (opts: {
-      message: string;
-      options: Array<{ label: string; value: string }>;
-    }) => Promise<string | undefined>;
-    confirm?: (opts: { message: string }) => Promise<boolean>;
+    select?: (title: string, options: string[], opts?: unknown) => Promise<string | undefined>;
+    confirm?: (title: string, message: string, opts?: unknown) => Promise<boolean>;
   };
 }
 
@@ -113,22 +112,21 @@ export async function decideToolCall(
 // (deny) when headless (no UI) — the gate is the real safety, never auto-trust.
 // TODO(verify) the exact ctx.ui.select/confirm API shape against Pi when the TUI
 // is wired (Phase 6); coded defensively for now.
+const ALLOW_ONCE = "Allow once";
+const ALLOW_ALWAYS = "Allow and remember";
+const DENY = "Deny";
+
 export async function defaultLocalAsk(req: PermissionRequest, ctx: ToolCallCtx): Promise<AskOutcome> {
-  if (!ctx.hasUI || !ctx.ui) return "deny";
-  const message = `${req.title}: ${req.detail}`;
+  if (!ctx.hasUI || !ctx.ui) return "deny"; // headless → fail closed
+  const title = `${req.title}: ${req.detail}`;
   if (typeof ctx.ui.select === "function") {
-    const choice = await ctx.ui.select({
-      message,
-      options: [
-        { label: "Allow once", value: "allow" },
-        { label: "Allow and remember", value: "always" },
-        { label: "Deny", value: "deny" },
-      ],
-    });
-    return choice === "allow" || choice === "always" || choice === "deny" ? choice : "deny";
+    const choice = await ctx.ui.select(title, [ALLOW_ONCE, ALLOW_ALWAYS, DENY]);
+    if (choice === ALLOW_ONCE) return "allow";
+    if (choice === ALLOW_ALWAYS) return "always";
+    return "deny"; // Deny, or cancel (undefined)
   }
   if (typeof ctx.ui.confirm === "function") {
-    return (await ctx.ui.confirm({ message })) ? "allow" : "deny";
+    return (await ctx.ui.confirm("Permission", title)) ? "allow" : "deny";
   }
   return "deny";
 }
