@@ -36,5 +36,8 @@ exec "$(pick_node)" --env-file="$REPO/.env" "$CLI" \
   -e "$REPO/extensions/privateer-account.ts" \
   -e "$REPO/extensions/privateer-posture.ts" \
   -e "$REPO/node_modules/pi-privacy/extensions/pi-privacy.ts" \
+  -e "$REPO/node_modules/pi-web-access/index.ts" \
+  -e "$REPO/node_modules/pi-mcp-adapter/index.ts" \
+  -e "$REPO/node_modules/@hypabolic/pi-hypa/extensions/index.ts" \
   --model "${PRIVATEER_MODEL:-openrouter/openai/gpt-4o-mini}" \
   "$@"
