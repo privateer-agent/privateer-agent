@@ -59,7 +59,7 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.7.1",
     "pi-mcp-adapter": "^2.11.0",
-    "pi-privacy": "file:../pi-privacy",
+    "pi-privacy": "^0.2.0",
     "pi-subagents": "^0.34.0",
     "picomatch": "^4.0.4",
     "tsx": "^4.16.0",
