@@ -29,9 +29,16 @@ Scaffold + the load-bearing seams, promoted from the de-risking spike
 | `src/permissions/classify.ts` | Pi `tool_call` `{toolName,input}` → `PermissionRequest` (new glue) | Phase 2 |
 | `src/ext/permissionGate.ts` | `pi.on("tool_call")` gate: classify → policy → block; fail-closed; local `ctx.ui` + remote relay deciders; `tool_result` redaction | Phase 2 |
 
-**Verify:** `npm test` (43 pure tests: policy + classify + fail-closed/routing) on
-Node ≥ 22, plus two live smokes — `scripts/smoke-headless.ts` (Phase 1 adapter) and
-`scripts/smoke-gate.ts` (Phase 2 gate blocks/permits a real `tool_call`).
+The **attestation moat lives in the [`pi-privacy`](../pi-privacy) package** (the
+publishable TEE/ZDR providers + posture engine); privateer-agent depends on it
+(`file:../pi-privacy`) — `boot.ts` installs its dispatcher pre-Pi, and its
+extension registers providers / verifies posture.
+
+**Verify:** `npm test` (43 pure tests) on Node ≥ 22, plus live smokes —
+`scripts/smoke-headless.ts` (Phase 1 adapter), `scripts/smoke-gate.ts` (Phase 2
+gate), and `scripts/smoke-integration.ts` (Phase 3: gate + pi-privacy extension +
+a real Tinfoil turn → the inference connection's SPKI is verified against the
+enclave's attestation report = **tee-verified/green**).
 
 ## The one rule: boot before Pi
 

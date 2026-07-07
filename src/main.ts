@@ -11,7 +11,7 @@ import "./boot.ts";
 async function main() {
   // Only import Pi-touching / config code AFTER boot has run.
   const { agentDir, globalDir } = await import("./config/paths.ts");
-  const { capturedHosts } = await import("./attest/dispatcher.ts");
+  const { capturedHosts } = await import("pi-privacy/attest");
 
   const home = globalDir();
   const agent = process.env.PI_CODING_AGENT_DIR ?? agentDir();

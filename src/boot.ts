@@ -19,7 +19,11 @@
 // of ESM hoisting. Keep this file dependency-light and import-order-safe.
 
 import { agentDir } from "./config/paths.ts";
-import { installAttestationDispatcher } from "./attest/dispatcher.ts";
+// The attestation dispatcher now lives in the pi-privacy package (the publishable
+// moat). boot still installs it pre-Pi as belt-and-suspenders; the package's
+// extension would also install it at extension-init (idempotent — same module
+// instance, so the captured-cert map is shared).
+import { installAttestationDispatcher } from "pi-privacy/attest";
 
 // (1) Pin Pi's agent dir under the privateer home. `??=` so an explicit
 // PI_CODING_AGENT_DIR from the environment still wins (tests, power users).

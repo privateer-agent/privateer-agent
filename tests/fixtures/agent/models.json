@@ -15,6 +15,22 @@
           "input": ["text"]
         }
       ]
+    },
+    "tinfoil": {
+      "name": "Tinfoil (private TEE inference)",
+      "baseUrl": "https://inference.tinfoil.sh/v1",
+      "api": "openai-completions",
+      "apiKey": "${TINFOIL_API_KEY}",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "llama3-3-70b",
+          "name": "Llama 3.3 70B (Tinfoil TEE)",
+          "contextWindow": 128000,
+          "maxTokens": 4096,
+          "input": ["text"]
+        }
+      ]
     }
   }
 }

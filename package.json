@@ -52,6 +52,7 @@
     "@earendil-works/pi-coding-agent": "^0.80.3",
     "@earendil-works/pi-ai": "^0.80.3",
     "@earendil-works/pi-tui": "^0.80.3",
+    "pi-privacy": "file:../pi-privacy",
     "typebox": "^1.3.4",
     "undici": "^7.28.0",
     "ws": "^8.21.0",

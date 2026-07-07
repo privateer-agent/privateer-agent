@@ -30,9 +30,7 @@ process.env.PI_CODING_AGENT_DIR ??= path.join(
 // NOTE: importing these pulls in pi-coding-agent (and thus pi-ai/undici) at module
 // top level — exactly the "Pi already imported" precondition we're testing under.
 const { createSession } = await import("../src/session.ts");
-const { installAttestationDispatcher, capturedHosts } = await import(
-  "../src/attest/dispatcher.ts"
-);
+const { installAttestationDispatcher, capturedHosts } = await import("pi-privacy/attest");
 
 const WORK = "/private/tmp/claude-501/pv-extspike-work";
 
