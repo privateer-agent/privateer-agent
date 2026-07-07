@@ -29,24 +29,34 @@ const VERSION: string = (() => {
   }
 })();
 
-// ── palette (Privateer CLI identity: indigo accent + cyan, on dark) ──────────
+// ── palette (Privateer "Open Water" ocean-blue brand) ────────────────────────
+// 256-color (8-bit), NOT 24-bit truecolor: macOS Terminal.app doesn't support
+// truecolor and mangles it (the old indigo/cyan came out green). These indices are
+// universally supported. Navy (the logo mark) is too dark to read on a dark terminal,
+// so we use the app's ocean blues — the same "Open Water" gradient as the brand.
 const ESC = "\x1b[";
 const RESET = `${ESC}0m`;
 const BOLD = `${ESC}1m`;
-function truecolor(h: string): string {
-  const n = parseInt(h.slice(1), 16);
-  return `${ESC}38;2;${(n >> 16) & 255};${(n >> 8) & 255};${n & 255}m`;
-}
-const INDIGO = truecolor("#5c7cfa"); // the single Privateer accent hue
-const CYAN = truecolor("#22d3ee"); // on-dark highlight (the welcome mark)
+const c = (n: number): string => `${ESC}38;5;${n}m`;
+const OCEAN = c(39); // ≈ #00afff — primary ocean blue (anchor, wordmark "P")
+const OCEAN_LIGHT = c(81); // ≈ #5fd7ff — light sky accent (wordmark, version, path)
+const BORDER = c(32); // ≈ #0087d7 — deeper ocean, the frame
 const DIM = `${ESC}90m`;
 const GREEN = `${ESC}32m`;
 const YELLOW = `${ESC}33m`;
 
-// Anchor motif in ASCII — the Privateer mark (ring, stock, shank, flukes). Kept to
-// width-1 glyphs so the framed banner aligns on every terminal (no wide emoji inside).
-const ANCHOR = ["    .-.    ", "    '_'    ", "   --|--   ", "     |     ", "  \\  |  /  ", "   \\_|_/   "];
-const ANCHOR_W = 11;
+// The Privateer mark in ASCII: a padlock (with keyhole) atop an anchor — "bring your
+// own model" meets lock-and-key privacy, echoing the app's anchor+padlock logo. Every
+// line is the same visible width (11) so the text column beside it stays aligned.
+const ANCHOR = [
+  "    .-.    ",
+  "   | o |   ",
+  "   |___|   ",
+  "  ---+---  ",
+  "     |     ",
+  "  \\  |  /  ",
+  "   \\_|_/   ",
+];
 
 // Visible width = characters after stripping SGR escapes. Everything we render inside
 // the box is ASCII or a BMP width-1 symbol, so a plain length is exact here.
@@ -69,35 +79,37 @@ function accountLine(modelProvider?: string): string {
   const u = priv.currentUser();
   if (u) {
     const label = u.email ?? (u.solanaPublicKey ? u.solanaPublicKey.slice(0, 6) + "…" : u.id);
-    return `${GREEN}connected${DIM} as ${RESET}${INDIGO}${label}${RESET}`;
+    return `${GREEN}connected${DIM} as ${RESET}${OCEAN_LIGHT}${label}${RESET}`;
   }
   if (modelProvider === "privateer") {
     return `${YELLOW}not signed in · /signin to use this model${RESET}`;
   }
-  return `${DIM}not signed in · ${INDIGO}/signin${DIM} to connect your account${RESET}`;
+  return `${DIM}not signed in · ${OCEAN_LIGHT}/signin${DIM} to connect your account${RESET}`;
 }
 
 // Compose the framed banner: anchor column + text column, inside a rounded accent box.
 function renderBanner(width: number, modelProvider?: string): string[] {
+  // A leading blank vertically centers the wordmark against the taller lock-anchor mark.
   const right = [
-    `${BOLD}${CYAN}✻ ${INDIGO}PRIVATEER${RESET}`,
+    "",
+    `${BOLD}${OCEAN_LIGHT}✻ ${OCEAN}P${OCEAN_LIGHT}RIVATEER${RESET}`,
     `${DIM}Chart your own course privately.${RESET}`,
     "",
     accountLine(modelProvider),
-    `${DIM}privateer-agent ${INDIGO}v${VERSION}${RESET}`,
-    `${INDIGO}${shortCwd()}${RESET}`,
+    `${DIM}privateer-agent ${OCEAN_LIGHT}v${VERSION}${RESET}`,
+    `${OCEAN_LIGHT}${shortCwd()}${RESET}`,
   ];
-  // Build the six body rows (anchor + gutter + text).
-  const rows = ANCHOR.map((a, i) => `${INDIGO}${a}${RESET}${" ".repeat(2)}${right[i] ?? ""}`);
+  // Build the body rows (anchor + gutter + text).
+  const rows = ANCHOR.map((a, i) => `${OCEAN}${a}${RESET}  ${right[i] ?? ""}`);
   const cap = Math.max(20, width - 4); // 2 border cells + 2 padding
   const inner = Math.min(cap, Math.max(...rows.map(vlen)));
   const bar = "─".repeat(inner + 2);
-  const out = [`${INDIGO}╭${bar}╮${RESET}`];
+  const out = [`${BORDER}╭${bar}╮${RESET}`];
   for (const row of rows) {
     const pad = Math.max(0, inner - vlen(row));
-    out.push(`${INDIGO}│${RESET} ${row}${" ".repeat(pad)} ${INDIGO}│${RESET}`);
+    out.push(`${BORDER}│${RESET} ${row}${" ".repeat(pad)} ${BORDER}│${RESET}`);
   }
-  out.push(`${INDIGO}╰${bar}╯${RESET}`);
+  out.push(`${BORDER}╰${bar}╯${RESET}`);
   return out;
 }
 
@@ -148,10 +160,10 @@ export default function privateerBrand(pi: any): void {
           ctx?.ui?.setWidget?.(
             "privateer-signin",
             [
-              `${CYAN}⚓ Sign in to Privateer${RESET}`,
+              `${OCEAN_LIGHT}⚓ Sign in to Privateer${RESET}`,
               `${DIM}Approve this terminal in the Privateer app:${RESET}`,
-              `   code   ${BOLD}${INDIGO}${code.user_code}${RESET}`,
-              uri ? `${DIM}   or open ${RESET}${INDIGO}${uri}${RESET}` : "",
+              `   code   ${BOLD}${OCEAN}${code.user_code}${RESET}`,
+              uri ? `${DIM}   or open ${RESET}${OCEAN_LIGHT}${uri}${RESET}` : "",
               `${DIM}   waiting for approval…${RESET}`,
             ].filter(Boolean),
             { placement: "aboveEditor" },
