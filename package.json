@@ -49,6 +49,9 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
+    "@noble/ciphers": "^2.1.1",
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.7.1",
     "@earendil-works/pi-coding-agent": "^0.80.3",
     "@earendil-works/pi-ai": "^0.80.3",
     "@earendil-works/pi-tui": "^0.80.3",
