@@ -37,9 +37,11 @@ mkdir -p "$EXT_DIR"
 # ABSOLUTE path so the target's own relative imports resolve from the repo (a plain
 # symlink would resolve them relative to the shim's location and break). We remove
 # any shim we previously managed first, so a dropped package can't linger and reload.
-MANAGED="privateer-gate privateer-account privateer-posture privateer-tools privateer-privacy pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
+MANAGED="privateer-brand privateer-gate privateer-account privateer-posture privateer-tools privateer-privacy pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
 for name in $MANAGED; do rm -f "$EXT_DIR/$name.ts"; done
 shim() { printf 'export { default } from "%s";\n' "$2" > "$EXT_DIR/$1.ts"; }
+# Branding + the account sign-in surface (banner, ⚓ badge, /signin /signout).
+shim privateer-brand   "$REPO/extensions/privateer-brand.ts"
 shim privateer-gate    "$REPO/extensions/privateer-gate.ts"
 shim privateer-account "$REPO/extensions/privateer-account.ts"
 shim privateer-posture "$REPO/extensions/privateer-posture.ts"
