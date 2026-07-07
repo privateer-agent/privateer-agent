@@ -448,6 +448,63 @@ export async function logout(): Promise<void> {
   clearCredentials();
 }
 
+// ── Account provider (Pi OAuth) credential helpers ───────────────────────────
+// The `privateer` account inference provider registers with Pi via the OAuth path
+// (ProviderConfigInput.oauth). Pi treats a credential as { access, refresh, expires }
+// and refreshes when Date.now() >= expires. We map a per-terminal CHILD session onto
+// that shape: `access` = child access JWT, `refresh` = child refresh token, `expires`
+// = the JWT's exp (so Pi refreshes just before the server would reject it). These are
+// independent of authedFetch's in-memory _child (Pi owns this credential's lifecycle).
+
+interface AccountCredential {
+  access: string;
+  refresh: string;
+  expires: number; // ms epoch
+}
+
+// Decode a JWT's `exp` (seconds) → ms epoch minus a safety skew, or a short fallback
+// so an undecodable token still gets refreshed frequently rather than never.
+function jwtExpMs(token: string, fallbackMs = 5 * 60_000): number {
+  try {
+    const seg = token.split(".")[1];
+    const payload = JSON.parse(Buffer.from(seg, "base64").toString("utf8")) as { exp?: unknown };
+    if (typeof payload.exp === "number") return payload.exp * 1000 - 30_000; // 30s skew
+  } catch {
+    /* not a decodable JWT */
+  }
+  return Date.now() + fallbackMs;
+}
+
+// Spawn a fresh child session (from the parent machine login) as an account credential.
+export async function spawnAccountCredentials(): Promise<AccountCredential> {
+  const parent = loadCredentials();
+  if (!parent) throw new Error("Not logged in to Privateer. Run /login.");
+  const res = await postJson(
+    serverBaseUrl(),
+    "/auth/session/spawn",
+    { refreshToken: parent.refreshToken, deviceLabel: defaultDeviceLabel() },
+    { headers: { Authorization: `Bearer ${parent.accessToken}` } },
+  );
+  if (!res.ok) {
+    if (res.status === 401) {
+      clearCredentials();
+      notifySessionExpired();
+    }
+    throw new Error("Your Privateer session expired. Run /login to sign in again.");
+  }
+  const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
+  return { access: accessToken, refresh: refreshToken, expires: jwtExpMs(accessToken) };
+}
+
+// Rotate this account credential's own refresh token; caller falls back to a fresh
+// spawn if this throws (expired/reused child token).
+export async function refreshAccountCredentials(refresh: string): Promise<AccountCredential> {
+  const res = await postJson(serverBaseUrl(), "/auth/refresh", { refreshToken: refresh });
+  if (!res.ok) throw new Error(`account refresh failed (${res.status})`);
+  const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
+  return { access: accessToken, refresh: refreshToken, expires: jwtExpMs(accessToken) };
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);

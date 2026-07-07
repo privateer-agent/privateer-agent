@@ -26,6 +26,7 @@ async function main() {
   const { RemoteBridge } = await import("../remote/remoteBridge.ts");
   const { RelayClient } = await import("../remote/relayClient.ts");
   const priv = await import("../auth/privateer.ts");
+  const { makeAccountProvider } = await import("../providers/account.ts");
 
   const spec = process.env.PRIVATEER_MODEL ?? "openrouter/openai/gpt-4o-mini";
   const slash = spec.indexOf("/");
@@ -107,10 +108,21 @@ async function main() {
     agentDir: agentDir(),
     resourceLoaderOptions: {
       // Structural ext types are intentionally narrow; cast to Pi's ExtensionFactory.
-      extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension()] as any,
+      extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider()] as any,
     },
   });
   for (const d of services.diagnostics) if (d.type === "error") console.log(`${RED}! ${d.message}${RESET}`);
+
+  // Account channel: seed the OAuth credential (a fresh child session) so getApiKey
+  // resolves it; Pi then manages refresh on expiry via the registered oauth provider.
+  if (provider === "privateer") {
+    try {
+      const creds = await priv.spawnAccountCredentials();
+      (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+    } catch (e) {
+      console.log(`${RED}Account channel unavailable: ${(e as Error).message}${RESET}`);
+    }
+  }
 
   const model = (services.modelRegistry as any).find(provider, modelId);
   if (!model) {
