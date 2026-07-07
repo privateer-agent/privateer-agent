@@ -182,6 +182,15 @@ async function main() {
     }
   }
 
+  // Surface the account state so an inherited login (shared ~/.privateer/credentials.json
+  // with the 0.2 CLI) isn't a surprise when /remote-access "just works".
+  const who = priv.currentUser();
+  console.log(
+    who
+      ? `${DIM}Signed in as ${who.email ?? who.id} ${DIM}(Privateer account — shared ~/.privateer login).${RESET}`
+      : `${DIM}Not signed in. /login to enable remote access & the account provider.${RESET}`,
+  );
+
   const HELP = "Commands: /remote-access <on|off>  /login  /models [filter]  /verify  /mode <…>  /quit";
   console.log(`${DIM}Ready. Type a prompt. ${HELP}${RESET}`);
   await showPosture();
