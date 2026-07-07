@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Launch the privateer 0.3 dev agent in the CURRENT directory. Picks a Node >= 22
+# (the Pi stack's floor): the active node if new enough, else an nvm-installed v22.
+# Symlink this onto your PATH under whatever name you like (it does NOT have to be
+# `pv`), e.g.:  ln -s "$PWD/bin/pv" /usr/local/bin/pv
+set -euo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+pick_node() {
+  if command -v node >/dev/null 2>&1 \
+     && node -e 'process.exit((+process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
+    command -v node
+    return
+  fi
+  for c in "$HOME"/.nvm/versions/node/v22*/bin/node; do
+    [ -x "$c" ] && { echo "$c"; return; }
+  done
+  echo "node" # last resort — errors clearly if it's too old
+}
+
+exec "$(pick_node)" "$REPO/bin/privateer.mjs" "$@"

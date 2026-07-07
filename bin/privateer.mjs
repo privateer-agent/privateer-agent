@@ -1,14 +1,22 @@
 #!/usr/bin/env node
-// Privateer launcher. Registers tsx's ESM loader so the TypeScript entrypoint
-// runs with no build step, then hands off to src/main.ts.
-//
-// main.ts imports ./boot.ts FIRST (env + attestation dispatcher) before any Pi
-// module is loaded — see the ordering contract documented there.
+// Launcher for the privateer 0.3 agent REPL. It runs in the DIRECTORY YOU INVOKE
+// IT FROM (process.cwd() — that's the agent's working dir), while resolving the
+// code and dev keys from the repo. Prefer the `bin/pv` wrapper, which also picks a
+// Node >= 22 (the Pi stack's floor).
+import { register } from "tsx/esm/api";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { register } from "tsx/esm/api";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "..");
 
-register();
-await import(resolve(__dirname, "../src/main.ts"));
+// Dev convenience: load provider keys from the repo's .env if present, WITHOUT
+// changing cwd. (A real install would rely on env vars / ~/.privateer instead.)
+try {
+  process.loadEnvFile(resolve(repo, ".env"));
+} catch {
+  /* no .env — fall back to the ambient environment */
+}
+
+register(); // resolves the repo's tsx regardless of the invocation cwd
+await import(resolve(repo, "src/cli/chat.ts"));
