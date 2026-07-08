@@ -12,7 +12,7 @@
   <a href="https://www.npmjs.com/package/privateer-agent">
     <img src="https://img.shields.io/npm/v/privateer-agent" alt="npm" />
   </a>
-  <img src="https://img.shields.io/badge/node-%E2%89%A522-brightgreen" alt="Node >= 22" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A522.19-brightgreen" alt="Node >= 22.19" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
   <img src="https://img.shields.io/badge/permissions-safe%20by%20default-2ea44f" alt="Safe by default" />
   <img src="https://img.shields.io/badge/inference-TEE%20attested%20·%20on--device%20PII%20gate-5b8def" alt="Private inference" />
@@ -98,7 +98,7 @@ npx privateer-agent
 curl -fsSL https://privateer.pro/install.sh | sh
 ```
 
-**Requirements:** macOS or Linux, Node.js ≥ 22.
+**Requirements:** macOS or Linux, Node.js ≥ 22.19.0.
 
 **From source:**
 
