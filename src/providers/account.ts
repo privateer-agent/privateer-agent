@@ -18,7 +18,7 @@ import {
   spawnAccountCredentials,
   refreshAccountCredentials,
 } from "../auth/privateer.ts";
-import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
+import { interpretReport, teePosture, type PrivacyTier } from "pi-privacy";
 
 // Seed/fallback catalog: registered synchronously so the account provider has real
 // models the instant it loads (before the live /api/models fetch resolves) — in
@@ -106,11 +106,16 @@ export interface AccountPosture {
   error?: string;
 }
 
-// Posture for an account-channel model. NEAR models are cryptographically verified
-// via the server-proxy attestation (the account's NEAR key stays server-side; the
-// server mints the nonce and returns the report, which we interpret exactly like a
-// direct attestation). ZDR-channel models route to zero-retention endpoints
-// server-side, which we can't observe from here — honestly a policy claim.
+// Posture for an account-channel model. For NEAR models the attestation is fetched
+// through the SERVER proxy (the account's NEAR key stays server-side): the server
+// mints the nonce AND returns the report, so the CLIENT contributes no freshness and
+// can't bind the report to the live TLS key. That is a trust-the-server posture, not
+// client-verified — materially weaker than the direct nearai path (which supplies its
+// own randomNonce). So we must NOT promote it to `tee-verified`: that tier reads as
+// cryptographically proven and, critically, disables pi-privacy's PII gate. We cap a
+// green server posture at `tee-unverified` (honest yellow — the PII gate stays on) and
+// still surface the raw teePosture for display. ZDR-channel models route to
+// zero-retention endpoints server-side, which we can't observe here — a policy claim.
 export async function accountPosture(modelId: string): Promise<AccountPosture> {
   if (privateerChannel(modelId) === "zdr") {
     return { tier: "zdr-policy" };
@@ -123,7 +128,9 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
     const data = (await res.json()) as { nonce?: string; report?: unknown };
     const att = interpretReport(modelId, data.nonce ?? "", data.report ?? {});
     const tp = teePosture(att);
-    return { tier: tierFromTeePosture(tp), teePosture: tp };
+    // Cap at client-unverifiable: server-proxied green never earns `tee-verified`.
+    const tier: PrivacyTier = tp === "red" ? "standard" : "tee-unverified";
+    return { tier, teePosture: tp };
   } catch (e) {
     return { tier: "tee-unverified", error: (e as Error).message };
   }

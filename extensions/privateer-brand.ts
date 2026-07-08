@@ -65,10 +65,24 @@ function vlen(s: string): number {
   return s.replace(/\x1b\[[0-9;]*m/g, "").length;
 }
 
+// Strip ESC/C0/C1 control bytes from any value we did NOT author before it lands in a
+// render line. Account email/id/pubkey come from the server (via credentials.json),
+// the device user_code + verification_uri come off the device-code response, and cwd
+// comes from the filesystem — none is guaranteed free of raw escape sequences, which
+// would otherwise reach the terminal unsanitized. Our own SGR color codes are added
+// AFTER cleaning the untrusted substring, so they're preserved; normal printable text
+// (including Unicode) is untouched.
+// eslint-disable-next-line no-control-regex
+const CONTROL_RE = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f]", "g");
+function clean(s: unknown): string {
+  return String(s ?? "").replace(CONTROL_RE, "");
+}
+
 function shortCwd(): string {
   const cwd = process.cwd();
   const home = homedir();
-  return cwd === home || cwd.startsWith(home + "/") ? "~" + cwd.slice(home.length) : cwd;
+  const path = cwd === home || cwd.startsWith(home + "/") ? "~" + cwd.slice(home.length) : cwd;
+  return clean(path);
 }
 
 // The account line under the tagline — three states, ported from tree-cli's Banner:
@@ -79,7 +93,7 @@ function shortCwd(): string {
 function accountLine(modelProvider?: string): string {
   const u = priv.currentUser();
   if (u) {
-    const label = u.email ?? (u.solanaPublicKey ? u.solanaPublicKey.slice(0, 6) + "…" : u.id);
+    const label = clean(u.email ?? (u.solanaPublicKey ? u.solanaPublicKey.slice(0, 6) + "…" : u.id));
     return `${GREEN}connected${DIM} as ${RESET}${OCEAN_LIGHT}${label}${RESET}`;
   }
   if (modelProvider === "privateer") {
@@ -129,7 +143,7 @@ function headerComponent(modelProvider?: string) {
 function accountBadge(): string {
   const u = priv.currentUser();
   if (!u) return "⚓ guest";
-  const label = u.email ? u.email.split("@")[0] : u.solanaPublicKey ? u.solanaPublicKey.slice(0, 6) + "…" : u.id;
+  const label = clean(u.email ? u.email.split("@")[0] : u.solanaPublicKey ? u.solanaPublicKey.slice(0, 6) + "…" : u.id);
   return `⚓ ${label}`;
 }
 
@@ -159,13 +173,14 @@ export default function privateerBrand(pi: any): void {
     try {
       const user = await priv.runDeviceLogin({
         onCode: (code: any) => {
-          const uri = code.verification_uri_complete ?? code.verification_uri ?? "";
+          const uri = clean(code.verification_uri_complete ?? code.verification_uri ?? "");
+          const userCode = clean(code.user_code);
           ctx?.ui?.setWidget?.(
             "privateer-signin",
             [
               `${OCEAN_LIGHT}⚓ Sign in to Privateer${RESET}`,
               `${DIM}Approve this terminal in the Privateer app:${RESET}`,
-              `   code   ${BOLD}${OCEAN}${code.user_code}${RESET}`,
+              `   code   ${BOLD}${OCEAN}${userCode}${RESET}`,
               uri ? `${DIM}   or open ${RESET}${OCEAN_LIGHT}${uri}${RESET}` : "",
               `${DIM}   waiting for approval…${RESET}`,
             ].filter(Boolean),
