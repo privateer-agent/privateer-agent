@@ -5,7 +5,7 @@ import { createSession } from "../session.ts";
 import { autoApproveGate } from "../permissions/gate.ts";
 import { loadMcpServers, connectMcpServers } from "../mcp/client.ts";
 import { RelayClient } from "../remote/relayClient.ts";
-import { hasCredentials, revokeChildSession } from "../auth/privateer.ts";
+import { hasCredentials, revokeChildSession, apiRequest } from "../auth/privateer.ts";
 import {
   loadRoutines,
   upsertRoutine,
@@ -13,12 +13,17 @@ import {
   removeRoutine,
   addPendingRelay,
   drainPendingRelay,
+  addPendingCloud,
+  loadPendingCloud,
+  savePendingCloud,
+  type PendingCloud,
   routineRelayId,
 } from "../routines/store.ts";
 import type { Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigger.ts";
 import { splitRoutineTools, filterMcpTools } from "../routines/toolSelect.ts";
-import { deliver, type RelayPusher } from "../routines/delivery.ts";
+import { deliver, type RelayPusher, type CloudPusher } from "../routines/delivery.ts";
+import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, type IpcRequest, type IpcResponse } from "./ipc.ts";
 
@@ -27,6 +32,11 @@ import { startIpcServer, type IpcRequest, type IpcResponse } from "./ipc.ts";
 const SAFE_TOOLS = ["read", "glob", "grep", "web_fetch", "web_search"];
 
 const TICK_MS = 60_000; // scan for due routines once a minute
+
+// Max plaintext bytes sealed into one cloud-outbox item. Kept well under the
+// server's ~64KiB plaintext / 128KiB base64 caps, with headroom for JSON escaping
+// and the sealed-box overhead. The outbox carries summaries, not full transcripts.
+const MAX_CLOUD_PLAINTEXT = 45_000;
 
 function log(msg: string): void {
   process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`);
@@ -67,12 +77,29 @@ export class Daemon {
     return "queued";
   };
 
+  // Account outbox public key, fetched lazily and cached for the daemon's lifetime.
+  // The key is write-once/immutable server-side, so it never changes under us; a
+  // restart re-fetches it. Undefined until first successful fetch (or if the app
+  // hasn't published one yet, in which case cloud items stay queued).
+  private outboxPub?: Uint8Array;
+
+  // Seal a `cloud`-delivery result to the account outbox and POST it, or persist it
+  // to the pending-cloud buffer to flush later. Both outcomes are durable.
+  private readonly pushCloud: CloudPusher = async (routine, content, status) => {
+    const at = new Date().toISOString();
+    if (await this.postOutbox(routine.name, at, status, content)) return "sent";
+    addPendingCloud({ routine: routine.name, at, status, content });
+    return "queued";
+  };
+
   start(): void {
     // Prime nextRun for any routine missing one, then start the loop + IPC server.
     this.primeSchedule();
     this.timer = setInterval(() => void this.tick(), TICK_MS);
     this.server = startIpcServer((req) => this.handleIpc(req));
     this.syncRelay();
+    // Flush any cloud results buffered while the daemon was down / offline.
+    void this.flushPendingCloud();
     const count = loadRoutines().filter((r) => r.enabled).length;
     log(`daemon started (pid ${process.pid}); ${count} enabled routine(s). Tick every ${TICK_MS / 1000}s.`);
     // Fire an immediate scan so a just-due routine doesn't wait a full minute.
@@ -134,6 +161,65 @@ export class Daemon {
     for (const p of pending) this.relay?.sendRoutineResult(p.routine, p.content);
   }
 
+  // ── Cloud outbox (sealed store-and-forward) ────────────────────────────────
+
+  // Fetch (once) and cache the account's published outbox public key. Returns
+  // undefined when we're offline, the request fails, or the app hasn't published a
+  // key yet — callers treat that as "can't seal right now" and buffer instead.
+  private async ensureOutboxPub(): Promise<Uint8Array | undefined> {
+    if (this.outboxPub) return this.outboxPub;
+    try {
+      const res = await apiRequest("/api/outbox/pubkey");
+      if (!res.ok) return undefined;
+      const data = (await res.json()) as { outboxPublicKey?: string | null };
+      if (!data.outboxPublicKey) return undefined; // app hasn't published its key yet
+      this.outboxPub = decodeAccountPublicKey(data.outboxPublicKey);
+      return this.outboxPub;
+    } catch {
+      return undefined; // network/auth failure — retried on the next attempt
+    }
+  }
+
+  // Seal one result to the account outbox key and POST the ciphertext. Returns true
+  // only when the server accepted it. The sealed plaintext is a small JSON envelope
+  // the app opens with its master key (shape kept in sync with the client's outbox
+  // fetch path). The body is bounded so the sealed item stays under the server caps.
+  private async postOutbox(routine: string, at: string, status: "ok" | "error", content: string): Promise<boolean> {
+    const pub = await this.ensureOutboxPub();
+    if (!pub) return false;
+    const body =
+      content.length > MAX_CLOUD_PLAINTEXT ? content.slice(0, MAX_CLOUD_PLAINTEXT) + "\n…truncated" : content;
+    const sealed = sealJson(pub, { v: 1, kind: "routine", name: routine, status, at, content: body });
+    try {
+      const res = await apiRequest("/api/outbox", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sealed }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  // Retry any cloud items that failed to post earlier. Stops at the first item that
+  // still fails so the queue stays in fire order and a persistent failure (offline /
+  // key unpublished) doesn't burn requests on every entry each tick.
+  private async flushPendingCloud(): Promise<void> {
+    if (!hasCredentials()) return;
+    const queue = loadPendingCloud();
+    if (queue.length === 0) return;
+    const remaining: PendingCloud[] = [];
+    for (const p of queue) {
+      if (remaining.length === 0 && (await this.postOutbox(p.routine, p.at, p.status, p.content))) continue;
+      remaining.push(p);
+    }
+    if (remaining.length !== queue.length) {
+      savePendingCloud(remaining);
+      log(`flushed ${queue.length - remaining.length} pending cloud outbox item(s); ${remaining.length} remaining`);
+    }
+  }
+
   private primeSchedule(): void {
     for (const r of loadRoutines()) {
       if (!r.enabled) continue;
@@ -144,6 +230,8 @@ export class Daemon {
   }
 
   private async tick(): Promise<void> {
+    // Opportunistically retry buffered cloud items (no-op when the queue is empty).
+    void this.flushPendingCloud();
     const now = Date.now();
     for (const r of loadRoutines()) {
       if (!r.enabled || this.running.has(r.id)) continue;
@@ -240,6 +328,7 @@ export class Daemon {
     const content = formatResult(routine, out, status, error);
     const report = await deliver(routine, content, status, {
       pushRelay: this.pushRelay,
+      pushCloud: this.pushCloud,
       webhooks: config.webhooks,
       redact: (text) => redactText(text, collectSecrets(config.providers)),
     });

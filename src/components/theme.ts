@@ -11,6 +11,7 @@ import type { ZdrPosture } from "../providers/models.ts";
 export const theme = {
   accent: "#5c7cfa", // Privateer navy/indigo — the single accent hue
   accentDim: "#3b5b8c",
+  userBg: "#2b3a5e", // navy tint behind the user's own words in the transcript
   text: undefined as string | undefined, // terminal default
   dim: "gray",
   success: "green",

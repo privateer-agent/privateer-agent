@@ -8,6 +8,14 @@ import { writeRoutineOutput, addNotice } from "./store.ts";
 // result is durably accounted for, so delivery doesn't add a notice backstop for it.
 export type RelayPusher = (routine: Routine, content: string) => "live" | "queued";
 
+// A cloud-outbox pusher, injected by the daemon. Seals the result to the account's
+// outbox public key and POSTs the ciphertext to the server (E2EE store-and-forward),
+// or buffers it durably on failure. Returns "sent" when the server accepted it,
+// "queued" when it was persisted for a later flush — either way the result is
+// durably accounted for. `status` is carried so the sealed envelope can render
+// ok/error without re-parsing the markdown body.
+export type CloudPusher = (routine: Routine, content: string, status: "ok" | "error") => Promise<"sent" | "queued">;
+
 // A named webhook endpoint from config `webhooks`.
 export interface WebhookTarget {
   url: string;
@@ -16,6 +24,10 @@ export interface WebhookTarget {
 
 export interface DeliveryContext {
   pushRelay?: RelayPusher;
+  // Seals + posts the result to the account's cloud outbox, or buffers it. Absent
+  // (e.g. not signed in) → the `cloud` channel falls back to a notice so the result
+  // isn't silently lost.
+  pushCloud?: CloudPusher;
   // Named endpoints for "webhook:<name>" delivery entries; results POST here.
   webhooks?: Record<string, WebhookTarget>;
   // Scrubs secrets from anything leaving the machine. Webhook bodies always pass
@@ -122,6 +134,20 @@ export async function deliver(
     if (pushed === "live") delivered.push("relay");
     else if (pushed === "queued") delivered.push("relay(queued)");
     else if (!wants.has("file") && !wants.has("notice")) {
+      leaveNotice();
+      delivered.push("notice(backstop)");
+    }
+  }
+
+  // Cloud outbox: sealed E2EE store-and-forward. "sent" reached the server; "queued"
+  // was buffered on disk (offline / server down / app hasn't published its outbox key
+  // yet) and flushes later — both are durable. Only when no pusher is wired at all,
+  // and nothing else keeps a durable record, do we fall back to a notice.
+  if (wants.has("cloud")) {
+    const sent = ctx.pushCloud ? await ctx.pushCloud(routine, content, status) : undefined;
+    if (sent === "sent") delivered.push("cloud");
+    else if (sent === "queued") delivered.push("cloud(queued)");
+    else if (!wants.has("file") && !wants.has("notice") && !wants.has("relay")) {
       leaveNotice();
       delivered.push("notice(backstop)");
     }

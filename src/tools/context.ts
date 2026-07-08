@@ -66,6 +66,13 @@ export interface ToolContext {
     base64: string;
     size: number;
   }) => Promise<{ ok: boolean; reason?: string }>;
+  // Cheap probe for whether the relay is actually up right now, so send_file_to_client
+  // can bail before resolving the path, prompting for out-of-scope access, or reading
+  // the file into memory. `sendFileToController` stays wired across /remote-access
+  // on/off flips (it reads a ref at call time), so its presence alone doesn't mean the
+  // relay is live — this does. Absent in daemon/bare contexts (routine delivery has its
+  // own queue-when-detached path), where the tool skips the pre-check.
+  isRemoteConnected?: () => boolean;
 }
 
 // Resolve a possibly-relative path against the session cwd. The cwd is a *soft*

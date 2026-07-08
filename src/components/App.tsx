@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Box, Text, Static, useApp, useInput, useStdout } from "ink";
@@ -194,6 +194,11 @@ export function App({
   const [committed, setCommitted] = useState<Entry[]>([]);
   const [live, setLive] = useState<Entry[]>([]);
   const [busy, setBusy] = useState(false);
+  // Synchronous mirror of `busy`, set the instant a turn is dispatched. The submit
+  // guard reads this — not the async `busy` state — so a burst of submits landing in
+  // one render frame (fast double-Enter, a pasted newline) can't slip past a stale
+  // `busy === false` and start two overlapping turns on the same engine.
+  const busyRef = useRef(false);
   const [modelSpec, setModelSpec] = useState(model);
   const zdr = useZdrShield(modelSpec, config);
   const tee = useTeeShield(modelSpec, config);
@@ -216,7 +221,10 @@ export function App({
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [verb, setVerb] = useState(randomVerb());
   const [elapsed, setElapsed] = useState(0);
-  const [queued, setQueued] = useState(0);
+  // The type-ahead queue, mirrored into state so the pending messages render as a
+  // live stack above the input (queueRef stays the synchronous source of truth for
+  // enqueue/drain ordering).
+  const [queuedItems, setQueuedItems] = useState<{ value: string; remote?: boolean }[]>([]);
   const [vim, setVim] = useState<boolean>(Boolean(config.vim));
   const [outputStyle, setOutputStyle] = useState<string | null>(config.outputStyle ?? null);
   const [planReady, setPlanReady] = useState(false);
@@ -294,6 +302,10 @@ export function App({
   // True only while the active turn was injected by a remote controller. Read by
   // the gate (policy) and by `ask` (route to the app, not the local prompt).
   const currentTurnRemoteRef = useRef(false);
+  // No-quarter (unattended) mode, toggled from the app: remote turns auto-approve
+  // like bypass so the agent runs to completion. Survives controller detach (the
+  // point is to close the phone and let it run); cleared when remote access ends.
+  const noQuarterRef = useRef(false);
   // Relayed tool approvals awaiting the app's Allow/Deny, keyed by request id.
   // The original request is kept so a re-attaching controller can be re-sent any
   // approvals it missed while detached (e.g. the app navigated away).
@@ -365,6 +377,7 @@ export function App({
             ? relayAsk(req)
             : new Promise<AskOutcome>((resolve) => setPending({ req, resolve })),
         getRemote: () => currentTurnRemoteRef.current,
+        getNoQuarter: () => noQuarterRef.current,
       }),
     [],
   );
@@ -412,6 +425,9 @@ export function App({
           }
           return client.sendFile(file);
         },
+        // Same ref, read at call time: lets send_file_to_client fail fast when the
+        // relay is down/off instead of prepping a transfer that would bounce.
+        isRemoteConnected: () => relayRef.current?.isConnected() ?? false,
       });
       if (prev) {
         session.engine.messages.push(...prev.messages);
@@ -476,6 +492,16 @@ export function App({
     return () => procs.killAll();
   }, []);
 
+  // Wipe screen + scrollback and remount <Static> to re-emit the whole
+  // transcript. The nuclear option for the family of ghosting bugs where Ink's
+  // footer erase (a width-/height-unaware newline count) leaves a stale frame
+  // stranded in scrollback. Callers decide *when* a ghost is possible.
+  const repaint = useCallback(() => {
+    if (!stdout) return;
+    stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback, home cursor
+    setResizeNonce((n) => n + 1); // remount <Static> → repaint transcript
+  }, [stdout]);
+
   // Repaint cleanly when the terminal is resized.
   //
   // Ink commits the transcript once via <Static> and redraws only the footer
@@ -503,8 +529,7 @@ export function App({
         if (stdout.columns === lastCols && stdout.rows === lastRows) return;
         lastCols = stdout.columns;
         lastRows = stdout.rows;
-        stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback, home cursor
-        setResizeNonce((n) => n + 1); // remount <Static> → repaint transcript
+        repaint();
       }, 120);
     };
     stdout.on("resize", onResize);
@@ -512,7 +537,7 @@ export function App({
       clearTimeout(timer);
       stdout.off("resize", onResize);
     };
-  }, [stdout]);
+  }, [stdout, repaint]);
 
   // Custom status line: run the configured command with session JSON on stdin and use
   // its first line of stdout. Re-runs when the surfaced state changes. Best-effort.
@@ -629,10 +654,22 @@ export function App({
           entry.resolve(decision);
         }
       },
+      onNoQuarter: (on) => {
+        noQuarterRef.current = on;
+        append({
+          kind: "notice",
+          text: on
+            ? "No quarter — remote actions run without approval prompts (dangerous commands still ask)."
+            : "No quarter off — remote actions ask for approval in the app again.",
+        });
+        // Ack the applied state so the app's toggle reflects reality.
+        relayRef.current?.sendNoQuarter(on);
+      },
       onControllerAttached: () => {
         const client = relayRef.current;
         if (!client) return;
         client.sendSnapshot(snapshotEntries(committedRef.current));
+        client.sendNoQuarter(noQuarterRef.current);
         // Re-surface approvals the controller missed while it was detached.
         for (const [id, entry] of pendingApprovalsRef.current) client.requestApproval(id, entry.req);
       },
@@ -643,6 +680,7 @@ export function App({
     return () => {
       client.stop();
       relayRef.current = null;
+      noQuarterRef.current = false; // unattended mode never outlives remote access
       for (const [id, entry] of pendingApprovalsRef.current) {
         pendingApprovalsRef.current.delete(id);
         entry.resolve("deny");
@@ -722,6 +760,24 @@ export function App({
 
   const append = (...entries: Entry[]) => setCommitted((c) => [...c, ...entries]);
 
+  // Flip busy state and its synchronous ref together, so the submit guard never
+  // races the async state update.
+  function markBusy(v: boolean) {
+    busyRef.current = v;
+    setBusy(v);
+  }
+
+  // Push the ref-backed queue into state so the input's live stack re-renders.
+  const syncQueue = () => setQueuedItems([...queueRef.current]);
+
+  // Pop the most-recently queued message back out of the queue (Backspace on an
+  // empty prompt) so the input can reload it to edit or drop. Returns its text.
+  function editLastQueued(): string | undefined {
+    const item = queueRef.current.pop();
+    syncQueue();
+    return item?.value;
+  }
+
   // Announce a Privateer sign-out the moment it happens. The machine login
   // dies server-side when its refresh-token TTL lapses (only after weeks of
   // no use — spawns slide it forward) or it's revoked, and — because the child
@@ -731,14 +787,20 @@ export function App({
   // warming the session up front when the active model bills to the account
   // moves the announcement to launch instead of mid-turn.
   useEffect(() => {
-    const unsub = onSessionExpired(() =>
+    const unsub = onSessionExpired(() => {
       append({
         kind: "notice",
         tone: "error",
         text: "Signed out of your Privateer account — this machine's login expired.",
         hint: "Run /login to sign back in. Account models stay listed under /model.",
-      }),
-    );
+      });
+      // The banner's "connected as" line was committed to <Static> while the
+      // credentials still looked valid, and would sit above this notice
+      // contradicting it. Credentials are wiped before this listener fires, so
+      // a full repaint re-renders the banner without the stale account line.
+      stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+      setResizeNonce((n) => n + 1);
+    });
     try {
       if (parseModelSpec(modelSpec).provider === "privateer") void warmSession();
     } catch {
@@ -1124,7 +1186,7 @@ export function App({
   async function doCompact() {
     const engine = engineRef.current;
     if (!engine || busy) return;
-    setBusy(true);
+    markBusy(true);
     try {
       const res = await engine.compact();
       append(
@@ -1136,7 +1198,7 @@ export function App({
     } catch (err) {
       append({ kind: "notice", tone: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
-      setBusy(false);
+      markBusy(false);
     }
   }
 
@@ -1227,7 +1289,7 @@ export function App({
     // routes approvals to the app and never auto-approves off bypass/allowlist.
     currentTurnRemoteRef.current = !!opts?.remote;
     setVerb(randomVerb());
-    setBusy(true);
+    markBusy(true);
     setTurnUsage(emptyUsage());
     const turnStart = Date.now();
     const controller = new AbortController();
@@ -1436,7 +1498,7 @@ export function App({
       ];
       setLive([]);
       setCommitted((c) => [...c, ...finalEntries]);
-      setBusy(false);
+      markBusy(false);
       persist();
       if (hooks.has("Stop")) void hooks.stop();
       // In plan mode, once the agent has presented a plan, offer to leave plan mode.
@@ -1559,9 +1621,11 @@ export function App({
   function handleInput(value: string, opts?: { remote?: boolean }) {
     const text = value.trim();
     if (!text) return;
-    if (busy || drainingRef.current) {
+    // Guard on the synchronous ref, not `busy` state: two submits in one render
+    // frame would both see a stale `busy === false` and start overlapping turns.
+    if (busyRef.current || drainingRef.current) {
       queueRef.current.push({ value, remote: opts?.remote });
-      setQueued(queueRef.current.length);
+      syncQueue();
       append({ kind: "notice", text: `Queued (${queueRef.current.length}) — runs after the current turn.` });
       return;
     }
@@ -1594,12 +1658,12 @@ export function App({
   // Drain queued messages once the UI is idle. Runs them sequentially so turns
   // never overlap.
   async function drainQueue() {
-    if (drainingRef.current || busy) return;
+    if (drainingRef.current || busyRef.current) return;
     drainingRef.current = true;
     try {
       while (queueRef.current.length > 0) {
         const next = queueRef.current.shift()!;
-        setQueued(queueRef.current.length);
+        syncQueue();
         await dispatchInput(next.value, next.remote);
       }
     } finally {
@@ -1616,7 +1680,7 @@ export function App({
   async function runBash(cmd: string) {
     if (!cmd) return;
     append({ kind: "user", text: `!${cmd}` });
-    setBusy(true);
+    markBusy(true);
     try {
       const res = await exec(cmd, [], { cwd, timeoutMs: 120_000, shell: true });
       const out = [res.stdout, res.stderr].filter(Boolean).join("\n").trim();
@@ -1632,7 +1696,7 @@ export function App({
     } catch (err) {
       append({ kind: "notice", tone: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
-      setBusy(false);
+      markBusy(false);
     }
   }
 
@@ -1774,7 +1838,9 @@ export function App({
             <PromptInput
               busy={busy}
               cwd={cwd}
-              queued={queued}
+              queued={queuedItems.length}
+              queuedItems={queuedItems.map((q) => q.value)}
+              onEditLastQueued={editLastQueued}
               vimEnabled={vim}
               commands={commands}
               history={historyRef}
@@ -1785,6 +1851,12 @@ export function App({
                 setCommitted([]);
                 setLive([]);
               }}
+              // While a turn streams, the footer already carries live tool output;
+              // opening or closing the autocomplete menu on top of it can push the
+              // dynamic region past the viewport and strand a ghost frame. A full
+              // repaint on the toggle keeps scrollback clean. Idle footers are short
+              // enough not to overflow, so only bother when busy.
+              onMenuToggle={busy ? repaint : undefined}
             />
             <ModeHint mode={mode} collapsed={collapsed} />
           </>

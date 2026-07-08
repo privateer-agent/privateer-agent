@@ -25,6 +25,11 @@ export interface ModeGateDeps {
   // an unattended terminal can't silently run a remote party's bash or edits.
   // Hard denies (e.g. plan mode) are still honored without bothering the phone.
   getRemote?: () => boolean;
+  // True while the controller has toggled no-quarter (unattended) mode: remote
+  // turns auto-approve like bypass mode so the agent runs to completion without
+  // pinging the phone. Dangerous shell and alwaysAsk-destructive actions rank
+  // above bypass in decideAuto, so those still relay for an explicit Allow/Deny.
+  getNoQuarter?: () => boolean;
 }
 
 // The permission gate used by the live TUI. It first applies the mode/allowlist
@@ -43,6 +48,12 @@ export class ModeGate implements PermissionGate {
     // remembered — we don't let a remote operator mutate local allowlist/mode.
     if (this.deps.getRemote?.()) {
       if (auto === "deny") return "deny";
+      // No-quarter: re-evaluate as if in bypass mode. Dangerous/destructive
+      // actions still come back "ask" (they sit above bypass) and fall through
+      // to the relayed prompt; everything else runs unattended.
+      if (this.deps.getNoQuarter?.() && decideAuto(req, "bypass", this.deps.allowlist, denylist) === "allow") {
+        return "allow";
+      }
       return (await this.deps.ask(req)) === "deny" ? "deny" : "allow";
     }
 

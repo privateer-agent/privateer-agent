@@ -203,3 +203,46 @@ export function drainPendingRelay(): PendingRelay[] {
   }
   return queue;
 }
+
+// A `cloud`-delivery result that couldn't be sealed+posted to the account outbox
+// yet (offline, server down, or the app hasn't published its outbox key). Held on
+// disk until a later flush succeeds. Unlike PendingRelay this carries `status`, so
+// the sealed envelope the app opens can render ok/error without re-parsing markdown.
+export interface PendingCloud {
+  routine: string;
+  at: string; // ISO timestamp
+  status: "ok" | "error";
+  content: string;
+}
+
+function pendingCloudPath(): string {
+  return join(globalDir(), "routines", "pending-cloud.json");
+}
+
+export function loadPendingCloud(): PendingCloud[] {
+  const path = pendingCloudPath();
+  if (!existsSync(path)) return [];
+  try {
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    return Array.isArray(data) ? (data as PendingCloud[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function addPendingCloud(entry: PendingCloud): void {
+  const dir = join(globalDir(), "routines");
+  mkdirSync(dir, { recursive: true });
+  const queue = loadPendingCloud();
+  queue.push(entry);
+  savePendingCloud(queue.slice(-50)); // bound the backlog
+}
+
+// Overwrite the queue wholesale — used by the flush to drop the items it managed
+// to post while keeping the ones that still failed (and their order).
+export function savePendingCloud(entries: PendingCloud[]): void {
+  const dir = join(globalDir(), "routines");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(pendingCloudPath(), JSON.stringify(entries, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  tryChmod(pendingCloudPath(), 0o600);
+}

@@ -1,6 +1,7 @@
 import type { LanguageModel } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createXai } from "@ai-sdk/xai";
 import { createGroq } from "@ai-sdk/groq";
@@ -18,8 +19,8 @@ import { authedFetch, serverBaseUrl } from "../auth/privateer.ts";
 // NEAR AI Cloud's OpenAI-compatible gateway. Every model behind it runs inside a
 // Trusted Execution Environment (TEE), so requests are confidential and each one
 // can be cryptographically attested (see ./attestation.ts). It only implements the
-// Chat Completions API, so the factory below pins `.chat()` rather than the SDK's
-// default Responses transport, and supplies this base when the user hasn't set one.
+// Chat Completions API — served by the `compatChat` builder below, which supplies
+// this base when the user hasn't set one.
 export const NEARAI_BASE_URL = "https://cloud-api.near.ai/v1";
 
 // Tinfoil's OpenAI-compatible inference gateway. Like NEAR AI, every model runs
@@ -69,6 +70,21 @@ export const veniceFetch: typeof fetch = (input, init) => {
 // This is the single seam that makes Privateer provider-agnostic: the agent loop,
 // tools, and UI never know or care which provider is behind the model.
 type Factory = (cfg: ProviderConfig, modelId: string) => LanguageModel;
+
+// Shared builder for Chat-Completions-only OpenAI-compatible endpoints
+// (nearai/tinfoil/zai/minimax/qwen/venice/custom/privateer). Two things matter here:
+// - `createOpenAICompatible`, NOT plain `createOpenAI(...).chat()`: only the compat
+//   package maps the non-standard `reasoning_content` stream field — which DeepSeek/
+//   GLM/Kimi-style thinking models emit — into AI SDK reasoning parts. Plain
+//   createOpenAI silently drops it, so a reasoning model looked hung (no output,
+//   0 tokens) for its entire thinking phase.
+// - `includeUsage: true`: the compat package omits `stream_options.include_usage`
+//   unless asked (createOpenAI always sent it), and per-step token usage — the live
+//   counter and context tracking — depends on it.
+const compatChat = (
+  modelId: string,
+  opts: { name: string; baseURL: string; apiKey?: string; fetch?: typeof fetch },
+) => createOpenAICompatible({ ...opts, includeUsage: true }).chatModel(modelId);
 
 // Whether a provider requires an API key to be usable (Ollama is local, so it doesn't).
 const REQUIRES_KEY: Record<ProviderName, boolean> = {
@@ -121,9 +137,7 @@ const FACTORIES: Record<ProviderName, Factory> = {
   mistral: (cfg, modelId) =>
     createMistral({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   zai: (cfg, modelId) =>
-    // OpenAI-compatible, Chat-Completions-only — `.chat()` pins the transport
-    // like nearai/tinfoil.
-    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? ZAI_BASE_URL }).chat(modelId),
+    compatChat(modelId, { name: "zai", apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? ZAI_BASE_URL }),
   moonshot: (cfg, modelId) =>
     // The dedicated package (not plain createOpenAI) maps Kimi thinking models'
     // non-standard `reasoning_content` field into AI SDK reasoning parts.
@@ -143,47 +157,39 @@ const FACTORIES: Record<ProviderName, Factory> = {
     // `reasoning_content` field into AI SDK reasoning parts.
     createDeepSeek({ apiKey: cfg.apiKey, baseURL: cfg.baseURL })(modelId),
   minimax: (cfg, modelId) =>
-    // OpenAI-compatible, Chat-Completions-only — `.chat()` pins the transport
-    // like nearai/tinfoil/zai.
-    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? MINIMAX_BASE_URL }).chat(modelId),
+    compatChat(modelId, { name: "minimax", apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? MINIMAX_BASE_URL }),
   qwen: (cfg, modelId) =>
-    // OpenAI-compatible, Chat-Completions-only — `.chat()` pins the transport
-    // like nearai/tinfoil/zai/minimax.
-    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? QWEN_BASE_URL }).chat(modelId),
+    compatChat(modelId, { name: "qwen", apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? QWEN_BASE_URL }),
   ollama: (cfg, modelId) =>
     createOllama({ baseURL: cfg.baseURL })(modelId),
   nearai: (cfg, modelId) =>
-    // OpenAI-compatible, but Chat-Completions-only — `.chat()` avoids the SDK's
-    // default Responses transport, which NEAR's TEE endpoints don't implement.
-    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? NEARAI_BASE_URL }).chat(modelId),
+    compatChat(modelId, { name: "nearai", apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? NEARAI_BASE_URL }),
   tinfoil: (cfg, modelId) =>
-    // OpenAI-compatible TEE gateway; `.chat()` pins Chat Completions like nearai.
-    createOpenAI({ apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? TINFOIL_BASE_URL }).chat(modelId),
+    compatChat(modelId, { name: "tinfoil", apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? TINFOIL_BASE_URL }),
   venice: (cfg, modelId) =>
-    // OpenAI-compatible, Chat Completions pinned like nearai/tinfoil; veniceFetch
-    // opts out of Venice's injected system prompt.
-    createOpenAI({
+    // veniceFetch opts out of Venice's injected system prompt.
+    compatChat(modelId, {
+      name: "venice",
       apiKey: cfg.apiKey,
       baseURL: cfg.baseURL ?? VENICE_BASE_URL,
       fetch: veniceFetch,
-    }).chat(modelId),
+    }),
   custom: (cfg, modelId) =>
-    // User-supplied OpenAI-compatible endpoint. `.chat()` pins Chat Completions —
-    // the lowest common denominator every compatible server implements (Responses
-    // is OpenAI-proper only). The placeholder key keeps the SDK from demanding
-    // OPENAI_API_KEY when the endpoint is keyless; resolveModel guards baseURL.
-    createOpenAI({ apiKey: cfg.apiKey ?? "unused", baseURL: cfg.baseURL }).chat(modelId),
+    // User-supplied OpenAI-compatible endpoint. apiKey is optional here (LM Studio
+    // and friends are keyless — no placeholder needed); resolveModel guards baseURL,
+    // and the catalog's baseURLDefault backstops it.
+    compatChat(modelId, { name: "custom", apiKey: cfg.apiKey, baseURL: cfg.baseURL ?? "http://localhost:1234/v1" }),
   privateer: (cfg, modelId) =>
     // Routes to the Privateer server's billed, OpenAI-compatible agent endpoint.
-    // `authedFetch` injects the account JWT and refreshes it on 401, so no key is
-    // configured here (apiKey is a placeholder the SDK requires). Chat-Completions
-    // only, hence `.chat()`. The modelId is a normal OpenRouter id, resolved and
-    // billed server-side. Base URL: cfg override → account server → default.
-    createOpenAI({
-      apiKey: "privateer-session",
+    // `authedFetch` injects the account JWT (replacing any Authorization header)
+    // and refreshes it on 401, so no apiKey is configured. The modelId is a normal
+    // OpenRouter id, resolved and billed server-side. Base URL: cfg override →
+    // account server → default.
+    compatChat(modelId, {
+      name: "privateer",
       baseURL: `${(cfg.baseURL ?? serverBaseUrl()).replace(/\/$/, "")}/api/agent/v1`,
       fetch: authedFetch as typeof fetch,
-    }).chat(modelId),
+    }),
 };
 
 export function providerRequiresKey(name: ProviderName): boolean {

@@ -1,9 +1,13 @@
 import { z } from "zod";
 
 // Where a routine's result is delivered after it runs. `file`/`relay`/`notice` stay
-// inside the user's trust boundary; `email` and `webhook:<name>` cross it (plaintext
-// to a third-party service), so they are opt-in and labeled at approval time.
-export const DELIVERY_CHANNELS = ["file", "relay", "notice", "email"] as const;
+// inside the user's trust boundary. `cloud` stores an END-TO-END-ENCRYPTED copy in
+// the account's server outbox for the app to catch up on when it next opens (the
+// server only ever sees ciphertext — it can't read results — but does learn that a
+// result exists, plus its time and rough size). `email` and `webhook:<name>` cross
+// the boundary in plaintext to a third-party service, so they are opt-in and labeled
+// at approval time.
+export const DELIVERY_CHANNELS = ["file", "relay", "notice", "cloud", "email"] as const;
 export type DeliveryChannel = (typeof DELIVERY_CHANNELS)[number];
 
 // A webhook entry references a named endpoint from config `webhooks` — the routine

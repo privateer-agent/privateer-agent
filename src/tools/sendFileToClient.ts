@@ -25,6 +25,15 @@ export function sendFileToClientTool(ctx: ToolContext) {
       if (!ctx.sendFileToController) {
         return "Cannot send: remote access is not enabled in this session (/remote-access to enable).";
       }
+      // Fail fast before touching the disk or prompting for out-of-scope access: the
+      // controller closure is wired even while remote access is off, so without this we
+      // would read (up to 10 MB) and possibly prompt only to have the send bounce.
+      if (ctx.isRemoteConnected && !ctx.isRemoteConnected()) {
+        return (
+          "Cannot send: remote access is off or the app isn't connected right now. " +
+          "Turn it on with /remote-access and open the Privateer app, then try again."
+        );
+      }
       const abs = resolveInCwd(ctx, path);
       if (!existsSync(abs)) return `File not found: ${displayPath(ctx, abs)}`;
       const stat = statSync(abs);

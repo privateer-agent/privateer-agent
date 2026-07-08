@@ -66,6 +66,16 @@ export const Config = z.object({
   contextBudget: z.number().int().positive().default(120_000),
   // Fraction of contextBudget at which to auto-compact older history (0–1).
   compactRatio: z.number().positive().max(1).default(0.8),
+  // Abort a turn and surface a retryable error if the model streams nothing for this
+  // many milliseconds (paused during tool execution). Guards against a stalled
+  // provider/proxy hanging the turn indefinitely. Raise it for very slow reasoning
+  // endpoints; there's no way to disable it short of a very large value.
+  idleTimeoutMs: z.number().int().positive().default(90_000),
+  // Hard cap on a single turn's total wall-clock in milliseconds, streaming or not
+  // (unlike idleTimeoutMs, NOT paused during tool execution). A backstop against a
+  // turn that makes steady progress but loops without converging. 0 disables it
+  // (the default) — a legitimate large refactor can run many minutes.
+  turnTimeoutMs: z.number().int().nonnegative().default(0),
   // Modal (vim) editing in the prompt input.
   vim: z.boolean().default(false),
   // Active output style (persona) by name; loaded from .privateer/output-styles.

@@ -124,6 +124,23 @@ test("'/' opens the command autocomplete menu", async () => {
   unmount();
 });
 
+test("bare '/' caps the command menu and shows a '+N more' hint", async () => {
+  // A bare "/" matches every command. Left uncapped the menu can grow the
+  // dynamic footer past the terminal height, which makes Ink strand the prior
+  // frame in scrollback as a ghost input box. The menu must cap and disclose
+  // the remainder instead.
+  const history = { current: [] as string[] };
+  const { stdin, lastFrame, unmount } = render(
+    React.createElement(PromptInput, { busy: false, cwd: process.cwd(), queued: 0, commands: COMMAND_LIST, history, onSubmit: () => {} }),
+  );
+  await focusInput(stdin, lastFrame);
+  stdin.write("/");
+  assert.ok(await until(frameHas(lastFrame, /\+\d+ more/)), "menu should disclose truncated commands");
+  const shown = (lastFrame() ?? "").split("\n").filter((l) => /^\s*[›\s]\s*\/\w/.test(l)).length;
+  assert.ok(shown <= 8, `command menu should cap at 8 rows, saw ${shown}`);
+  unmount();
+});
+
 test("'@' opens the file autocomplete menu from the cwd", async () => {
   const dir = mkdtempSync(join(tmpdir(), "priv-mention-"));
   writeFileSync(join(dir, "alpha.txt"), "hi", "utf8");
@@ -355,4 +372,59 @@ test("Ctrl+Left/Right jump by word", async () => {
 test("Alt+Left/Right jump by word", async () => {
   assert.equal(await typeAndSubmit(["foo bar", ALT_LEFT, "X"]), "foo Xbar");
   assert.equal(await typeAndSubmit(["foo bar", CTRL_A, ALT_RIGHT, "X"]), "fooX bar");
+});
+
+// --- queued type-ahead stack --------------------------------------------------
+
+test("queued messages render as a stack above the input", async () => {
+  const history = { current: [] as string[] };
+  const { lastFrame, unmount } = render(
+    React.createElement(PromptInput, {
+      busy: true,
+      cwd: process.cwd(),
+      queued: 2,
+      queuedItems: ["fix the test", "then commit"],
+      commands: COMMAND_LIST,
+      history,
+      onSubmit: () => {},
+    }),
+  );
+  try {
+    assert.ok(await until(frameHas(lastFrame, /queued 1\. fix the test/)), "shows first queued item");
+    assert.match(lastFrame() ?? "", /queued 2\. then commit/);
+  } finally {
+    unmount();
+  }
+});
+
+test("Backspace on an empty prompt reclaims the last queued message for editing", async () => {
+  const history = { current: [] as string[] };
+  const queue = ["fix the test", "then commit"];
+  const reclaimed: string[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    React.createElement(PromptInput, {
+      busy: true,
+      cwd: process.cwd(),
+      queued: queue.length,
+      queuedItems: queue,
+      commands: COMMAND_LIST,
+      history,
+      onSubmit: () => {},
+      onEditLastQueued: () => {
+        const v = queue.pop();
+        if (v !== undefined) reclaimed.push(v);
+        return v;
+      },
+    }),
+  );
+  try {
+    await focusInput(stdin, lastFrame);
+    stdin.write("\x7f"); // backspace on the (empty) prompt
+    assert.ok(await until(() => reclaimed.length > 0), "onEditLastQueued should fire");
+    assert.equal(reclaimed[0], "then commit"); // most-recent first
+    // The reclaimed text is loaded into the editor buffer.
+    assert.ok(await until(frameHas(lastFrame, /then commit/)));
+  } finally {
+    unmount();
+  }
 });

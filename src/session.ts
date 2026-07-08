@@ -58,6 +58,9 @@ export interface SessionOptions {
     base64: string;
     size: number;
   }) => Promise<{ ok: boolean; reason?: string }>;
+  // Whether the relay is live right now, so send_file_to_client can bail early instead
+  // of prepping a transfer that would bounce. Omitted alongside sendFileToController.
+  isRemoteConnected?: () => boolean;
 }
 
 export interface Session {
@@ -113,6 +116,8 @@ export function createSession(opts: SessionOptions): Session {
       system,
       tools,
       maxSteps: Math.min(opts.config.maxSteps, 20),
+      idleTimeoutMs: opts.config.idleTimeoutMs,
+      turnTimeoutMs: opts.config.turnTimeoutMs,
     });
     let out = "";
     let toolUses = 0;
@@ -143,6 +148,7 @@ export function createSession(opts: SessionOptions): Session {
     attachments,
     askUser: opts.askUser,
     sendFileToController: opts.sendFileToController,
+    isRemoteConnected: opts.isRemoteConnected,
   });
   if (opts.allowedTools) {
     const allow = new Set(opts.allowedTools);
@@ -174,6 +180,8 @@ export function createSession(opts: SessionOptions): Session {
     maxSteps: opts.config.maxSteps,
     contextBudget: opts.config.contextBudget,
     compactRatio: opts.config.compactRatio,
+    idleTimeoutMs: opts.config.idleTimeoutMs,
+    turnTimeoutMs: opts.config.turnTimeoutMs,
   });
 
   return {

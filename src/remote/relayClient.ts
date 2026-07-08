@@ -61,6 +61,10 @@ export interface RelayCallbacks {
   onTerminate?: () => void;
   // The app answered a relayed approval request.
   onApprovalResponse: (id: string, decision: "allow" | "deny") => void;
+  // The app toggled no-quarter (unattended) mode: remote turns auto-approve like
+  // bypass mode instead of relaying every action, so the agent runs to completion.
+  // Dangerous/destructive actions still relay — they sit above bypass locally too.
+  onNoQuarter?: (on: boolean) => void;
   // A controller attached — push a transcript snapshot so it can catch up.
   onControllerAttached: () => void;
   // A file finished transferring from the app (reassembled from chunks). Held to
@@ -250,6 +254,7 @@ export class RelayClient {
       size?: number;
       seq?: number;
       data?: string;
+      on?: boolean;
     };
     try {
       frame = JSON.parse(data.toString());
@@ -272,6 +277,9 @@ export class RelayClient {
         break;
       case "approval_response":
         if (frame.id) this.cb.onApprovalResponse(frame.id, frame.decision === "deny" ? "deny" : "allow");
+        break;
+      case "no_quarter":
+        this.cb.onNoQuarter?.(frame.on === true);
         break;
       case "controller_attached":
         this.cb.onControllerAttached();
@@ -405,6 +413,13 @@ export class RelayClient {
     if (!this.isConnected()) return { ok: false, reason: "connection lost mid-transfer" };
     this.rawSend({ type: "file_end", id });
     return { ok: true };
+  }
+
+  // Echo the no-quarter (unattended auto-approve) state up to the controller so
+  // its toggle reflects what this terminal is actually doing. Sent on every
+  // change (ack) and on controller attach (a re-attaching app resyncs).
+  sendNoQuarter(on: boolean): void {
+    this.rawSend({ type: "no_quarter", on });
   }
 
   requestApproval(id: string, req: PermissionRequest): void {

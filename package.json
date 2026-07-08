@@ -66,6 +66,9 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^2.0.0",
+    "@noble/ciphers": "^2.1.1",
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.7.1",
     "@ai-sdk/cerebras": "^1.0.47",
     "@ai-sdk/deepseek": "^1.0.45",
     "@ai-sdk/fireworks": "^1.0.44",
@@ -74,6 +77,7 @@
     "@ai-sdk/mistral": "^2.0.36",
     "@ai-sdk/moonshotai": "^0.0.13",
     "@ai-sdk/openai": "^2.0.0",
+    "@ai-sdk/openai-compatible": "^1.0.42",
     "@ai-sdk/togetherai": "^1.0.45",
     "@ai-sdk/xai": "^2.0.76",
     "@modelcontextprotocol/sdk": "^1.29.0",

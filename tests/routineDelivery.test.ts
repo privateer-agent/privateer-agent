@@ -81,6 +81,54 @@ test("delivery: relay + file records both, no backstop notice", async () => {
   });
 });
 
+// --- cloud outbox ----------------------------------------------------------------
+
+test("delivery: cloud sent needs no notice backstop", async () => {
+  await withHome(async () => {
+    let seen: { content: string; status: string } | undefined;
+    const report = await deliver(routine(["cloud"]), "hello", "ok", {
+      pushCloud: async (_r, content, status) => {
+        seen = { content, status };
+        return "sent";
+      },
+    });
+    assert.deepEqual(seen, { content: "hello", status: "ok" });
+    assert.ok(report.delivered.includes("cloud"));
+    assert.equal(drainNotices().length, 0);
+  });
+});
+
+test("delivery: cloud queued (offline) is durable — no notice", async () => {
+  await withHome(async () => {
+    const report = await deliver(routine(["cloud"]), "x", "error", { pushCloud: async () => "queued" });
+    assert.ok(report.delivered.includes("cloud(queued)"));
+    assert.equal(drainNotices().length, 0); // the daemon buffered it to pending-cloud
+  });
+});
+
+test("delivery: cloud with no pusher wired falls back to a notice", async () => {
+  await withHome(async () => {
+    const report = await deliver(routine(["cloud"]), "x", "ok", {}); // no pushCloud
+    assert.ok(report.delivered.some((d) => d.startsWith("notice")));
+    assert.equal(drainNotices().length, 1); // not lost
+  });
+});
+
+test("delivery: cloud + file records both, no backstop notice", async () => {
+  await withHome(async () => {
+    const report = await deliver(routine(["cloud", "file"]), "x", "ok", { pushCloud: async () => "queued" });
+    assert.ok(report.delivered.includes("cloud(queued)"));
+    assert.ok(report.delivered.includes("file"));
+    assert.equal(drainNotices().length, 0);
+  });
+});
+
+test("schema: cloud is a valid delivery channel", () => {
+  const base = { id: "r-1", name: "x", cron: "0 8 * * *", prompt: "hi", cwd: "/tmp" };
+  const r = Routine.parse({ ...base, delivery: ["cloud", "file"] });
+  assert.deepEqual(r.delivery, ["cloud", "file"]);
+});
+
 // --- webhooks --------------------------------------------------------------------
 
 test("delivery: webhook posts the redacted body to the named endpoint", async () => {

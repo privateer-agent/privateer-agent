@@ -5,6 +5,7 @@ import { VERSION } from "../version.ts";
 import { theme } from "./theme.ts";
 import { WELCOME } from "./figures.ts";
 import { currentUser } from "../auth/privateer.ts";
+import { parseModelSpec } from "../providers/resolve.ts";
 
 // Collapse the user's home directory to ~ for a compact path display.
 function shortenPath(cwd: string): string {
@@ -35,8 +36,32 @@ const ANCHOR = [
   "   \\_|_/   ",
 ];
 
-export function Banner({ model }: { model: string }) {
+// The account line under the tagline, one of three states:
+//  - signed in            → "connected as <account>"
+//  - signed out, but the active model bills to a Privateer account → the model
+//    can't run until they sign in, so say so plainly (warning, not buried)
+//  - signed out on their own key → everything works; a quiet dim tease that an
+//    account adds hosted models and remote access, nothing more insistent
+function AccountLine({ model }: { model: string }) {
   const account = accountLabel();
+  if (account)
+    return (
+      <Text color={theme.dim}>
+        connected as <Text color={theme.accent}>{account}</Text>
+      </Text>
+    );
+  let provider = "";
+  try {
+    provider = parseModelSpec(model).provider;
+  } catch {
+    /* malformed spec — fall through to the BYO-key line */
+  }
+  if (provider === "privateer")
+    return <Text color={theme.warning}>not signed in · run /login to use this model</Text>;
+  return <Text color={theme.dim}>on your own key · /login adds account models & remote access</Text>;
+}
+
+export function Banner({ model }: { model: string }) {
   return (
     <Box flexDirection="column">
       <Box
@@ -60,11 +85,7 @@ export function Banner({ model }: { model: string }) {
           <Text color={theme.dim}>
             bring your own model or connect to Privateer · v{VERSION}
           </Text>
-          {account && (
-            <Text color={theme.dim}>
-              connected as <Text color={theme.accent}>{account}</Text>
-            </Text>
-          )}
+          <AccountLine model={model} />
           <Text> </Text>
           <Text>
             model <Text color={theme.accent}>{model}</Text>

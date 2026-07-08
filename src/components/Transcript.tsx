@@ -5,7 +5,7 @@ import { ToolCallView } from "./ToolCallView.tsx";
 import { AgentGroupView } from "./AgentGroupView.tsx";
 import { theme } from "./theme.ts";
 import { Markdown } from "./Markdown.tsx";
-import { BULLET, WELCOME } from "./figures.ts";
+import { BULLET, POINTER, WELCOME } from "./figures.ts";
 import { useTerminalWidth } from "./useTerminalWidth.ts";
 
 // Width of the marker gutter ("⏺ ", "✻ ", or two-space indent) that sits left of a
@@ -92,10 +92,17 @@ export function EntryView({
   const bodyWidth = Math.max(20, cols - GUTTER);
   switch (entry.kind) {
     case "user":
+      // The human's own words, echoed with the prompt's ❯ caret and a navy
+      // tint so they stand out as turn boundaries when scanning the transcript
+      // (assistant text is white, metadata gray — dim-on-dim buried these).
       return (
         <Box marginTop={1}>
-          <Text color={theme.dim}>{"> "}</Text>
-          <Text color={theme.dim}>{entry.text}</Text>
+          <Text bold color={theme.accent}>
+            {POINTER}{" "}
+          </Text>
+          <Box width={bodyWidth}>
+            <Text backgroundColor={theme.userBg}>{entry.text}</Text>
+          </Box>
         </Box>
       );
     case "assistant": {

@@ -101,6 +101,29 @@ function parseDdg(html: string, limit: number): string[] {
   return out;
 }
 
+// DDG's lite endpoint (used as a fallback) lays results out as <a class="result-link">.
+function parseDdgLite(html: string, limit: number): string[] {
+  const out: string[] = [];
+  const re = /<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) && out.length < limit) {
+    const href = decodeDdgHref(m[1]);
+    const title = htmlToText(m[2]);
+    if (title) out.push(`${title}\n  ${href}`);
+  }
+  return out;
+}
+
+// DuckDuckGo rate-limits by IP: after the first request or two it serves an HTTP 202
+// "anomaly" challenge page with zero results instead of blocking outright. If we don't
+// recognize that, web_search reports "no results" and the model keeps re-searching —
+// looking, to the user, like it hangs forever. Detect the challenge so we can return a
+// terminal message that tells the model to stop retrying.
+function isDdgBlocked(status: number, body: string): boolean {
+  if (status === 202 || status === 429) return true;
+  return /anomaly-modal|If this error persists|Unfortunately, bots use DuckDuckGo/i.test(body);
+}
+
 // DDG wraps results as //duckduckgo.com/l/?uddg=<encoded real url>.
 function decodeDdgHref(href: string): string {
   try {
@@ -129,17 +152,37 @@ export function webSearchTool(ctx: ToolContext) {
       });
       if (decision === "deny") throw new PermissionDeniedError("web_search");
 
-      const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-      let result;
-      try {
-        result = await fetchText(url);
-      } catch (err) {
-        return `Error searching: ${err instanceof Error ? err.message : String(err)}`;
+      const q = encodeURIComponent(query);
+      // Primary: the HTML endpoint. Fallback: the lite endpoint, whose markup differs.
+      // Both are keyless and both get rate-limited by IP, so we try each once and read
+      // the block signal rather than retrying blindly (which is what spun forever).
+      const attempts: Array<{ url: string; parse: (b: string, n: number) => string[] }> = [
+        { url: `https://html.duckduckgo.com/html/?q=${q}`, parse: parseDdg },
+        { url: `https://lite.duckduckgo.com/lite/?q=${q}`, parse: parseDdgLite },
+      ];
+
+      let blocked = false;
+      for (const attempt of attempts) {
+        let result;
+        try {
+          result = await fetchText(attempt.url);
+        } catch (err) {
+          return `Error searching: ${err instanceof Error ? err.message : String(err)}. Do not immediately retry web_search; use web_fetch on a specific URL instead.`;
+        }
+        if (isDdgBlocked(result.status, result.body)) {
+          blocked = true;
+          continue; // try the next endpoint before giving up
+        }
+        const results = attempt.parse(result.body, 8);
+        if (results.length) return `Results for "${query}":\n\n${results.join("\n\n")}`;
       }
-      const results = parseDdg(result.body, 8);
-      return results.length
-        ? `Results for "${query}":\n\n${results.join("\n\n")}`
-        : `No results parsed for "${query}" (DuckDuckGo markup may have changed). Try web_fetch with a direct URL.`;
+
+      // Every endpoint either blocked us or returned nothing. Return a terminal message:
+      // the key is telling the model NOT to keep calling web_search, which is what made
+      // the tool appear to hang forever when DuckDuckGo was rate-limiting the machine.
+      return blocked
+        ? `Web search is temporarily rate-limited by DuckDuckGo (anti-bot challenge). This is transient and IP-based — retrying web_search now will keep failing. Instead, use web_fetch on a specific URL you already know, answer from what you have, or ask the user to try again in a few minutes.`
+        : `No results for "${query}". Do not retry the same search repeatedly; try a different query once, or use web_fetch on a direct URL.`;
     },
   });
 }

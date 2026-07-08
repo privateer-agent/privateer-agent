@@ -47,8 +47,10 @@ export function routineTool(ctx: ToolContext) {
         .array(DeliveryEntry)
         .optional()
         .describe(
-          "How to deliver the result. Defaults to ['file']. 'email' and 'webhook:<name>' leave the " +
-            "machine (opt-in); webhook names must exist in the config `webhooks` section.",
+          "How to deliver the result. Defaults to ['file']. 'cloud' stores an end-to-end-encrypted " +
+            "copy in your Privateer account so the app catches up on it when next opened (the server " +
+            "only ever sees ciphertext). 'email' and 'webhook:<name>' leave the machine in plaintext " +
+            "(opt-in); webhook names must exist in the config `webhooks` section.",
         ),
       cwd: z.string().optional().describe("Working directory for the run. Defaults to the current one."),
       model: z.string().optional().describe("Optional 'provider:model' override."),

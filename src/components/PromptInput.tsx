@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { theme } from "./theme.ts";
 import { POINTER, TREE } from "./figures.ts";
@@ -25,6 +25,7 @@ export function PromptInput({
   busy,
   cwd,
   queued,
+  queuedItems = [],
   vimEnabled = false,
   commands,
   history,
@@ -32,10 +33,15 @@ export function PromptInput({
   pendingImagesRef,
   onSubmit,
   onClear,
+  onEditLastQueued,
+  onMenuToggle,
 }: {
   busy: boolean;
   cwd: string;
   queued: number;
+  // Text of the messages queued while busy, oldest first, for the live stack
+  // shown above the input.
+  queuedItems?: string[];
   vimEnabled?: boolean;
   commands: { name: string; summary: string }[];
   history: React.MutableRefObject<string[]>;
@@ -46,6 +52,15 @@ export function PromptInput({
   pendingImagesRef?: React.MutableRefObject<Attachment[]>;
   onSubmit: (value: string) => void;
   onClear?: () => void;
+  // Pop the most-recently queued message back out so Backspace on an empty
+  // prompt can reload it here to edit or drop it. Returns its text (or undefined
+  // when the queue is empty).
+  onEditLastQueued?: () => string | undefined;
+  // Fired when the autocomplete menu opens or closes (i.e. the footer's height
+  // jumps). Lets the parent repaint to clear any ghost frame Ink strands when the
+  // taller footer overflows the viewport. Only the transition matters, not which
+  // way — the parent decides whether a repaint is warranted (e.g. only when busy).
+  onMenuToggle?: (open: boolean) => void;
 }) {
   // value + cursor live in one state object so edits compose via functional
   // updates — robust to batched keystroke bursts (and to test harness input).
@@ -83,32 +98,49 @@ export function PromptInput({
   const sQuery = slashQuery(value, cursor);
   const mention = mentionAt(value, cursor);
 
-  const { candidates, menuKind } = useMemo((): {
+  const { candidates, menuKind, overflow } = useMemo((): {
     candidates: Candidate[];
     menuKind: "command" | "file" | null;
+    overflow: number;
   } => {
-    if (dismissed) return { candidates: [], menuKind: null };
+    if (dismissed) return { candidates: [], menuKind: null, overflow: 0 };
     if (sQuery !== null) {
-      const items: Candidate[] = filterCommands(commands, sQuery).map((c) => ({
+      // Cap the command list the same way the file list is capped below. An
+      // uncapped menu (a bare "/" matches every command) can grow the dynamic
+      // footer past the terminal height; Ink then under-erases and leaves the
+      // prior frame stranded in scrollback as a ghost input box.
+      const all = filterCommands(commands, sQuery);
+      const items: Candidate[] = all.slice(0, MENU_LIMIT).map((c) => ({
         value: c.name,
         label: `/${c.name}`,
         hint: c.summary,
       }));
-      return { candidates: items, menuKind: "command" };
+      return { candidates: items, menuKind: "command", overflow: all.length - items.length };
     }
     if (mention) {
       const items: Candidate[] = filterFiles(getFiles(), mention.query, MENU_LIMIT).map((f) => ({
         value: f,
         label: f,
       }));
-      return { candidates: items, menuKind: "file" };
+      return { candidates: items, menuKind: "file", overflow: 0 };
     }
-    return { candidates: [], menuKind: null };
+    return { candidates: [], menuKind: null, overflow: 0 };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, cursor, dismissed, commands]);
 
   const menuOpen = menuKind !== null && candidates.length > 0;
   const selClamped = Math.min(sel, Math.max(0, candidates.length - 1));
+
+  // Notify the parent only on an actual open↔close transition (the effect runs
+  // after commit, so any overflowing frame is already on screen and the repaint
+  // can clean up after it). The ref guard makes a changing onMenuToggle identity
+  // harmless — we fire on the boolean edge, not on every render.
+  const prevMenuOpen = useRef(menuOpen);
+  useEffect(() => {
+    if (prevMenuOpen.current === menuOpen) return;
+    prevMenuOpen.current = menuOpen;
+    onMenuToggle?.(menuOpen);
+  }, [menuOpen, onMenuToggle]);
 
   // --- cursor / buffer helpers ---
   type Buf = { value: string; cursor: number };
@@ -416,6 +448,14 @@ export function PromptInput({
         return { value: b.value.slice(0, i) + b.value.slice(b.cursor), cursor: i };
       });
     if (key.backspace || key.delete) {
+      // On an empty prompt, Backspace reclaims the most-recently queued message
+      // (entered while the agent was busy) back into the editor to revise or drop
+      // it, instead of being a no-op. Read the live buffer, not the render closure.
+      if (bufRef.current.value.length === 0 && onEditLastQueued) {
+        const reclaimed = onEditLastQueued();
+        if (reclaimed !== undefined) replaceBuf(reclaimed, reclaimed.length);
+        return;
+      }
       edit((b) =>
         b.cursor === 0
           ? b
@@ -517,6 +557,18 @@ export function PromptInput({
 
   return (
     <Box flexDirection="column">
+      {queuedItems.length > 0 && (
+        <Box flexDirection="column" marginLeft={1}>
+          {queuedItems.map((q, i) => (
+            <Text key={i} color={theme.dim} wrap="truncate-end">
+              {`${TREE} queued ${i + 1}. ${q.replace(/\s+/g, " ").trim()}`}
+            </Text>
+          ))}
+          <Text color={theme.dim} wrap="truncate-end">
+            {`  ⌫ on an empty prompt edits the last queued message`}
+          </Text>
+        </Box>
+      )}
       <Box borderStyle="round" borderColor={busy ? theme.dim : theme.accent} paddingX={1}>
         <Text color={busy ? theme.dim : theme.accent}>{`${POINTER} `}</Text>
         <Box flexDirection="column" flexGrow={1}>
@@ -558,6 +610,12 @@ export function PromptInput({
               {c.hint && <Text color={theme.dim}>{c.hint}</Text>}
             </Box>
           ))}
+          {overflow > 0 && (
+            <Box gap={1}>
+              <Text color={theme.dim}> </Text>
+              <Text color={theme.dim}>{`+${overflow} more — keep typing to narrow`}</Text>
+            </Box>
+          )}
         </Box>
       )}
     </Box>

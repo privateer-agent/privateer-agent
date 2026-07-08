@@ -253,6 +253,125 @@ test("a pre-aborted turn ends cleanly and persists partial history", async () =>
   }
 });
 
+// A model that emits a first chunk then goes silent forever (never emits again,
+// never closes) — the shape of a stalled provider/proxy hop. The engine's idle
+// watchdog must abort it rather than hang.
+function stallingModel() {
+  return {
+    specificationVersion: "v2",
+    provider: "mock",
+    modelId: "mock-1",
+    supportedUrls: {},
+    async doStream({ abortSignal }: any) {
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({ type: "text-start", id: "t1" });
+            controller.enqueue({ type: "text-delta", id: "t1", delta: "thinking" });
+            // ...and then nothing — a stall. A real provider tears the stream down
+            // when its request is aborted; mirror that so the watchdog's abort
+            // actually closes the stream (no leaked pending read).
+            abortSignal?.addEventListener("abort", () => {
+              try {
+                controller.error(new DOMException("Aborted", "AbortError"));
+              } catch {
+                /* already closed */
+              }
+            });
+          },
+        }),
+      };
+    },
+  };
+}
+
+test("a stalled stream trips the idle watchdog and yields a retryable error", async () => {
+  const engine = new QueryEngine({
+    routes: routesFor(stallingModel()),
+    system: "s",
+    tools: {},
+    maxSteps: 3,
+    idleTimeoutMs: 60, // tiny so the test doesn't wait
+  });
+
+  const events: string[] = [];
+  let err: { retryable?: boolean; error: string } | null = null;
+  for await (const ev of engine.send("go")) {
+    events.push(ev.type);
+    if (ev.type === "error") err = { retryable: ev.retryable, error: ev.error };
+  }
+
+  assert.ok(err, "should emit an error event on stall");
+  assert.equal(err?.retryable, true, "the stall error is retryable");
+  assert.match(err!.error, /stopped responding/);
+  assert.ok(!events.includes("finish"), "a stalled turn does not finish normally");
+  // The user message is retained so a retry keeps context.
+  assert.equal(engine.messages[0].role, "user");
+});
+
+// A model that streams a chunk every ~15ms forever — never idle, never finishing.
+// Only the turn wall-clock cap (not the idle watchdog) can stop it.
+function chattyEndlessModel() {
+  return {
+    specificationVersion: "v2",
+    provider: "mock",
+    modelId: "mock-1",
+    supportedUrls: {},
+    async doStream({ abortSignal }: any) {
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({ type: "text-start", id: "t1" });
+            const iv = setInterval(() => {
+              try {
+                controller.enqueue({ type: "text-delta", id: "t1", delta: "tick " });
+              } catch {
+                clearInterval(iv);
+              }
+            }, 15);
+            abortSignal?.addEventListener("abort", () => {
+              clearInterval(iv);
+              try {
+                controller.error(new DOMException("Aborted", "AbortError"));
+              } catch {
+                /* already closed */
+              }
+            });
+          },
+        }),
+      };
+    },
+  };
+}
+
+test("a turn that never converges trips the wall-clock cap with a retryable error", async () => {
+  const engine = new QueryEngine({
+    routes: routesFor(chattyEndlessModel()),
+    system: "s",
+    tools: {},
+    maxSteps: 3,
+    idleTimeoutMs: 10_000, // high — the stream is never idle, so this must NOT fire
+    turnTimeoutMs: 120, // low — the wall-clock cap is what stops it
+  });
+
+  let err: { retryable?: boolean; error: string } | null = null;
+  let sawText = false;
+  const types: string[] = [];
+  for await (const ev of engine.send("go")) {
+    types.push(ev.type);
+    if (ev.type === "text") sawText = true;
+    if (ev.type === "error") err = { retryable: ev.retryable, error: ev.error };
+  }
+
+  assert.ok(sawText, "the turn did stream (so it wasn't idle)");
+  assert.ok(err, "should emit an error on the wall-clock cap");
+  assert.equal(err?.retryable, true, "the timeout error is retryable");
+  assert.match(err!.error, /time limit/);
+  assert.ok(!types.includes("finish"), "a capped turn does not finish normally");
+});
+
 import { effectiveTokens } from "../src/engine/events.ts";
 
 test("effectiveTokens discounts cache reads and degrades to total without them", () => {

@@ -44,6 +44,13 @@ export interface QueryEngineOptions {
   // turn, older history is summarized away. 0/undefined disables auto-compaction.
   contextBudget?: number;
   compactRatio?: number;
+  // Abort a turn and surface a retryable error if the model streams nothing for this
+  // long (defaults to IDLE_TIMEOUT_MS). The watchdog is paused during tool execution.
+  idleTimeoutMs?: number;
+  // Max total wall-clock a single turn may run before it's aborted with a retryable
+  // error, streaming or not (NOT paused during tool execution). 0/undefined disables
+  // it (defaults to TURN_TIMEOUT_MS, which is 0).
+  turnTimeoutMs?: number;
 }
 
 // Number of most-recent messages kept verbatim when compacting.
@@ -53,6 +60,21 @@ const KEEP_RECENT = 6;
 // network) before any output streamed. Fatal errors (auth/billing/data-policy/bad
 // model) are never retried — describeError leaves their `retryable` flag unset.
 const MAX_RETRIES = 3;
+
+// Idle-stream watchdog: if the provider streams nothing — no text, reasoning, tool
+// delta, or step boundary — for this long, we abort the turn and surface a
+// retryable error instead of hanging indefinitely. Reasoning models legitimately
+// think for a while, but they still emit reasoning/keep-alive chunks; a truly silent
+// gap this long means the connection (or a proxy/TEE hop) stalled. The user's own
+// abort (esc) is separate and always honored.
+const IDLE_TIMEOUT_MS = 90_000;
+
+// Turn wall-clock cap: total elapsed time a single turn may run before we abort it,
+// regardless of whether it's streaming (unlike the idle watchdog, this is NOT paused
+// during tool execution — it bounds the whole turn). A backstop against a turn that
+// makes steady progress but loops without converging. Disabled by default (0): a
+// legitimate large refactor can run many minutes, so this is opt-in per config.
+const TURN_TIMEOUT_MS = 0;
 
 // The agent loop. Each `send` streams one user turn through the model, letting the
 // AI SDK run the multi-step tool loop internally (executing our tools' execute()),
@@ -118,6 +140,47 @@ export class QueryEngine {
     }
     const route = sel.route;
 
+    // Link the caller's abort (esc) to an internal controller we also trip on an
+    // idle-stream timeout or a turn wall-clock cap. The `*TimedOut` flags distinguish
+    // those from a user abort, so a watchdog abort is reported as a retryable error
+    // while a user abort stays a clean stop.
+    const turnController = new AbortController();
+    let idleTimedOut = false;
+    let turnTimedOut = false;
+    const onExternalAbort = () => turnController.abort();
+    if (signal) {
+      if (signal.aborted) turnController.abort();
+      else signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    const idleTimeoutMs = this.opts.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idleTimedOut = true;
+        turnController.abort();
+      }, idleTimeoutMs);
+    };
+    const disarmIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
+    // Turn wall-clock cap: armed once at turn start, never reset, fires regardless of
+    // streaming activity. Off when turnTimeoutMs <= 0.
+    const turnTimeoutMs = this.opts.turnTimeoutMs ?? TURN_TIMEOUT_MS;
+    const turnTimer =
+      turnTimeoutMs > 0
+        ? setTimeout(() => {
+            turnTimedOut = true;
+            turnController.abort();
+          }, turnTimeoutMs)
+        : undefined;
+    const cleanupWatchdog = () => {
+      disarmIdle();
+      if (turnTimer) clearTimeout(turnTimer);
+      signal?.removeEventListener("abort", onExternalAbort);
+    };
+
     let result;
     try {
       result = streamText({
@@ -126,7 +189,7 @@ export class QueryEngine {
         messages: route.cacheControl ? withCacheBreakpoints(this.messages) : this.messages,
         tools: this.opts.tools,
         stopWhen: stepCountIs(this.opts.maxSteps),
-        abortSignal: signal,
+        abortSignal: turnController.signal,
         // Re-place the rolling cache breakpoint on every internal tool-loop step.
         // streamText runs the multi-step loop itself, appending tool-call/result
         // messages between API calls; without this the breakpoint stays on the
@@ -146,6 +209,7 @@ export class QueryEngine {
         onError: () => {},
       });
     } catch (err) {
+      cleanupWatchdog();
       const d = describeError(err);
       yield { type: "error", error: d.message, hint: d.hint, retryable: d.retryable };
       return;
@@ -170,20 +234,66 @@ export class QueryEngine {
     // the authoritative number at finish.
     const baseline = this.usage;
     let stepsUsage = emptyUsage();
+    // Mid-step liveness: real usage only arrives at finish-step, so a long single
+    // step (e.g. a reasoning model thinking for minutes) would show "0 tokens" the
+    // whole time. Estimate output tokens from streamed characters (~4 chars/token)
+    // and tick the counter every ~25 estimated tokens; finish-step's authoritative
+    // number reconciles. Estimates never touch this.usage.
+    let streamedChars = 0;
+    let estTokens = 0;
+    const estimateTick = (): EngineEvent | null => {
+      const est = Math.round(streamedChars / 4);
+      if (est - estTokens < 25) return null;
+      estTokens = est;
+      const turn = addUsage(stepsUsage, {
+        inputTokens: 0,
+        outputTokens: est,
+        totalTokens: est,
+        cachedInputTokens: 0,
+      });
+      return { type: "usage", usage: addUsage(baseline, turn), turn };
+    };
 
+    armIdle(); // start the watchdog for the pre-first-chunk window
     try {
       for await (const part of result.fullStream) {
+        armIdle(); // any chunk is liveness — reset the idle deadline
         switch (part.type) {
-          case "text-delta":
+          case "text-delta": {
             if (part.text) {
               assistantText += part.text;
               yield { type: "text", text: part.text };
+              streamedChars += part.text.length;
+              const tick = estimateTick();
+              if (tick) yield tick;
             }
             break;
-          case "reasoning-delta":
-            if (part.text) yield { type: "reasoning", text: part.text };
+          }
+          case "reasoning-delta": {
+            if (part.text) {
+              yield { type: "reasoning", text: part.text };
+              streamedChars += part.text.length;
+              const tick = estimateTick();
+              if (tick) yield tick;
+            }
             break;
+          }
+          case "tool-input-delta": {
+            // A model streaming a big tool call (e.g. Write with a whole file as
+            // args) produces nothing visible until the call completes — count its
+            // arg chars so the token ticker shows liveness through it.
+            streamedChars += ((part as { delta?: string }).delta ?? "").length;
+            const tick = estimateTick();
+            if (tick) yield tick;
+            break;
+          }
           case "tool-call":
+            // Pause the watchdog across tool execution: the AI SDK runs the tool's
+            // execute() between this part and its tool-result with no intervening
+            // stream chunks, and a slow-but-healthy tool (e.g. a 2-min bash) must not
+            // read as a stalled model. Tools carry their own timeouts. The next part
+            // (tool-result, or the model resuming) re-arms it at the top of the loop.
+            disarmIdle();
             yield { type: "tool-call", id: part.toolCallId, name: part.toolName, input: part.input };
             break;
           case "tool-result":
@@ -205,6 +315,10 @@ export class QueryEngine {
           case "finish-step": {
             const u = (part as { usage?: Partial<UsageTotals> }).usage;
             if (u) {
+              // Authoritative usage supersedes the char-based estimate for this
+              // step; when a provider omits usage, keep estimating across steps.
+              streamedChars = 0;
+              estTokens = 0;
               stepsUsage = addUsage(stepsUsage, {
                 inputTokens: u.inputTokens ?? 0,
                 outputTokens: u.outputTokens ?? 0,
@@ -228,14 +342,21 @@ export class QueryEngine {
         }
       }
     } catch (err) {
-      if (signal?.aborted || isAbortError(err)) {
+      // Watchdog aborts are checked first: turnController.abort() also makes this look
+      // like an abort error, but we want to report it as a retryable timeout, not a
+      // clean stop. Persistence below still runs so partial output isn't lost.
+      if (idleTimedOut || turnTimedOut) {
+        /* reported after persistence */
+      } else if (signal?.aborted || isAbortError(err)) {
         aborted = true;
       } else {
+        cleanupWatchdog();
         const d = describeError(err);
         yield { type: "error", error: d.message, hint: d.hint, retryable: d.retryable };
         return;
       }
     }
+    cleanupWatchdog();
 
     // Persist the model's response so the next turn keeps context. On a clean finish
     // we use the SDK's structured messages; on an interrupt those may be unavailable,
@@ -252,6 +373,26 @@ export class QueryEngine {
     }
     if (!persisted && assistantText.trim()) {
       this.messages.push({ role: "assistant", content: assistantText });
+    }
+
+    if (idleTimedOut) {
+      yield {
+        type: "error",
+        error: `The model stopped responding — no output for ${Math.round(idleTimeoutMs / 1000)}s.`,
+        hint: "The provider or proxy may have stalled. Send the message again to retry, or switch models with /model.",
+        retryable: true,
+      };
+      return;
+    }
+
+    if (turnTimedOut) {
+      yield {
+        type: "error",
+        error: `The turn hit its ${Math.round(turnTimeoutMs / 1000)}s time limit and was stopped.`,
+        hint: "Raise `turnTimeoutMs` in config (or set it to 0 to disable), or narrow the request. Send a follow-up to continue from here.",
+        retryable: true,
+      };
+      return;
     }
 
     if (aborted) {

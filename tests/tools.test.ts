@@ -218,3 +218,61 @@ test("web_fetch rejects non-http urls", async () => {
     cleanup();
   }
 });
+
+test("send_file_to_client bails before reading the file when the relay is down", async () => {
+  let sends = 0;
+  const { cwd, run, cleanup } = setup({
+    sendFileToController: async () => {
+      sends++;
+      return { ok: true };
+    },
+    isRemoteConnected: () => false,
+  });
+  try {
+    writeFileSync(join(cwd, "page.html"), "<h1>hi</h1>");
+    const out = await run("send_file_to_client", { path: "page.html" });
+    assert.match(out, /remote access is off|isn't connected/i);
+    // The pre-check must short-circuit before ever touching the send closure.
+    assert.equal(sends, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("send_file_to_client sends when the relay is connected", async () => {
+  let sent: any = null;
+  const { cwd, run, cleanup } = setup({
+    sendFileToController: async (f) => {
+      sent = f;
+      return { ok: true };
+    },
+    isRemoteConnected: () => true,
+  });
+  try {
+    writeFileSync(join(cwd, "page.html"), "<h1>hi</h1>");
+    const out = await run("send_file_to_client", { path: "page.html" });
+    assert.match(out, /Sent page\.html/);
+    assert.equal(sent.name, "page.html");
+  } finally {
+    cleanup();
+  }
+});
+
+test("send_file_to_client skips the pre-check when connectivity is unknown (daemon/bare)", async () => {
+  let sent = false;
+  const { cwd, run, cleanup } = setup({
+    sendFileToController: async () => {
+      sent = true;
+      return { ok: true };
+    },
+    // No isRemoteConnected wired — the tool must not block on the pre-check.
+  });
+  try {
+    writeFileSync(join(cwd, "page.html"), "<h1>hi</h1>");
+    const out = await run("send_file_to_client", { path: "page.html" });
+    assert.match(out, /Sent page\.html/);
+    assert.equal(sent, true);
+  } finally {
+    cleanup();
+  }
+});
