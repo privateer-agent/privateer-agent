@@ -5,7 +5,7 @@
 <h1 align="center">⚓ Privateer</h1>
 
 <p align="center">
-  <strong>A provider-agnostic terminal coding agent — bring your own model, keep your own privacy.</strong>
+  <strong>A privacy-first, safe-by-default distribution of the <a href="https://pi.dev">Pi</a> coding agent — bring your own model, keep your own privacy.</strong>
 </p>
 
 <p align="center">
@@ -46,8 +46,37 @@ permission gate**.
 - **Privacy you can verify, not just trust.** Confidential-enclave (TEE) inference is
   cryptographically **attested** — not a policy promise — and an **on-device PII gate**
   warns before structured personal data ever leaves your machine for an unverified model.
-- **Genuinely extensible.** MCP servers, sub-agents, custom commands, and skills — all just
-  files. Nothing to compile.
+- **It's Pi underneath.** Privateer is a distribution of the [Pi](https://pi.dev) coding agent —
+  every Pi extension, skill, and command works, and Privateer's own features are just extensions
+  you can read, swap, or build on. Nothing to compile. See [Built on Pi](#built-on-pi).
+
+## Built on Pi
+
+Privateer is a **distribution of the [Pi](https://pi.dev) coding agent**
+(`@earendil-works/pi-coding-agent`): Pi is the runtime, the model routing, the interactive TUI,
+and the extension / skill / prompt discovery system — **everything that works in Pi works here.**
+What Privateer adds is a *moat* of Pi extensions layered on top:
+
+| Extension | What it adds |
+|---|---|
+| `privateer-gate` | safe-by-default permission gate + destructive-command danger filter |
+| `privateer-privacy` | `pi-privacy` — TEE attestation, ZDR routing, on-device PII gate — bound to the account tier resolver |
+| `privateer-account` | `/signin` billed inference against a Privateer account (device flow) |
+| `privateer-posture`, `privateer-tools` | live attestation shield + Privateer tool pack |
+| `rpiv-web-tools` | private-by-default web search (self-hosted SearXNG, no WebView) |
+| `pi-mcp-adapter`, `pi-subagents` | MCP servers · bounded parallel sub-agents |
+
+They're ordinary Pi extensions — inspect them, replace them, or build your own alongside.
+**Extend by discovery:** drop an extension into `~/.privateer/agent/extensions/` (move the home
+with `PRIVATEER_HOME`), add a skill or prompt beside it, or list an npm/git package under
+`packages` in `~/.privateer/agent/settings.json` — Pi auto-loads them on next launch, right next
+to Privateer's own. Any extension from the Pi ecosystem loads the same way. (There's no CLI flag
+for this — discovery is the entry point.)
+
+**The floor you can't lower is the safety gate.** While it's loaded, its block on destructive
+shell commands, secret exfiltration, and plan-mode escapes sits *above* every relaxation —
+`bypass` mode, the approval allowlist, even a phone-approved remote turn can't fire them
+silently. The moat is swappable; the floor under it holds.
 
 ## Highlights
 
@@ -126,6 +155,7 @@ export OLLAMA_BASE_URL=http://localhost:11434/v1   # local, keyless
 export NEAR_AI_API_KEY=...               # verifiable TEE inference (cloud.near.ai)
 export TINFOIL_API_KEY=...               # verifiable TEE inference (tinfoil.sh)
 export VENICE_API_KEY=vapi_...           # no-retention inference
+export PRIVATEER_API_KEY=sk-priv-...      # Privateer developer API (privateer.pro); or /signin instead
 ```
 
 Pick a model with **`/model`** (browse each configured provider's live catalog) or pass one
@@ -198,14 +228,17 @@ and protected files (`.env`, shell rc files…) are guarded — the gate is neve
 
 ## Extend it
 
-- **MCP servers** — declare them and their tools become first-class, gated like the rest
-  (local stdio, or remote HTTP with interactive OAuth).
-- **Sub-agents** — delegate investigations to bounded parallel agents that run under the same
-  permission gate.
+Everything below is a **Pi extension** loaded by discovery (see [Built on Pi](#built-on-pi)) —
+drop your own into `~/.privateer/agent/extensions/` and it loads the same way, gated like the rest.
+
+- **MCP servers** (`pi-mcp-adapter`) — declare them and their tools become first-class, gated
+  like the rest (local stdio, or remote HTTP with interactive OAuth).
+- **Sub-agents** (`pi-subagents`) — delegate investigations to bounded parallel agents that run
+  under the same permission gate.
 - **Routines** — saved tasks the daemon runs unattended; ask the agent to schedule work and
   approve it once.
-- **Web tools** — private-by-default web search/fetch with pluggable backends (self-hosted
-  SearXNG for fully private search).
+- **Web tools** (`rpiv-web-tools`) — private-by-default web search/fetch with pluggable backends
+  (self-hosted SearXNG for fully private search).
 
 ## Develop
 

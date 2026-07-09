@@ -1,9 +1,10 @@
-// The provider landscape — the single map of how each of privateer's 21 providers
+// The provider landscape — the single map of how each of privateer's 22 providers
 // becomes reachable under Pi. Written after verifying (2026-07-07) that:
 //   - pi-ai ships STATIC model catalogs for its 14 built-in providers, so they're
 //     selectable once a key is present — privateer emits NO models.json entry for them;
-//   - the `pi-privacy` extension registers the 5 privacy providers (tinfoil, nearai,
-//     venice, ollama, custom) at load — privateer emits NO entry for them either;
+//   - the `pi-privacy` extension registers the 6 privacy providers (tinfoil, nearai,
+//     venice, ollama, custom, privateer-api) at load — privateer emits NO entry for
+//     them either;
 //   - so the ONLY provider this generator must emit is `qwen` (config-only,
 //     non-privacy, no built-in catalog), and `privateer` (the account OAuth channel)
 //     is handled in code, not config (Phase 4).
@@ -65,6 +66,9 @@ export const PROVIDERS: ProviderEntry[] = [
   { id: "tinfoil", source: "pi-privacy" },
   { id: "venice", source: "pi-privacy" },
   { id: "custom", source: "pi-privacy" },
+  // Public developer-API surface (sk-priv-… key). Registered by the pi-privacy
+  // extension like the others; distinct from the in-app `privateer` account channel.
+  { id: "privateer-api", source: "pi-privacy" },
   { id: "privateer", source: "account" },
 ];
 
