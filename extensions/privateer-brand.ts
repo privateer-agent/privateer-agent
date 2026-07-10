@@ -9,12 +9,15 @@
 //      device-code flow the account channel needs.
 //
 // Pi already owns /login and /logout for PROVIDER auth (and /whoami), so we do NOT
-// shadow them. /signin drives the Privateer *account* device flow directly — which
-// has to exist separately, because the `privateer` inference provider only registers
-// once credentials exist, so a first-time user can't reach it through provider auth.
+// shadow them. The account provider now registers unconditionally (see
+// makeAccountProvider), so Privateer appears under Pi's /login "Use a subscription"
+// list and a first-time user CAN sign in through provider auth. /signin remains as a
+// friendlier, dedicated shortcut that drives the same account device-code flow
+// directly — one obvious command instead of /login → pick a provider.
 //
 // On a successful /signin we hot-register the account provider so privateer/* models
-// appear immediately, without a restart.
+// appear immediately (the account catalog refreshes to the live listing without a
+// restart).
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -54,7 +57,7 @@ const ANCHOR = [
   "  .-----.  ", // lock body top (the shackle's base)
   "  |  o  |  ", // lock body + keyhole
   "  '--+--'  ", // lock body base, shank exits
-  "  ---+---  ", // stock (crossbar)
+  "  /\\ | /\\  ", // stock — arms flare from the shank (each \\ is one backslash)
   "  \\  |  /  ", // arms
   "   \\_|_/   ", // flukes
 ];
@@ -150,7 +153,6 @@ function accountBadge(): string {
 export default function privateerBrand(pi: any): void {
   let currentModelProvider: string | undefined;
   let ctxRef: any = null;
-  let greeted = false;
 
   const setHeader = (ctx: any) =>
     ctx?.ui?.setHeader?.(() => headerComponent(currentModelProvider));
@@ -227,13 +229,8 @@ export default function privateerBrand(pi: any): void {
     if (!ctx?.hasUI) return; // headless (print/json): no banner or prompts
     ctx?.ui?.setTitle?.("Privateer");
     refresh(ctx);
-    if (!priv.hasCredentials() && !greeted) {
-      greeted = true;
-      ctx?.ui?.notify?.(
-        "Not signed in — run /signin to connect your Privateer account (adds hosted models + remote access).",
-        "info",
-      );
-    }
+    // No startup notify here: the banner's account line already surfaces the
+    // "not signed in · /signin" prompt, so a second line would just be noise.
   });
 
   // Keep the header's account line in sync with the picked model (the "this model

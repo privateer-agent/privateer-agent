@@ -59,15 +59,27 @@ shim pi-subagents      "$REPO/node_modules/pi-subagents/src/extension/index.ts"
 
 CLI="$REPO/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 export PI_CODING_AGENT_DIR="$AGENT_DIR"
+# Suppress Pi's upstream "Update Available — run `pi update`" banner. It's noise on a
+# Privateer install (our banner is the startup surface), it leaks the "pi" name, and
+# `pi update` would fight our npm-managed install. PI_SKIP_VERSION_CHECK disables ONLY
+# the version fetch — unlike PI_OFFLINE it still lets fd/rg download on first run.
+export PI_SKIP_VERSION_CHECK=1
 NODE_BIN="$(pick_node)"
 
-# Quiet Pi's built-in startup resource listing ([Extensions]/[Context]/[Skills]/…) by
-# default — our banner is the intended startup surface, and the extension list is noise.
-# Only set it when unset, so a later `--verbose` or a user's own settings toggle sticks.
+# Quiet Pi's built-in startup chatter so our banner is the only greeting. Each key is
+# set only when unset, so a user's own settings.json toggle (or --verbose) still wins:
+#   quietStartup       — hide the [Extensions]/[Context]/[Skills]/… resource listing
+#   collapseChangelog  — never dump Pi's "What's New" changelog wall into the chat
+#   lastChangelogVersion — sentinel so Pi finds no "new" entries to show on upgrade;
+#                          release notes live in the npm README / GitHub releases instead
 "$NODE_BIN" -e '
 const fs = require("fs"), p = process.argv[1];
 let s = {}; try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
-if (s.quietStartup === undefined) { s.quietStartup = true; fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n"); }
+let m = false;
+if (s.quietStartup === undefined) { s.quietStartup = true; m = true; }
+if (s.collapseChangelog === undefined) { s.collapseChangelog = true; m = true; }
+if (s.lastChangelogVersion === undefined) { s.lastChangelogVersion = "9999.0.0"; m = true; }
+if (m) fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
 ' "$AGENT_DIR/settings.json" 2>/dev/null || true
 
 # Default model: when signed in to a Privateer account, default to GLM 5.1 on the

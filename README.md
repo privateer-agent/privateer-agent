@@ -12,6 +12,9 @@
   <a href="https://www.npmjs.com/package/privateer-agent">
     <img src="https://img.shields.io/npm/v/privateer-agent" alt="npm" />
   </a>
+  <a href="https://github.com/privateer-agent/privateer-agent/releases">
+    <img src="https://img.shields.io/badge/changelog-what's%20new-5b8def" alt="Changelog" />
+  </a>
   <img src="https://img.shields.io/badge/node-%E2%89%A522.19-brightgreen" alt="Node >= 22.19" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
   <img src="https://img.shields.io/badge/permissions-safe%20by%20default-2ea44f" alt="Safe by default" />
@@ -246,6 +249,12 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 npm run typecheck
 npm test
 ```
+
+## Changelog
+
+Release notes and what's new in each version live on the
+[**GitHub releases page**](https://github.com/privateer-agent/privateer-agent/releases).
+Privateer keeps its startup clean — the app won't dump a changelog into your terminal.
 
 ## License
 
