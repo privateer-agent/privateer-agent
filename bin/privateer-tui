@@ -83,4 +83,10 @@ else
   MODEL="openrouter/openai/gpt-4o-mini"
 fi
 
-exec "$NODE_BIN" --env-file="$REPO/.env" "$CLI" --model "$MODEL" "$@"
+# Dev convenience: load provider keys from the repo's .env if present. A real install
+# has none — so only pass the flag when the file exists (using --env-file-if-exists
+# unconditionally would print "…/.env not found. Continuing without it." on every
+# launch, muddying the startup banner). No .env → rely on the ambient environment.
+ENV_ARGS=""
+[ -f "$REPO/.env" ] && ENV_ARGS="--env-file=$REPO/.env"
+exec "$NODE_BIN" ${ENV_ARGS:+"$ENV_ARGS"} "$CLI" --model "$MODEL" "$@"
