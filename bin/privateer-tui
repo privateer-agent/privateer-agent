@@ -18,6 +18,15 @@ while [ -h "$SOURCE" ]; do
 done
 REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
+# `privateer update` — pull the latest release from npm and exit. Handled here in the
+# launcher (not the TUI) so it works even when a broken install won't boot. npm rewrites
+# the global bin in place; replacing it while this process runs is safe on unix.
+if [ "${1:-}" = "update" ]; then
+  echo "Updating privateer-agent to the latest release…"
+  npm install -g privateer-agent@latest
+  exit $?
+fi
+
 pick_node() {
   if command -v node >/dev/null 2>&1 \
      && node -e 'process.exit((+process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
@@ -81,6 +90,23 @@ if (s.collapseChangelog === undefined) { s.collapseChangelog = true; m = true; }
 if (s.lastChangelogVersion === undefined) { s.lastChangelogVersion = "9999.0.0"; m = true; }
 if (m) fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
 ' "$AGENT_DIR/settings.json" 2>/dev/null || true
+
+# Passive update check: refresh the cached "latest npm version" at most ~daily, in the
+# BACKGROUND so it never blocks or breaks launch (offline-safe — a failed fetch just
+# leaves the stale cache in place). The banner (privateer-brand) reads this cache and
+# shows a one-line "↑ vX available · run privateer update" notice when we're behind. We
+# never auto-install — the user stays in control of when new code lands (the whole point
+# of an attestable tool). Detached with </dev/null &, so it outlives our exec into node.
+UPDATE_CACHE="${PRIVATEER_HOME:-$HOME/.privateer}/update-check.json"
+if [ -z "$(find "$UPDATE_CACHE" -mtime -1 2>/dev/null)" ]; then
+  (
+    latest="$(npm view privateer-agent version 2>/dev/null || true)"
+    case "$latest" in
+      [0-9]*) printf '{"latest":"%s"}\n' "$latest" > "$UPDATE_CACHE.tmp" 2>/dev/null \
+                && mv -f "$UPDATE_CACHE.tmp" "$UPDATE_CACHE" 2>/dev/null ;;
+    esac
+  ) </dev/null >/dev/null 2>&1 &
+fi
 
 # Default model: when signed in to a Privateer account, default to GLM 5.1 on the
 # account's NEAR confidential-compute (TEE) channel — attestable, strongest privacy

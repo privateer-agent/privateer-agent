@@ -21,6 +21,7 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import * as priv from "../src/auth/privateer.ts";
 import { makeAccountProvider } from "../src/providers/account.ts";
 
@@ -105,6 +106,34 @@ function accountLine(modelProvider?: string): string {
   return `${DIM}not signed in · ${OCEAN_LIGHT}/signin${DIM} to connect your account${RESET}`;
 }
 
+// Is dotted version `a` newer than `b`? Plain numeric compare of major.minor.patch —
+// enough for our npm releases; anything unparseable sorts as 0 and is treated as older.
+function isNewer(a: string, b: string): boolean {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return true;
+    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return false;
+  }
+  return false;
+}
+
+// The "update available" banner line, or "" when we're current / offline / unchecked.
+// Reads the cache the launcher refreshes in the background (see bin/privateer-tui) —
+// never fetches here, so the banner stays synchronous and never blocks on the network.
+function updateNotice(): string {
+  try {
+    const home = process.env.PRIVATEER_HOME || join(homedir(), ".privateer");
+    const { latest } = JSON.parse(readFileSync(join(home, "update-check.json"), "utf8"));
+    if (typeof latest === "string" && isNewer(latest, VERSION)) {
+      return `${YELLOW}↑ v${latest} available${DIM} · run ${RESET}${OCEAN_LIGHT}privateer update${RESET}`;
+    }
+  } catch {
+    // no cache yet, unreadable, or malformed — show nothing.
+  }
+  return "";
+}
+
 // Compose the framed banner: anchor column + text column, inside a rounded accent box.
 function renderBanner(width: number, modelProvider?: string): string[] {
   // Leading blanks drop the text block so the wordmark sits beside the lock body and
@@ -119,8 +148,11 @@ function renderBanner(width: number, modelProvider?: string): string[] {
     `${DIM}privateer-agent ${OCEAN_LIGHT}v${VERSION}${RESET}`,
     `${OCEAN_LIGHT}${shortCwd()}${RESET}`,
   ];
-  // Build the body rows (anchor + gutter + text).
+  // Build the body rows (anchor + gutter + text). A pending-update notice, if any, gets
+  // its own row under the block, indented to sit beneath the text column.
   const rows = ANCHOR.map((a, i) => `${OCEAN}${a}${RESET}  ${right[i] ?? ""}`);
+  const notice = updateNotice();
+  if (notice) rows.push(`      ${notice}`);
   const cap = Math.max(20, width - 4); // 2 border cells + 2 padding
   const inner = Math.min(cap, Math.max(...rows.map(vlen)));
   const bar = "─".repeat(inner + 2);
@@ -162,6 +194,31 @@ export default function privateerBrand(pi: any): void {
     setHeader(ctx);
     ctx?.ui?.setStatus?.("account", accountBadge());
   };
+
+  // /update — run the global npm install in a child process and report the outcome via
+  // notify (the TUI keeps running the OLD code; npm swaps the global bin's inode in
+  // place, so replacing it under us is safe and the new version loads on next launch).
+  async function doUpdate(ctx: any): Promise<void> {
+    ctx?.ui?.notify?.("Updating Privateer — running npm install -g privateer-agent@latest…", "info");
+    try {
+      const { execFile } = await import("node:child_process");
+      const stderr: string = await new Promise((resolve, reject) => {
+        execFile(
+          "npm",
+          ["install", "-g", "privateer-agent@latest"],
+          { timeout: 180_000 },
+          (err, _out, errOut) => (err ? reject(new Error(String(errOut || err.message).trim())) : resolve(String(errOut || ""))),
+        );
+      });
+      void stderr;
+      ctx?.ui?.notify?.("Updated. Restart `privateer` to run the new version.", "info");
+    } catch (e) {
+      ctx?.ui?.notify?.(
+        `Update failed: ${(e as Error).message || e}. Try manually: npm install -g privateer-agent@latest`,
+        "error",
+      );
+    }
+  }
 
   async function doSignIn(ctx: any): Promise<void> {
     if (priv.hasCredentials()) {
@@ -251,6 +308,10 @@ export default function privateerBrand(pi: any): void {
     ctxRef?.ui?.notify?.("Your Privateer session expired. Run /signin to sign back in.", "warning");
   });
 
+  pi.registerCommand?.("update", {
+    description: "Update Privateer to the latest release (npm i -g privateer-agent@latest)",
+    handler: (_args: string, ctx: any) => doUpdate(ctx),
+  });
   pi.registerCommand?.("signin", {
     description: "Sign in to your Privateer account (device-code flow)",
     handler: (_args: string, ctx: any) => doSignIn(ctx),
