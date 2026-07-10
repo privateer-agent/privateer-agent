@@ -136,8 +136,16 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
   }
 }
 
-// Extension factory: registers the account provider when a machine login exists. No
-// login → nothing registered (BYO-key only).
+// Extension factory: registers the account provider so `/login` can offer it.
+//
+// We register UNCONDITIONALLY (not only when a machine login already exists). Pi's
+// `/login` builds its "Use a subscription" list from the OAuth providers registered
+// here (authStorage.getOAuthProviders()); a not-yet-logged-in machine has no
+// credentials, so gating registration on hasCredentials() left `/login` with no
+// Privateer option — the classic chicken-and-egg where you can't log in because
+// you're not logged in. The OAuth provider's login() itself runs the device-code
+// flow when hasCredentials() is false (see privateerOAuthProvider.login), so first
+// login works entirely through Pi once the provider is present.
 //
 // Registration is SYNCHRONOUS (seeded with the fallback), then refined once the live
 // catalog is fetched. This matters: Pi flushes provider registrations made during the
@@ -151,7 +159,7 @@ export function makeAccountProvider() {
   return (pi: {
     registerProvider?: (name: string, config: unknown) => void;
   }): void => {
-    if (!hasCredentials() || typeof pi.registerProvider !== "function") return;
+    if (typeof pi.registerProvider !== "function") return;
     const register = (ids: string[]): void =>
       pi.registerProvider!("privateer", {
         name: "Privateer account",
