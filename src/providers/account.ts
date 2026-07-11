@@ -66,18 +66,34 @@ export async function fetchAccountModels(): Promise<string[]> {
 export const privateerOAuthProvider = {
   name: "Privateer account",
   usesCallbackServer: false,
-  async login(cb: { onDeviceCode?: (info: unknown) => void }) {
+  // Pi's login dialog passes `signal` (its cancel AbortController) alongside the
+  // callbacks. We MUST thread it into runDeviceLogin — otherwise escape/ctrl+c
+  // aborts the dialog's signal but our poll loop never sees it, the login()
+  // promise never settles, and Pi never restores the editor: the "Waiting for
+  // authentication…" screen hangs with no way out. See auth/privateer.ts
+  // pollForToken, which checks the signal and rejects with "Login cancelled.".
+  async login(cb: { onDeviceCode?: (info: unknown) => void; signal?: AbortSignal }) {
     if (!hasCredentials()) {
-      await runDeviceLogin({
-        onCode: (code) =>
-          cb.onDeviceCode?.({
-            userCode: code.user_code,
-            verificationUri: code.verification_uri_complete ?? code.verification_uri ?? "",
-            intervalSeconds: code.interval,
-            expiresInSeconds: code.expires_in,
-          }),
-      });
+      try {
+        await runDeviceLogin({
+          signal: cb.signal,
+          onCode: (code) =>
+            cb.onDeviceCode?.({
+              userCode: code.user_code,
+              verificationUri: code.verification_uri_complete ?? code.verification_uri ?? "",
+              intervalSeconds: code.interval,
+              expiresInSeconds: code.expires_in,
+            }),
+        });
+      } catch (e) {
+        // Normalize the cancel message to exactly "Login cancelled" (no period):
+        // Pi's login dialog only suppresses its "Failed to login…" error toast for
+        // that exact string, so a cancel should exit quietly, not flash an error.
+        if (cb.signal?.aborted) throw new Error("Login cancelled");
+        throw e;
+      }
     }
+    if (cb.signal?.aborted) throw new Error("Login cancelled");
     return spawnAccountCredentials();
   },
   async refreshToken(creds: { refresh: string }) {
