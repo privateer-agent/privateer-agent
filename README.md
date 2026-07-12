@@ -63,6 +63,7 @@ What Privateer adds is a *moat* of Pi extensions layered on top:
 | Extension | What it adds |
 |---|---|
 | `privateer-gate` | safe-by-default permission gate + destructive-command danger filter |
+| `privateer-context` | loads `PRIVATEER.md` project context (like `AGENTS.md`/`CLAUDE.md`) + the `/init` command |
 | `privateer-privacy` | `pi-privacy` — TEE attestation, ZDR routing, on-device PII gate — bound to the account tier resolver |
 | `privateer-account` | `/signin` billed inference against a Privateer account (device flow) |
 | `privateer-posture`, `privateer-tools` | live attestation shield + Privateer tool pack |
@@ -167,6 +168,24 @@ directly as `provider/model` — e.g. `openrouter/anthropic/claude-opus-4.8`,
 vLLM, llama.cpp) works as a custom provider — just give it a base URL.
 
 Override the config location with `PRIVATEER_HOME`.
+
+## Context files — `PRIVATEER.md`
+
+Give the agent standing knowledge about your project — conventions, common commands,
+domain notes — by dropping a **`PRIVATEER.md`** in the directory. Privateer loads it
+automatically at the start of every turn and prepends it to the model's system prompt,
+exactly the way Pi loads `AGENTS.md` / `CLAUDE.md` (all three are recognized, and all
+matching files are concatenated).
+
+Run **`/init`** to scaffold a starter `PRIVATEER.md` in the current directory, then edit
+it. The startup banner shows a **⚓** line with the loaded file's path (and a `+N` count
+when ancestor files also apply), or a `/init` hint when none is found.
+
+Discovery mirrors Pi's context-file lookup: the global agent dir
+(`~/.privateer/agent/PRIVATEER.md`) first, then every directory from the filesystem root
+down to the current one — so a repo-root `PRIVATEER.md` applies to every subdirectory, and
+a deeper file can refine it. `AGENTS.md` and `CLAUDE.md` continue to work unchanged; use
+`--no-context-files` (`-nc`) to disable context-file loading entirely.
 
 ## Private & verifiable inference
 

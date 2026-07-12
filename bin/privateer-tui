@@ -46,11 +46,13 @@ mkdir -p "$EXT_DIR"
 # ABSOLUTE path so the target's own relative imports resolve from the repo (a plain
 # symlink would resolve them relative to the shim's location and break). We remove
 # any shim we previously managed first, so a dropped package can't linger and reload.
-MANAGED="privateer-brand privateer-gate privateer-account privateer-posture privateer-tools privateer-privacy pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
+MANAGED="privateer-brand privateer-context privateer-gate privateer-account privateer-posture privateer-tools privateer-privacy pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
 for name in $MANAGED; do rm -f "$EXT_DIR/$name.ts"; done
 shim() { printf 'export { default } from "%s";\n' "$2" > "$EXT_DIR/$1.ts"; }
 # Branding + the account sign-in surface (banner, ⚓ badge, /signin /signout).
 shim privateer-brand   "$REPO/extensions/privateer-brand.ts"
+# PRIVATEER.md project-context loading (like AGENTS.md/CLAUDE.md) + the /init command.
+shim privateer-context "$REPO/extensions/privateer-context.ts"
 shim privateer-gate    "$REPO/extensions/privateer-gate.ts"
 shim privateer-account "$REPO/extensions/privateer-account.ts"
 shim privateer-posture "$REPO/extensions/privateer-posture.ts"
@@ -108,13 +110,22 @@ if [ -z "$(find "$UPDATE_CACHE" -mtime -1 2>/dev/null)" ]; then
   ) </dev/null >/dev/null 2>&1 &
 fi
 
-# Default model: when signed in to a Privateer account, default to GLM 5.1 on the
-# account's NEAR confidential-compute (TEE) channel — attestable, strongest privacy
-# tier. Otherwise (BYO key, no account) fall back to a cheap OpenRouter model. An
-# explicit PRIVATEER_MODEL always wins.
+# Default model. An explicit PRIVATEER_MODEL always wins. Otherwise prefer Tinfoil's
+# GLM 5.2 when a Tinfoil key is available: verifiable TEE inference with CLIENT-side
+# attestation (the live TLS key is bound to the enclave's quote), the strongest privacy
+# tier we offer — stronger than the account's server-proxied NEAR channel. Failing that,
+# use the signed-in Privateer account's NEAR confidential-compute channel; with neither,
+# fall back to a cheap OpenRouter model. The Tinfoil key may sit in the ambient env or in
+# the dev .env the launcher loads below, so check both.
 CRED="${PRIVATEER_HOME:-$HOME/.privateer}/credentials.json"
+have_tinfoil_key() {
+  [ -n "${TINFOIL_API_KEY:-}" ] && return 0
+  [ -f "$REPO/.env" ] && grep -qE '^TINFOIL_API_KEY=.+' "$REPO/.env"
+}
 if [ -n "${PRIVATEER_MODEL:-}" ]; then
   MODEL="$PRIVATEER_MODEL"
+elif have_tinfoil_key; then
+  MODEL="tinfoil/glm-5-2"
 elif [ -f "$CRED" ]; then
   MODEL="privateer/near/zai-org/GLM-5.1-FP8"
 else

@@ -19,11 +19,12 @@
 // appear immediately (the account catalog refreshes to the live listing without a
 // restart).
 
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import * as priv from "../src/auth/privateer.ts";
 import { makeAccountProvider } from "../src/providers/account.ts";
+import { discoverContextFiles, onContextChanged } from "../src/context.ts";
 
 const VERSION: string = (() => {
   try {
@@ -51,14 +52,14 @@ const YELLOW = `${ESC}33m`;
 
 // The Privateer mark in ASCII: a padlock (with keyhole) atop an anchor — "bring your
 // own model" meets lock-and-key privacy, echoing the app's anchor+padlock logo. Every
-// line is the same visible width (11) so the text column beside it stays aligned.
+// line is the SAME visible width (MARK_W) and centers on column 5 (the shank/keyhole),
+// so the text column beside it stays aligned. Keep them equal-width if you edit the art.
+const MARK_W = 11;
 const ANCHOR = [
   "    .-.    ", // shackle arch
-  "   |   |   ", // shackle legs
-  "  .-----.  ", // lock body top (the shackle's base)
-  "  |  o  |  ", // lock body + keyhole
-  "  '--+--'  ", // lock body base, shank exits
-  "  /\\ | /\\  ", // stock — arms flare from the shank (each \\ is one backslash)
+  "   |___|   ", // lock body top (the shackle's base)
+  "   |_t_|   ", // lock body + keyhole
+  " /\\  |  /\\ ", // stock — arms flare from the shank (each \\ is one backslash)
   "  \\  |  /  ", // arms
   "   \\_|_/   ", // flukes
 ];
@@ -82,11 +83,16 @@ function clean(s: unknown): string {
   return String(s ?? "").replace(CONTROL_RE, "");
 }
 
-function shortCwd(): string {
-  const cwd = process.cwd();
+// Collapse $HOME to ~ in an absolute path, and strip control bytes (paths come off the
+// filesystem). Shared by the cwd line and the PRIVATEER.md line.
+function shortPath(p: string): string {
   const home = homedir();
-  const path = cwd === home || cwd.startsWith(home + "/") ? "~" + cwd.slice(home.length) : cwd;
-  return clean(path);
+  const short = p === home || p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
+  return clean(short);
+}
+
+function shortCwd(): string {
+  return shortPath(process.cwd());
 }
 
 // The account line under the tagline — three states, ported from tree-cli's Banner:
@@ -134,25 +140,73 @@ function updateNotice(): string {
   return "";
 }
 
-// Compose the framed banner: anchor column + text column, inside a rounded accent box.
+// The PRIVATEER.md line under the block: green anchor when a project-context file is
+// loaded (so the moat's "the agent knows this project" state is visible), otherwise a
+// quiet tease that /init scaffolds one. Reads the filesystem at render time, so it
+// reflects the current cwd and updates after /init (via onContextChanged → refresh).
+function contextLine(): string {
+  const files = discoverContextFiles();
+  if (files.length === 0) {
+    return `${DIM}no PRIVATEER.md · ${OCEAN_LIGHT}/init${DIM} to add project context${RESET}`;
+  }
+  // Show the nearest (deepest, wins-last) file's path; note any additional ancestors
+  // with a "+N" so the header stays one line but the count isn't hidden.
+  const nearest = shortPath(files[files.length - 1].path);
+  const more = files.length > 1 ? `${DIM} +${files.length - 1}${RESET}` : "";
+  return `${GREEN}⚓${DIM} ${RESET}${OCEAN_LIGHT}${nearest}${RESET}${more}`;
+}
+
+// ── "What's New" — a tiny in-banner changelog ────────────────────────────────
+// A hand-curated highlights list (newest first). Not the full changelog — just the two
+// or three things a returning user should notice. `cmd`, when present, is rendered in the
+// accent color so the actionable bit stands out from the prose. Trim this as it ages.
+const WHATS_NEW: Array<{ text: string; cmd?: string }> = [
+  { text: "Privateer agent CLI is live —", cmd: "npm i -g privateer-agent" },
+  { text: "PRIVATEER.md project context —", cmd: "/init" },
+  { text: "Self-update built in —", cmd: "privateer update" },
+];
+
+function whatsNewRows(): string[] {
+  const head = `${BOLD}${OCEAN_LIGHT}✦ What's new${RESET}`;
+  const items = WHATS_NEW.map(
+    ({ text, cmd }) =>
+      `${OCEAN}·${RESET} ${DIM}${text}${RESET}${cmd ? ` ${OCEAN_LIGHT}${cmd}${RESET}` : ""}`,
+  );
+  return [head, ...items];
+}
+
+// Compose the framed banner: the mark on the left, an independent text column on the
+// right. The two columns have DIFFERENT heights (the text runs longer than the 6-line
+// mark), so we zip by row index and pad the short side — every text-only row lands in
+// the same column as the rows beside the mark. One place owns the left gutter, so
+// spacing can't drift between the mark rows and the trailing rows.
 function renderBanner(width: number, modelProvider?: string): string[] {
-  // Leading blanks drop the text block so the wordmark sits beside the lock body and
-  // the shackle rises above it (one entry per anchor line — 8 total).
-  const right = [
+  // Right column, top to bottom. The two leading blanks drop the wordmark down so it
+  // sits beside the lock body (not the shackle); the rest follows in reading order.
+  const text: string[] = [
     "",
-    "",
-    `${BOLD}${OCEAN_LIGHT}✻ ${OCEAN}P${OCEAN_LIGHT}RIVATEER${RESET}`,
+    `${BOLD}${OCEAN_LIGHT}✻ ${OCEAN}P${OCEAN_LIGHT}RIVATEER${RESET}${DIM}   privateer-agent ${OCEAN_LIGHT}v${VERSION}${RESET}`,
     `${DIM}Chart your own course privately.${RESET}`,
     "",
     accountLine(modelProvider),
-    `${DIM}privateer-agent ${OCEAN_LIGHT}v${VERSION}${RESET}`,
     `${OCEAN_LIGHT}${shortCwd()}${RESET}`,
+    contextLine(),
   ];
-  // Build the body rows (anchor + gutter + text). A pending-update notice, if any, gets
-  // its own row under the block, indented to sit beneath the text column.
-  const rows = ANCHOR.map((a, i) => `${OCEAN}${a}${RESET}  ${right[i] ?? ""}`);
   const notice = updateNotice();
-  if (notice) rows.push(`      ${notice}`);
+  if (notice) text.push(notice);
+  // A blank spacer, then the What's New block — set off below the identity lines.
+  text.push("", ...whatsNewRows());
+
+  // Zip the mark and the text column by row. Rows past the mark's height get a blank
+  // gutter of the mark's width, so the text stays in one column throughout.
+  const gap = "  ";
+  const height = Math.max(ANCHOR.length, text.length);
+  const rows: string[] = [];
+  for (let i = 0; i < height; i++) {
+    const left = i < ANCHOR.length ? `${OCEAN}${ANCHOR[i]}${RESET}` : " ".repeat(MARK_W);
+    rows.push(`${left}${gap}${text[i] ?? ""}`.trimEnd());
+  }
+
   const cap = Math.max(20, width - 4); // 2 border cells + 2 padding
   const inner = Math.min(cap, Math.max(...rows.map(vlen)));
   const bar = "─".repeat(inner + 2);
@@ -186,13 +240,43 @@ export default function privateerBrand(pi: any): void {
   let currentModelProvider: string | undefined;
   let ctxRef: any = null;
 
+  // TEMP debug trace (PRIVATEER_DEBUG=1): append a line to ~/.privateer/brand-debug.log
+  // so we can see, from a real sign-in, whether the refresh path fires and with what state.
+  const dbg = (msg: string): void => {
+    if (!process.env.PRIVATEER_DEBUG) return;
+    try {
+      const home = process.env.PRIVATEER_HOME || join(homedir(), ".privateer");
+      appendFileSync(join(home, "brand-debug.log"), `${new Date().toISOString()} ${msg}\n`);
+    } catch {
+      /* best effort */
+    }
+  };
+
   const setHeader = (ctx: any) =>
     ctx?.ui?.setHeader?.(() => headerComponent(currentModelProvider));
 
   const refresh = (ctx: any) => {
+    dbg(`refresh: hasUI=${!!ctx?.hasUI} hasSetHeader=${typeof ctx?.ui?.setHeader} user=${priv.currentUser()?.email ?? null}`);
     if (!ctx?.hasUI) return;
     setHeader(ctx);
     ctx?.ui?.setStatus?.("account", accountBadge());
+  };
+
+  // Drop Pi's PERSISTED account credential (the "privateer" entry in auth.json).
+  // Pi reuses this credential on the next launch and refreshes it only when it
+  // EXPIRES — never reactively on a 401 (see the LIFECYCLE HAZARD note in
+  // src/auth/privateer.ts). So whenever the machine login goes away — an explicit
+  // /signout, or a revocation/expiry we detect server-side — we MUST also drop this
+  // persisted copy, or the next run reuses a token that's already dead server-side
+  // and dead-ends on the first inference. Removing it makes the next /signin spawn a
+  // fresh session. Reached via the model registry (constructed with the auth
+  // storage; see session.ts). Best-effort: nothing persisted → nothing to do.
+  const dropPersistedAccount = (ctx: any): void => {
+    try {
+      ctx?.modelRegistry?.authStorage?.remove?.("privateer");
+    } catch {
+      /* no persisted credential / older Pi without this shape — nothing to do */
+    }
   };
 
   // /update — run the global npm install in a child process and report the outcome via
@@ -266,6 +350,7 @@ export default function privateerBrand(pi: any): void {
     if (!priv.hasCredentials()) return ctx?.ui?.notify?.("Not signed in.", "info");
     const u = priv.currentUser();
     await priv.logout();
+    dropPersistedAccount(ctx);
     refresh(ctx);
     ctx?.ui?.notify?.(`Signed out${u?.email ? ` (${u.email})` : ""}. Drop anchor for now.`, "info");
   }
@@ -280,9 +365,26 @@ export default function privateerBrand(pi: any): void {
     );
   }
 
+  dbg("extension loaded, onSignedIn listener registering");
+
   pi.on("session_start", (_e: any, ctx: any) => {
+    dbg("session_start");
     ctxRef = ctx;
     currentModelProvider = ctx?.model?.provider ?? currentModelProvider;
+
+    // Validate the machine login against the server at launch. The banner/badge
+    // otherwise reflect ONLY local credentials.json, so a terminal that was signed
+    // out from the app (or whose login expired) keeps showing "connected as …"
+    // indefinitely — nothing else spawns a session at startup (Pi reuses its
+    // persisted account credential and refreshes it only on expiry, not on a 401).
+    // warmSession spawns this terminal's child session from the parent refresh
+    // token; if that token was revoked/expired the server 401s, which clears the
+    // local credentials and fires onSessionExpired — flipping the banner to "not
+    // signed in" right here at launch instead of dead-ending on the first prompt.
+    // Fire-and-forget: warmSession swallows transient errors, and the
+    // onSessionExpired handler below owns the UI update.
+    void priv.warmSession();
+
     if (!ctx?.hasUI) return; // headless (print/json): no banner or prompts
     ctx?.ui?.setTitle?.("Privateer");
     refresh(ctx);
@@ -301,9 +403,45 @@ export default function privateerBrand(pi: any): void {
     }
   });
 
+  // A machine login was newly established. This fires for BOTH sign-in paths — our
+  // /signin command AND Pi's /login → "Use a subscription" OAuth flow. doSignIn
+  // already refreshes itself, but a /login sign-in has no other hook back to us, so
+  // without this the header/badge would keep showing "not signed in" until relaunch.
+  priv.onSignedIn(() => {
+    dbg(`onSignedIn fired; ctxRef=${ctxRef ? "set" : "null"}`);
+    refresh(ctxRef);
+  });
+
+  // /init (in privateer-context) just created or changed a PRIVATEER.md — re-render the
+  // banner so its context line flips from the "/init" hint to "PRIVATEER.md loaded".
+  onContextChanged(() => refresh(ctxRef));
+
+  // The terminal is quitting (Ctrl+C, Ctrl+D, /quit, SIGTERM …). Pi awaits this
+  // handler inside runtimeHost.dispose() BEFORE process.exit, so it's our one
+  // reliable window to revoke the server-side sessions this run created — the
+  // account channel Pi drives AND any child session — so the terminal drops off the
+  // app's Linked Devices list immediately instead of lingering until the rows expire.
+  // Only on "quit": the other reasons (new/resume/fork/reload) keep this process
+  // alive and reuse the same account credential, so revoking would kill a live session.
+  // Best-effort and time-bounded (see revokeLocalSessions); exit must never hang.
+  pi.on("session_shutdown", async (e: any) => {
+    if (e?.reason && e.reason !== "quit") return;
+    await priv.revokeLocalSessions();
+    // Pair the revoke with dropping Pi's persisted account credential (the contract
+    // in src/auth/privateer.ts): revokeLocalSessions kills the account session
+    // server-side, so leaving the persisted copy behind would make the NEXT launch
+    // reuse a token that's already dead and dead-end on its first prompt (Pi doesn't
+    // refresh on a 401). Mirrors the daemon's shutdown (daemon/index.ts).
+    dropPersistedAccount(ctxRef);
+  });
+
   // The machine login was invalidated server-side (TTL lapsed or revoked in the app):
   // announce it and reflect it in the badge/header immediately.
   priv.onSessionExpired(() => {
+    // clearCredentials() has already wiped the local machine login; also drop Pi's
+    // persisted account credential so the next prompt/launch doesn't reuse a token
+    // that's now dead server-side (see dropPersistedAccount).
+    dropPersistedAccount(ctxRef);
     refresh(ctxRef);
     ctxRef?.ui?.notify?.("Your Privateer session expired. Run /signin to sign back in.", "warning");
   });

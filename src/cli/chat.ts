@@ -27,6 +27,7 @@ async function main() {
   const { RelayClient } = await import("../remote/relayClient.ts");
   const priv = await import("../auth/privateer.ts");
   const { makeAccountProvider, accountPosture } = await import("../providers/account.ts");
+  const { agentVersion } = await import("../config/version.ts");
 
   const spec = process.env.PRIVATEER_MODEL ?? "openrouter/openai/gpt-4o-mini";
   const slash = spec.indexOf("/");
@@ -62,7 +63,13 @@ async function main() {
   const bridge = new RemoteBridge({
     onPrompt: (text) => void runTurn(text, true),
     onInterrupt: () => void session?.abort?.(),
-    onControllerAttached: () => relay?.sendSnapshot([]),
+    // On (re)attach, resync the transcript AND push live context (model +
+    // version) so the app's session banner shows what this terminal is really
+    // running. NON-PII: no cwd — see RelayClient.sendContext.
+    onControllerAttached: () => {
+      relay?.sendSnapshot([]);
+      relay?.sendContext({ model: spec, version: agentVersion() });
+    },
     onStatus: (t) => console.log(`\n${DIM}⟿ ${t}${RESET}`),
   });
 
@@ -112,6 +119,26 @@ async function main() {
     },
   });
   for (const d of services.diagnostics) if (d.type === "error") console.log(`${RED}! ${d.message}${RESET}`);
+
+  // Exit cleanup: revoke the server-side sessions THIS run created (the child API
+  // session AND the account inference session) so the terminal drops off the app's
+  // Linked Devices list the instant it closes — instead of lingering ~24h until its
+  // token TTL. We also drop Pi's persisted account credential (auth.json) so the next
+  // launch spawns a fresh session rather than reusing the one we just revoked (which
+  // Pi wouldn't reactively refresh on the resulting 401). Idempotent + time-bounded so
+  // a Ctrl+C during a slow network never hangs the exit. Registered BEFORE the account
+  // spawn below so an early Ctrl+C still tears down whatever was created.
+  let cleanedUp = false;
+  async function cleanup(): Promise<void> {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    try { relay?.stop(); } catch { /* already stopped */ }
+    try { await priv.revokeLocalSessions(); } catch { /* best effort — server TTL is the fallback */ }
+    try { (services.authStorage as any).remove?.("privateer"); } catch { /* nothing persisted */ }
+  }
+  const onSignal = (): void => { void cleanup().finally(() => process.exit(0)); };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
 
   // Account channel: seed the OAuth credential (a fresh child session) so getApiKey
   // resolves it; Pi then manages refresh on expiry via the registered oauth provider.
@@ -231,7 +258,7 @@ async function main() {
     if (!line) continue;
     await runTurn(line, false);
   }
-  relay?.stop();
+  await cleanup();
   rl.close();
   console.log(`${DIM}bye.${RESET}`);
   process.exit(0);

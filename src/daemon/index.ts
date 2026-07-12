@@ -8,12 +8,13 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { agentDir, configPath } from "../config/paths.ts";
+import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { makePermissionGate, type GateController } from "../ext/permissionGate.ts";
 import { makePiPrivacyExtension } from "pi-privacy";
 import { makeAccountProvider } from "../providers/account.ts";
 import { RelayClient } from "../remote/relayClient.ts";
-import { hasCredentials, revokeChildSession, apiRequest, spawnAccountCredentials } from "../auth/privateer.ts";
+import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, spawnAccountCredentials } from "../auth/privateer.ts";
 import {
   loadRoutines,
   upsertRoutine,
@@ -161,6 +162,9 @@ export class Daemon {
   private onControllerAttached(): void {
     this.controllerAttached = true;
     this.relay?.sendSnapshot([{ kind: "notice", text: "Privateer routines — results will appear here as they run." }]);
+    // Version only — the routines terminal isn't a single-model session, so no
+    // model field (and no cwd, per RelayClient.sendContext's non-PII stance).
+    this.relay?.sendContext({ version: agentVersion() });
     const pending = drainPendingRelay();
     if (pending.length === 0) return;
     log(`controller attached — flushing ${pending.length} pending routine result(s)`);
@@ -260,6 +264,12 @@ export class Daemon {
     let out = "";
     let status: "ok" | "error" = "ok";
     let error: string | undefined;
+    // Track this run's account inference session so it can be torn down when the
+    // routine finishes — each run force-spawns a fresh one (below), so without this
+    // a long-lived daemon would leave one orphaned account "device" per run lingering
+    // in the app's Linked Devices until its token TTL.
+    let servicesRef: { authStorage?: { remove?: (p: string) => void } } | null = null;
+    let spawnedAccount = false;
     try {
       // Auto-approve (bypass) gate — safety is `tools: allowedTools`; a dangerous
       // shell command still fail-closes headlessly (localAsk denies).
@@ -281,12 +291,14 @@ export class Daemon {
           extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider()] as any,
         },
       });
+      servicesRef = services as any;
 
       const { provider, modelId } = parseSpec(modelSpec);
       if (provider === "privateer") {
         try {
           const creds = await spawnAccountCredentials();
           (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+          spawnedAccount = true;
         } catch (e) {
           log(`  account channel unavailable: ${(e as Error).message}`);
         }
@@ -318,6 +330,17 @@ export class Daemon {
     } catch (err) {
       status = "error";
       error = err instanceof Error ? err.message : String(err);
+    } finally {
+      // Tear down THIS run's account inference session so it doesn't linger in the
+      // app's Linked Devices after the routine finishes. Revoke only the account
+      // session — the daemon's child API session (relay/outbox) must stay alive for
+      // the daemon's lifetime and is revoked on shutdown. Also drop Pi's persisted
+      // copy so a later run's fallback never reuses this revoked token. Best-effort;
+      // the next run force-spawns a fresh account session.
+      if (spawnedAccount) {
+        try { await revokeAccountSession(); } catch { /* best effort — server TTL is the fallback */ }
+        try { servicesRef?.authStorage?.remove?.("privateer"); } catch { /* nothing persisted */ }
+      }
     }
 
     const content = formatResult(routine, out, status, error);
@@ -398,7 +421,7 @@ export function runDaemon(): void {
   const shutdown = () => {
     log("shutting down");
     daemon.stop();
-    void revokeChildSession().finally(() => process.exit(0));
+    void revokeLocalSessions().finally(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

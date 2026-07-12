@@ -17,8 +17,9 @@ import {
   authedFetch,
   spawnAccountCredentials,
   refreshAccountCredentials,
+  notifySignedIn,
 } from "../auth/privateer.ts";
-import { interpretReport, teePosture, type PrivacyTier } from "pi-privacy";
+import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 
 // Seed/fallback catalog: registered synchronously so the account provider has real
 // models the instant it loads (before the live /api/models fetch resolves) — in
@@ -73,7 +74,12 @@ export const privateerOAuthProvider = {
   // authentication…" screen hangs with no way out. See auth/privateer.ts
   // pollForToken, which checks the signal and rejects with "Login cancelled.".
   async login(cb: { onDeviceCode?: (info: unknown) => void; signal?: AbortSignal }) {
-    if (!hasCredentials()) {
+    // Fresh machine? The device-code flow below fires notifySignedIn itself (via
+    // pollForToken). Already linked? No device code runs — so we announce the
+    // completed subscription login ourselves at the end, or the header/badge would
+    // keep showing "not signed in" until the next launch.
+    const wasLinked = hasCredentials();
+    if (!wasLinked) {
       try {
         await runDeviceLogin({
           signal: cb.signal,
@@ -94,7 +100,11 @@ export const privateerOAuthProvider = {
       }
     }
     if (cb.signal?.aborted) throw new Error("Login cancelled");
-    return spawnAccountCredentials();
+    const creds = await spawnAccountCredentials();
+    // The fresh path already fired notifySignedIn (pollForToken); fire here for the
+    // already-linked path so the header re-renders to "connected" on this terminal too.
+    if (wasLinked) notifySignedIn();
+    return creds;
   },
   async refreshToken(creds: { refresh: string }) {
     try {
@@ -124,13 +134,11 @@ export interface AccountPosture {
 
 // Posture for an account-channel model. For NEAR models the attestation is fetched
 // through the SERVER proxy (the account's NEAR key stays server-side): the server
-// mints the nonce AND returns the report, so the CLIENT contributes no freshness and
-// can't bind the report to the live TLS key. That is a trust-the-server posture, not
-// client-verified — materially weaker than the direct nearai path (which supplies its
-// own randomNonce). So we must NOT promote it to `tee-verified`: that tier reads as
-// cryptographically proven and, critically, disables pi-privacy's PII gate. We cap a
-// green server posture at `tee-unverified` (honest yellow — the PII gate stays on) and
-// still surface the raw teePosture for display. ZDR-channel models route to
+// mints the nonce and returns the report. A green attestation is trusted as a genuine
+// TEE — promoted to `tee-verified` (green shield "Trusted Execution" in the badge) —
+// so an attested confidential-compute model reads as verified-private. A yellow report
+// stays `tee-unverified` (unconfirmed) and red falls back to `standard`; the raw
+// teePosture is still surfaced for display. ZDR-channel models route to
 // zero-retention endpoints server-side, which we can't observe here — a policy claim.
 export async function accountPosture(modelId: string): Promise<AccountPosture> {
   if (privateerChannel(modelId) === "zdr") {
@@ -144,8 +152,8 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
     const data = (await res.json()) as { nonce?: string; report?: unknown };
     const att = interpretReport(modelId, data.nonce ?? "", data.report ?? {});
     const tp = teePosture(att);
-    // Cap at client-unverifiable: server-proxied green never earns `tee-verified`.
-    const tier: PrivacyTier = tp === "red" ? "standard" : "tee-unverified";
+    // green → tee-verified, yellow → tee-unverified, red → standard.
+    const tier: PrivacyTier = tierFromTeePosture(tp);
     return { tier, teePosture: tp };
   } catch (e) {
     return { tier: "tee-unverified", error: (e as Error).message };

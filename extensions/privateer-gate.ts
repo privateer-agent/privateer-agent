@@ -30,6 +30,45 @@ const allowedOutsideRoots: string[] = [];
 let piRef: any = null;
 let relay: any = null;
 
+// Persistent footer indicator for remote access. When the relay is up, the footer
+// shows a GREEN "⟿ remote access" line so it's always obvious this terminal can be
+// driven from the phone — with a reminder that `/remote-access off` stops it. We
+// keep a UI handle (captured from session_start / the command ctx) so the relay's
+// own connect/disconnect callbacks can refresh the indicator, not just the command.
+const GREEN = "\x1b[32m", YELLOW = "\x1b[33m", DIM = "\x1b[2m", RESET = "\x1b[0m";
+const REMOTE_STATUS_KEY = "privateer:remote-access";
+let uiRef: any = null;
+// "off" → no indicator; "connecting" → relay starting or reconnecting (yellow);
+// "connected" → socket open, controller reachable (green).
+let remoteState: "off" | "connecting" | "connected" = "off";
+
+function refreshRemoteStatus(): void {
+  const ui = uiRef;
+  if (!ui?.setStatus) return;
+  if (remoteState === "off") {
+    ui.setStatus(REMOTE_STATUS_KEY, undefined);
+    return;
+  }
+  const text =
+    remoteState === "connected"
+      ? `${GREEN}⟿ remote access${RESET} ${DIM}· /remote-access off to stop${RESET}`
+      : `${YELLOW}⟿ remote access · connecting…${RESET} ${DIM}· /remote-access off to stop${RESET}`;
+  ui.setStatus(REMOTE_STATUS_KEY, text);
+}
+
+function setRemoteState(s: typeof remoteState): void {
+  remoteState = s;
+  refreshRemoteStatus();
+}
+
+// Tear down the relay and clear the indicator. Used by `/remote-access off` AND by
+// the app's own "End remote access" action (onTerminate), so both paths converge.
+function disableRemote(): void {
+  relay?.stop();
+  relay = null;
+  setRemoteState("off");
+}
+
 // Inbound app→CLI files land here (keyed by "#n"); save_attachment persists them.
 const attachments = new AttachmentStore();
 let sinceLastPrompt: StoredAttachment[] = [];
@@ -47,9 +86,22 @@ const bridge = new RemoteBridge({
     piRef?.sendUserMessage?.(text + note); // drive a turn in Pi's TUI
   },
   onInterrupt: () => {}, // Pi owns interrupt; best-effort no-op
-  onControllerAttached: () => relay?.sendSnapshot([{ kind: "notice", text: "Privateer terminal connected." }]),
+  // The app asked to end remote access from its side — stop the relay locally too so
+  // the terminal doesn't keep reconnecting, and clear the green indicator.
+  onTerminate: () => disableRemote(),
+  onControllerAttached: () => {
+    // A controller reached us → the socket is up and driving: go green.
+    setRemoteState("connected");
+    relay?.sendSnapshot([{ kind: "notice", text: "Privateer terminal connected." }]);
+  },
   onAttachment: (file) => sinceLastPrompt.push(attachments.register(file)),
-  onStatus: () => {},
+  // Drive the indicator from the relay's own status stream: "connected" → green;
+  // its reconnect/retry notices → yellow "connecting…". Ignored once we're off.
+  onStatus: (text) => {
+    if (!relay) return;
+    if (/disconnect|reconnect|retry|couldn't|could not/i.test(text)) setRemoteState("connecting");
+    else if (/connected/i.test(text)) setRemoteState("connected");
+  },
 });
 
 const gate = makePermissionGate({
@@ -88,6 +140,11 @@ export default function privateerControl(pi: any): void {
   // and the user hasn't pinned a mode via PRIVATEER_MODE.
   const HEADLESS = new Set(["json", "print", "rpc"]);
   pi.on("session_start", (_e: any, ctx: any) => {
+    // Capture the UI handle so the relay's connect/disconnect callbacks can refresh
+    // the footer indicator (they fire outside any command's ctx). Re-render in case
+    // remote access was already on when the session (re)started.
+    if (ctx?.ui) uiRef = ctx.ui;
+    refreshRemoteStatus();
     if (ctx?.mode && HEADLESS.has(ctx.mode) && (process.env.PRIVATEER_MODE ?? "") === "") {
       mode = "bypass";
     }
@@ -123,16 +180,17 @@ export default function privateerControl(pi: any): void {
   pi.registerCommand?.("remote-access", {
     description: "Drive this terminal from the Privateer app: /remote-access on | off",
     handler: async (args: string, ctx: any) => {
+      if (ctx?.ui) uiRef = ctx.ui; // keep the handle fresh for relay-driven refreshes
       const off = String(args ?? "").trim().toLowerCase() === "off";
       if (off) {
-        relay?.stop();
-        relay = null;
+        disableRemote();
         return ctx.ui?.notify?.("remote access off", "info");
       }
       if (relay) return ctx.ui?.notify?.("remote access already on", "info");
       if (!priv.hasCredentials()) return ctx.ui?.notify?.("Not signed in to Privateer.", "warning");
       relay = new RelayClient(bridge.callbacks, { label: "privateer-cli" });
       bridge.attachRelay(relay);
+      setRemoteState("connecting"); // yellow until the relay reports connected
       await relay.start();
       ctx.ui?.notify?.("Remote access on — approve this terminal in the Privateer app, then drive it from there.", "info");
     },

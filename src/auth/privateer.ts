@@ -97,6 +97,26 @@ let _child: ChildSession | null = null;
 let _spawnInFlight: Promise<ChildSession> | null = null;
 let _refreshInFlight: Promise<ChildSession> | null = null;
 
+// The most recent ACCOUNT-provider session (spawnAccountCredentials /
+// refreshAccountCredentials). Pi owns this credential's lifecycle — it drives the
+// account inference channel in the TUI — so it's a distinct server-side session
+// (device row) from _child. We record only its latest access token here so exit
+// cleanup / an explicit sign-out (revokeAccountSession) can kill it. Rotations
+// overwrite it; the previous token is already dead server-side, so tracking only
+// the latest is right.
+//
+// LIFECYCLE HAZARD: Pi PERSISTS this session to auth.json (with a ~24h `expires`) and
+// reuses it on the next launch, refreshing only when `Date.now() >= expires` — it does
+// NOT refresh reactively on a 401. So revoking it at exit while leaving the persisted
+// copy in place would let the next run send a token that still looks valid but is dead
+// server-side → inference fails with a dead-end `401 {code: SESSION_REVOKED}`.
+// The fix is to revoke it AND drop the persisted credential together: the caller must
+// remove the "privateer" entry from Pi's authStorage (authStorage.remove("privateer"))
+// right after revokeLocalSessions() so the next launch spawns a fresh session instead
+// of reusing the revoked one. Doing both is safe; doing only one is not. See
+// revokeLocalSessions and its callers (cli/chat.ts, daemon/index.ts).
+let _account: { accessToken: string } | null = null;
+
 export function loadCredentials(): Credentials | null {
   if (_cache !== undefined) return _cache;
   const path = credentialsPath();
@@ -127,6 +147,7 @@ export function clearCredentials(): void {
   }
   _cache = null;
   _child = null;
+  _account = null;
 }
 
 export function hasCredentials(): boolean {
@@ -163,6 +184,39 @@ export function onSessionExpired(listener: SessionExpiredListener): () => void {
 
 function notifySessionExpired(): void {
   for (const listener of _expiredListeners) {
+    try {
+      listener();
+    } catch {
+      /* a failing listener must not break the auth path */
+    }
+  }
+}
+
+// ── Sign-in notification ─────────────────────────────────────────────────────
+// Fired when a Privateer login completes on this terminal — the cue for the UI to
+// re-render its header/badge to the signed-in state. It reaches every sign-in entry
+// point:
+//   - our dedicated /signin command and a FRESH /login → "Use a subscription" OAuth
+//     login both run the device-code flow, which fires this from pollForToken once
+//     credentials are written; and
+//   - an ALREADY-LINKED machine selecting the subscription runs no device code (it
+//     just spawns an account session), so privateerOAuthProvider.login() fires this
+//     itself — otherwise that path had no hook back to the header and it kept showing
+//     the stale "not signed in" banner until the next launch.
+// A listener here refreshes the UI regardless of which path the user took.
+
+type SignedInListener = () => void;
+const _signedInListeners = new Set<SignedInListener>();
+
+export function onSignedIn(listener: SignedInListener): () => void {
+  _signedInListeners.add(listener);
+  return () => _signedInListeners.delete(listener);
+}
+
+// Emit the sign-in signal. Exported so the account OAuth provider can announce a
+// completed subscription login on the already-linked path (see the note above).
+export function notifySignedIn(): void {
+  for (const listener of _signedInListeners) {
     try {
       listener();
     } catch {
@@ -229,6 +283,7 @@ export async function pollForToken(
       const data = (await res.json()) as Omit<Credentials, "serverBaseUrl">;
       const creds: Credentials = { ...data, serverBaseUrl: base };
       saveCredentials(creds);
+      notifySignedIn();
       return creds;
     }
 
@@ -409,28 +464,64 @@ export async function apiRequest(path: string, init: RequestInit = {}): Promise<
 }
 
 /**
- * Best-effort revoke of THIS terminal's child session on exit, so the terminal
- * disappears from the app's Linked Devices list immediately instead of
- * lingering until its access-token rows expire (24h server-side).
- *
- * Deliberately NOT authedFetch: that would spawn/refresh a session just to kill
- * it. If no child was ever spawned (e.g. BYO-key run), there's nothing to do.
- * Bounded by a short timeout — exit must never hang on a slow network — and all
- * failures are swallowed; the server's TTL remains the fallback.
+ * DELETE the server-side session identified by `accessToken` (RFC-style bearer
+ * possession proof). Deliberately a raw fetch, NOT authedFetch — authedFetch would
+ * spawn/refresh a brand-new session just to kill this one. Bounded by a short
+ * timeout so exit never hangs on a slow network, and all failures are swallowed;
+ * the server's TTL is the fallback.
  */
-export async function revokeChildSession(timeoutMs = 1500): Promise<void> {
-  const child = _child;
-  if (!child) return;
-  _child = null; // never reuse a session we've asked the server to revoke
+async function deleteSession(accessToken: string, timeoutMs: number): Promise<void> {
   try {
     await fetch(`${serverBaseUrl()}/auth/session/current`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${child.accessToken}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch {
     /* best effort — the session expires server-side regardless */
   }
+}
+
+/**
+ * Best-effort revoke of THIS terminal's child session (from authedFetch/apiRequest).
+ * If no child was ever spawned (e.g. BYO-key run), there's nothing to do.
+ */
+export async function revokeChildSession(timeoutMs = 1500): Promise<void> {
+  const child = _child;
+  if (!child) return;
+  _child = null; // never reuse a session we've asked the server to revoke
+  await deleteSession(child.accessToken, timeoutMs);
+}
+
+/**
+ * Best-effort revoke of the account-provider session (the one Pi drives for account
+ * inference). Called both on EXPLICIT sign-out AND as part of exit cleanup (via
+ * revokeLocalSessions) — safe in the exit path ONLY because the caller also drops Pi's
+ * persisted copy (authStorage.remove("privateer")) so the next launch spawns fresh
+ * rather than reusing this now-dead token. See the _account note and revokeLocalSessions.
+ */
+export async function revokeAccountSession(timeoutMs = 1500): Promise<void> {
+  const account = _account;
+  if (!account) return;
+  _account = null;
+  await deleteSession(account.accessToken, timeoutMs);
+}
+
+/**
+ * Revoke ALL server-side sessions this terminal created — the in-memory child session
+ * (authedFetch/apiRequest) AND the account-provider inference session — so the terminal
+ * drops off the app's Linked Devices list the moment it exits (Ctrl+C, /quit, SIGTERM …)
+ * instead of lingering until its token TTL (~24h). Best-effort, time-bounded, and the
+ * two revokes run in parallel so a slow network can't double the exit delay.
+ *
+ * IMPORTANT: the account session is persisted by Pi (auth.json) and reused on the next
+ * launch without a reactive-on-401 refresh, so the caller MUST also drop the persisted
+ * copy right after this resolves — `authStorage.remove("privateer")` — or the next run
+ * will reuse the token we just revoked and dead-end on a 401 (see the _account note).
+ * Callers: cli/chat.ts cleanup() and daemon/index.ts shutdown().
+ */
+export async function revokeLocalSessions(timeoutMs = 1500): Promise<void> {
+  await Promise.all([revokeChildSession(timeoutMs), revokeAccountSession(timeoutMs)]);
 }
 
 // ── Logout ───────────────────────────────────────────────────────────────────
@@ -493,6 +584,7 @@ export async function spawnAccountCredentials(): Promise<AccountCredential> {
     throw new Error("Your Privateer session expired. Run /login to sign in again.");
   }
   const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
+  _account = { accessToken }; // track for explicit sign-out revoke (revokeAccountSession)
   return { access: accessToken, refresh: refreshToken, expires: jwtExpMs(accessToken) };
 }
 
@@ -502,6 +594,7 @@ export async function refreshAccountCredentials(refresh: string): Promise<Accoun
   const res = await postJson(serverBaseUrl(), "/auth/refresh", { refreshToken: refresh });
   if (!res.ok) throw new Error(`account refresh failed (${res.status})`);
   const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
+  _account = { accessToken }; // the rotated session is the one an explicit sign-out revokes
   return { access: accessToken, refresh: refreshToken, expires: jwtExpMs(accessToken) };
 }
 

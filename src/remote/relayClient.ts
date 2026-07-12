@@ -422,6 +422,19 @@ export class RelayClient {
     this.rawSend({ type: "no_quarter", on });
   }
 
+  // Push this terminal's live context (selected model, agent version) to a
+  // controller so the app's session banner reflects reality instead of a stub.
+  // Sent on controller attach — like the snapshot/no_quarter resync. NON-PII ONLY
+  // by design: deliberately NO cwd / hostname / username, matching terminalLabel's
+  // stance (the server/controller learns as little as possible about the machine).
+  // Empty/absent fields are omitted so the app renders less rather than blank.
+  sendContext(ctx: { model?: string; version?: string }): void {
+    const frame: Record<string, unknown> = { type: "context" };
+    if (typeof ctx.model === "string" && ctx.model) frame.model = ctx.model;
+    if (typeof ctx.version === "string" && ctx.version) frame.version = ctx.version;
+    this.rawSend(frame);
+  }
+
   requestApproval(id: string, req: PermissionRequest): void {
     this.rawSend({
       type: "approval_request",
