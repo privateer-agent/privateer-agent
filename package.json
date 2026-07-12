@@ -43,6 +43,7 @@
   "scripts": {
     "start": "tsx src/main.ts",
     "chat": "node --env-file=.env --import tsx src/cli/chat.ts",
+    "channels": "node --env-file=.env --import tsx src/channels/run.ts",
     "dev": "tsx watch src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done"
