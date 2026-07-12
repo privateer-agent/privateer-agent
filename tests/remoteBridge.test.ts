@@ -14,17 +14,19 @@ function makeFakeRelay() {
   const events: EngineEvent[] = [];
   const noQuarter: boolean[] = [];
   const notices: string[] = [];
+  const commandLists: { name: string; description?: string }[][] = [];
   const selects: { id: string; req: any }[] = [];
   let connected = true;
   const relay: RelayLike & {
     approvals: typeof approvals; events: typeof events; noQuarter: typeof noQuarter;
-    notices: typeof notices; selects: typeof selects;
+    notices: typeof notices; commandLists: typeof commandLists; selects: typeof selects;
     setConnected(v: boolean): void;
   } = {
     approvals,
     events,
     noQuarter,
     notices,
+    commandLists,
     selects,
     setConnected(v) { connected = v; },
     requestApproval(id, req) { approvals.push({ id, req }); },
@@ -33,6 +35,7 @@ function makeFakeRelay() {
     sendNoQuarter(on) { noQuarter.push(on); },
     async sendFile() { return { ok: connected }; },
     sendNotice(text) { notices.push(text); },
+    sendCommands(commands) { commandLists.push(commands); },
     requestSelect(id, req) { selects.push({ id, req }); },
   };
   return relay;
@@ -135,12 +138,14 @@ test("a disconnect resolves pending selects to null", async () => {
   assert.equal(await p, null);
 });
 
-test("sendNotice passes through to the relay", () => {
+test("sendNotice / sendCommands pass through to the relay", () => {
   const bridge = new RemoteBridge({ onPrompt: () => {} });
   const relay = makeFakeRelay();
   bridge.attachRelay(relay);
   bridge.sendNotice("model → a/b");
+  bridge.sendCommands([{ name: "/model", description: "Switch the model" }]);
   assert.deepEqual(relay.notices, ["model → a/b"]);
+  assert.deepEqual(relay.commandLists, [[{ name: "/model", description: "Switch the model" }]]);
 });
 
 // ── the payoff: the real Phase-2 gate, driven remotely through the bridge ──

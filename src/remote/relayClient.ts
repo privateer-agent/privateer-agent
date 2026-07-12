@@ -455,6 +455,16 @@ export class RelayClient {
     this.rawSend({ type: "notice", text: safe(text, 500) });
   }
 
+  // Advertise the terminal's available slash commands (this CLI's built-ins PLUS
+  // whatever Pi extensions have registered) so the app's composer can autocomplete
+  // them. Pushed on controller attach. NON-PII: command names + descriptions only.
+  sendCommands(commands: { name: string; description?: string }[]): void {
+    this.rawSend({
+      type: "commands",
+      commands: commands.slice(0, 200).map((c) => ({ name: c.name, description: c.description ? safe(c.description, 200) : undefined })),
+    });
+  }
+
   // Ask the app to pick from a set of options — a CLI-initiated selection prompt.
   // The app renders the same picker as /model and replies with a select_response
   // (resolved by the bridge). Generic so any future prompt reuses one UI.

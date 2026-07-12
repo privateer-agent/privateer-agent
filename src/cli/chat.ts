@@ -67,28 +67,36 @@ async function main() {
     onPrompt: (text) => void runTurn(text, true),
     onInterrupt: () => void session?.abort?.(),
     // A slash command typed in the app composer (e.g. /model) — echo it (like the
-    // prompt echo) so the terminal shows it arrived, then run it through the same
-    // dispatcher the local REPL uses, tagged remote so it never blocks on stdin.
-    onCommand: (text) => { console.log(`\n${DIM}⟿ [app] ${text}${RESET}`); void runCommand(text, true); },
-    // On (re)attach, resync the transcript AND push live context (model + version)
-    // so the app's banner shows what this terminal is really running. The model
-    // catalog isn't pushed here — /model relays it on demand as a selection prompt.
+    // prompt echo), then run it through the same dispatcher the local REPL uses.
+    // Anything the dispatcher doesn't recognize falls through to the turn loop, so
+    // Pi/extension/skill commands (which session.prompt executes) work remotely too.
+    onCommand: (text) => {
+      console.log(`\n${DIM}⟿ [app] ${text}${RESET}`);
+      void (async () => { if (!(await runCommand(text, true))) await runTurn(text, true, false); })();
+    },
+    // On (re)attach, resync the transcript, push live context (model + version) so
+    // the app's banner shows what this terminal runs, AND advertise the available
+    // commands so the composer can autocomplete them (incl. extension commands). The
+    // model catalog isn't pushed — /model relays it on demand as a selection prompt.
     // NON-PII: no cwd — see RelayClient.sendContext.
     onControllerAttached: () => {
       relay?.sendSnapshot([]);
       relay?.sendContext({ model: currentSpec, version: agentVersion() });
+      relay?.sendCommands(availableCommands());
     },
     onStatus: (t) => console.log(`\n${DIM}⟿ ${t}${RESET}`),
   });
 
   // Serialize turns so a remote prompt and a locally-typed one can't overlap.
-  async function runTurn(text: string, remote: boolean): Promise<void> {
+  // `echo` prints the "⟿ [app] …" line; the caller suppresses it when it already
+  // echoed (a fall-through command from onCommand).
+  async function runTurn(text: string, remote: boolean, echo = true): Promise<void> {
     if (turnActive) {
       console.log(`\n${DIM}(busy — a turn is already running)${RESET}`);
       return;
     }
     turnActive = true;
-    if (remote) console.log(`\n${DIM}⟿ [app] ${text.slice(0, 80)}${RESET}`);
+    if (remote && echo) console.log(`\n${DIM}⟿ [app] ${text.slice(0, 80)}${RESET}`);
     try {
       await session.prompt(text);
     } catch (e) {
@@ -330,10 +338,30 @@ async function main() {
       }
       return true;
     }
-    // Unknown command: tell a remote driver (so its composer doesn't look ignored);
-    // locally, fall through so a prompt that happens to start with "/" still runs.
-    if (remote) relay?.sendNotice(`Unknown command: ${line}`);
+    // Not one of THIS CLI's built-ins → not handled here. Both the local REPL and
+    // the remote onCommand fall through to the turn loop, where Pi executes any
+    // extension/skill command (or treats it as a prompt).
     return false;
+  }
+
+  // The commands the app should offer in its composer: this CLI's built-ins plus
+  // whatever Pi extensions have registered (so the palette reflects the real,
+  // extension-dependent command set — not a hardcoded list). Pushed on attach.
+  function availableCommands(): { name: string; description?: string }[] {
+    const builtins = [
+      { name: "/model", description: "Switch the model" },
+      { name: "/mode", description: "Change the approval mode (default/acceptEdits/plan/bypass)" },
+      { name: "/models", description: "List available models" },
+      { name: "/verify", description: "Re-check the model's privacy posture" },
+      { name: "/help", description: "Show available commands" },
+    ];
+    let ext: { name: string; description?: string }[] = [];
+    try {
+      const reg = (session?.extensionRunner as any)?.getRegisteredCommands?.() ?? [];
+      ext = reg.map((c: any) => ({ name: `/${c.invocationName ?? c.name}`, description: c.description }));
+    } catch { /* no session/extensions yet */ }
+    const seen = new Set(builtins.map((c) => c.name));
+    return [...builtins, ...ext.filter((c) => !seen.has(c.name))];
   }
 
   for (;;) {

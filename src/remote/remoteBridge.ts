@@ -24,6 +24,7 @@ export interface RelayLike {
   sendNoQuarter(on: boolean): void;
   sendFile(file: { name: string; mediaType: string; base64: string; size: number }): Promise<{ ok: boolean; reason?: string }>;
   sendNotice(text: string): void;
+  sendCommands(commands: { name: string; description?: string }[]): void;
   requestSelect(id: string, req: SelectRequest): void;
 }
 
@@ -141,6 +142,11 @@ export class RemoteBridge {
   // Surface a one-line notice in the app's feed (command feedback).
   sendNotice(text: string): void {
     this.relay?.sendNotice(text);
+  }
+
+  // Advertise the terminal's available commands to the app (on attach).
+  sendCommands(commands: { name: string; description?: string }[]): void {
+    this.relay?.sendCommands(commands);
   }
 
   // A CLI-initiated selection prompt: relay the options to the app and await its
