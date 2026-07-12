@@ -118,6 +118,7 @@ async function main() {
   const { SlackAdapter } = await import("./slack.ts");
   const { DiscordAdapter } = await import("./discord.ts");
   const { WhatsAppAdapter } = await import("./whatsapp.ts");
+  const { writeChannelsStatus, HEARTBEAT_MS } = await import("./status.ts");
   type ChannelAdapter = import("./types.ts").ChannelAdapter;
 
   // ── config ──────────────────────────────────────────────────────────────────
@@ -252,6 +253,10 @@ async function main() {
 
   // ── build a bridge per configured platform ───────────────────────────────────
   const bridges: { stop(): void }[] = [];
+  // Platforms with a live bridge — written to the heartbeat file so the app's
+  // channels manager (running on the daemon's relay, a separate process) can show
+  // a live/offline badge without talking to this process.
+  const startedPlatforms: string[] = [];
 
   async function startChannel(platform: string, adapter: ChannelAdapter, block: any) {
     // Roles. Legacy `allowFrom` is treated as admins (its prior meaning: the sole
@@ -304,6 +309,7 @@ async function main() {
     });
     await bridge.start();
     bridges.push(bridge);
+    startedPlatforms.push(platform);
     log(
       `${platform} up — model ${modelSpec}, ceiling [${chTools.join(", ")}], posture ${chPosture}, ` +
         `${admins.size} admin(s)/${members.size} member(s), cwd ${cwd}.`,
@@ -352,9 +358,18 @@ async function main() {
     process.exit(1);
   }
 
+  // Heartbeat: announce the live platforms now and refresh on a cadence so the app's
+  // channels manager can tell running from merely-configured. A stale/absent file
+  // reads as offline (see channels/status.ts).
+  writeChannelsStatus(startedPlatforms);
+  const heartbeat = setInterval(() => writeChannelsStatus(startedPlatforms), HEARTBEAT_MS);
+  heartbeat.unref?.();
+
   const shutdown = () => {
     log("shutting down");
     clearInterval(sweep);
+    clearInterval(heartbeat);
+    writeChannelsStatus([]); // clear presence immediately, don't wait for staleness
     for (const b of bridges) b.stop();
     process.exit(0);
   };

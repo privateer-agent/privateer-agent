@@ -74,6 +74,9 @@ export interface RelayCallbacks {
   // The app answered a CLI-initiated selection prompt (the id from requestSelect).
   // A null value means the app dismissed the picker without choosing.
   onSelectResponse?: (id: string, value: string | null) => void;
+  // The app answered a CLI-initiated text-input prompt (the id from requestInput).
+  // A null value means the app dismissed the prompt without submitting.
+  onInputResponse?: (id: string, value: string | null) => void;
   // The app opened the extensions manager — reply with the current installed list
   // (a sendExtensions frame). Optional so pre-extensions callbacks keep compiling.
   onExtensionsList?: () => void;
@@ -90,6 +93,30 @@ export interface RelayCallbacks {
   onSkillDelete?: (name: string) => void;
   // The app toggled a user skill's model-invocation availability.
   onSkillSetEnabled?: (name: string, enabled: boolean) => void;
+  // The app opened the routines manager — reply with the current routines list
+  // (a sendRoutines frame). Owned by the daemon, so these only fire on its relay.
+  onRoutinesList?: () => void;
+  // The app asked to create (no id) or edit (id) a routine. The raw draft object is
+  // handed through untyped; the daemon's routinesControl validates it.
+  onRoutinesSave?: (draft: Record<string, unknown>) => void;
+  // The app asked to delete a routine by id or name.
+  onRoutinesDelete?: (idOrName: string) => void;
+  // The app paused/resumed a routine by id or name.
+  onRoutinesSetEnabled?: (idOrName: string, enabled: boolean) => void;
+  // The app asked to run a routine now, by id or name.
+  onRoutinesRun?: (idOrName: string) => void;
+  // The app opened the channels manager — reply with the current channel config
+  // (a sendChannels frame). Owned by the daemon, so these only fire on its relay.
+  onChannelsList?: () => void;
+  // The app asked to create/edit a platform's channel config. `draft` carries only
+  // NON-secret fields (roles/posture/tools/model). `sealedSecrets`, when present, is
+  // a base64 sealed-box the app sealed to THIS terminal's pinned pubkey (opened by the
+  // owner). `sig`+`ts` authenticate the WHOLE save with the account key the terminal
+  // pinned at link (accountVerify) — the owner rejects an unsigned/forged/stale save,
+  // so a hostile relay can neither forge a token nor inject an admin.
+  onChannelsSave?: (draft: Record<string, unknown>, sealedSecrets?: string, sig?: string, ts?: number) => void;
+  // The app asked to delete a platform's channel config, by platform name.
+  onChannelsRemove?: (platform: string) => void;
   // A file finished transferring from the app (reassembled from chunks). Held to
   // ride along with the next remote prompt.
   onAttachment: (file: { name: string; mediaType: string; base64: string }) => void;
@@ -283,6 +310,13 @@ export class RelayClient {
       description?: string;
       instructions?: string;
       enabled?: boolean;
+      idOrName?: string;
+      routine?: Record<string, unknown>;
+      platform?: string;
+      draft?: Record<string, unknown>;
+      sealedSecrets?: string;
+      sig?: string;
+      ts?: number;
     };
     try {
       frame = JSON.parse(data.toString());
@@ -318,6 +352,9 @@ export class RelayClient {
       case "select_response":
         if (frame.id) this.cb.onSelectResponse?.(frame.id, typeof frame.value === "string" ? frame.value : null);
         break;
+      case "input_response":
+        if (frame.id) this.cb.onInputResponse?.(frame.id, typeof frame.value === "string" ? frame.value : null);
+        break;
       case "extensions_list":
         this.cb.onExtensionsList?.();
         break;
@@ -344,6 +381,37 @@ export class RelayClient {
         break;
       case "skills_set_enabled":
         if (typeof frame.name === "string") this.cb.onSkillSetEnabled?.(frame.name, frame.enabled === true);
+        break;
+      case "routines_list":
+        this.cb.onRoutinesList?.();
+        break;
+      case "routines_save":
+        if (frame.routine && typeof frame.routine === "object") this.cb.onRoutinesSave?.(frame.routine);
+        break;
+      case "routines_delete":
+        if (typeof frame.idOrName === "string") this.cb.onRoutinesDelete?.(frame.idOrName);
+        break;
+      case "routines_set_enabled":
+        if (typeof frame.idOrName === "string") this.cb.onRoutinesSetEnabled?.(frame.idOrName, frame.enabled === true);
+        break;
+      case "routines_run":
+        if (typeof frame.idOrName === "string") this.cb.onRoutinesRun?.(frame.idOrName);
+        break;
+      case "channels_list":
+        this.cb.onChannelsList?.();
+        break;
+      case "channels_save":
+        if (frame.draft && typeof frame.draft === "object") {
+          this.cb.onChannelsSave?.(
+            frame.draft,
+            typeof frame.sealedSecrets === "string" ? frame.sealedSecrets : undefined,
+            typeof frame.sig === "string" ? frame.sig : undefined,
+            typeof frame.ts === "number" ? frame.ts : undefined,
+          );
+        }
+        break;
+      case "channels_remove":
+        if (typeof frame.platform === "string") this.cb.onChannelsRemove?.(frame.platform);
         break;
       case "attach_begin":
         this.beginAttachment(frame);
@@ -489,10 +557,15 @@ export class RelayClient {
   // by design: deliberately NO cwd / hostname / username, matching terminalLabel's
   // stance (the server/controller learns as little as possible about the machine).
   // Empty/absent fields are omitted so the app renders less rather than blank.
-  sendContext(ctx: { model?: string; version?: string }): void {
+  sendContext(ctx: { model?: string; version?: string; terminalPub?: string }): void {
     const frame: Record<string, unknown> = { type: "context" };
     if (typeof ctx.model === "string" && ctx.model) frame.model = ctx.model;
     if (typeof ctx.version === "string" && ctx.version) frame.version = ctx.version;
+    // The terminal's identity public key (base64). NOT PII — it's a public key, and
+    // the app uses it to confirm this terminal is the one it PINNED at link time
+    // before sealing any secret to it (channel tokens). A malicious relay can swap
+    // it, which is exactly why the app checks it against the link-time pin.
+    if (typeof ctx.terminalPub === "string" && ctx.terminalPub) frame.terminalPub = ctx.terminalPub;
     this.rawSend(frame);
   }
 
@@ -564,6 +637,95 @@ export class RelayClient {
     });
   }
 
+  // Push the daemon's saved routines to the app's routines manager. Sent on request
+  // and after each save/delete/pause/run. `busy` drives a progress indicator;
+  // `message` carries a one-line result/error. Unlike the feed/webhook paths this is
+  // the user's OWN config echoed back to their OWN app, so fields are size-clipped
+  // (clip, NOT redactSecrets) to keep an edit round-tripping faithfully — a prompt
+  // containing a literal "KEY=…" example must survive intact. List bounded like the
+  // other managers.
+  sendRoutines(payload: {
+    items: {
+      id: string;
+      name: string;
+      cron?: string;
+      at?: string;
+      prompt: string;
+      cwd: string;
+      model?: string;
+      delivery: string[];
+      tools?: string[];
+      enabled: boolean;
+      lastRun?: string;
+      lastStatus?: "ok" | "error";
+      lastError?: string;
+      nextRun?: string;
+    }[];
+    busy?: boolean;
+    message?: string;
+  }): void {
+    this.rawSend({
+      type: "routines",
+      items: payload.items.slice(0, 200).map((r) => ({
+        id: r.id,
+        name: clip(r.name, 200),
+        cron: r.cron ? clip(r.cron, 200) : undefined,
+        at: r.at ? clip(r.at, 64) : undefined,
+        prompt: clip(r.prompt, 8000),
+        cwd: clip(r.cwd, 1024),
+        model: r.model ? clip(r.model, 200) : undefined,
+        delivery: (r.delivery ?? []).slice(0, 20).map((d) => clip(String(d), 128)),
+        tools: r.tools ? r.tools.slice(0, 100).map((t) => clip(String(t), 128)) : undefined,
+        enabled: !!r.enabled,
+        lastRun: r.lastRun,
+        lastStatus: r.lastStatus,
+        lastError: r.lastError ? clip(r.lastError, 1000) : undefined,
+        nextRun: r.nextRun,
+      })),
+      busy: !!payload.busy,
+      message: payload.message ? clip(payload.message, 500) : undefined,
+    });
+  }
+
+  // Push the daemon's channel config to the app's channels manager. Sent on request
+  // and after each save/remove. Like sendRoutines this is the user's OWN config
+  // echoed to their OWN app — but a bot token NEVER crosses this wire: only
+  // `secretsSet` (which secret fields are present, by NAME) is sent, so a relay /
+  // server compromise can't lift a token from this frame. List bounded like the
+  // other managers.
+  sendChannels(payload: {
+    items: {
+      platform: string;
+      configured: boolean;
+      running: boolean;
+      adminCount: number;
+      memberCount: number;
+      posture: string;
+      tools: string[];
+      model?: string;
+      secretsSet: string[];
+    }[];
+    busy?: boolean;
+    message?: string;
+  }): void {
+    this.rawSend({
+      type: "channels",
+      items: payload.items.slice(0, 20).map((c) => ({
+        platform: clip(String(c.platform), 32),
+        configured: !!c.configured,
+        running: !!c.running,
+        adminCount: Math.max(0, Math.floor(c.adminCount) || 0),
+        memberCount: Math.max(0, Math.floor(c.memberCount) || 0),
+        posture: clip(String(c.posture), 32),
+        tools: (c.tools ?? []).slice(0, 100).map((t) => clip(String(t), 128)),
+        model: c.model ? clip(c.model, 200) : undefined,
+        secretsSet: (c.secretsSet ?? []).slice(0, 20).map((s) => clip(String(s), 64)),
+      })),
+      busy: !!payload.busy,
+      message: payload.message ? clip(payload.message, 500) : undefined,
+    });
+  }
+
   // Ask the app to pick from a set of options — a CLI-initiated selection prompt.
   // The app renders the same picker as /model and replies with a select_response
   // (resolved by the bridge). Generic so any future prompt reuses one UI.
@@ -577,6 +739,21 @@ export class RelayClient {
       title: safe(req.title, 200),
       options: req.options.slice(0, 500).map((o) => ({ value: o.value, label: safe(o.label, 200), hint: o.hint ? safe(o.hint, 200) : undefined })),
       current: req.current,
+    });
+  }
+
+  // Ask the app for a line of free-form text — a CLI-initiated input prompt. The
+  // app renders a text field and replies with an input_response (resolved by the
+  // bridge). Companion to requestSelect for prompts that aren't a fixed choice.
+  requestInput(
+    id: string,
+    req: { title: string; placeholder?: string },
+  ): void {
+    this.rawSend({
+      type: "input_request",
+      id,
+      title: safe(req.title, 200),
+      placeholder: req.placeholder ? safe(req.placeholder, 200) : undefined,
     });
   }
 

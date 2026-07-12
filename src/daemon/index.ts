@@ -14,6 +14,13 @@ import { makePermissionGate, type GateController } from "../ext/permissionGate.t
 import { makePiPrivacyExtension } from "pi-privacy";
 import { makeAccountProvider } from "../providers/account.ts";
 import { RelayClient } from "../remote/relayClient.ts";
+import { makeRoutinesControl } from "../remote/routinesControl.ts";
+import { makeChannelsControl } from "../remote/channelsControl.ts";
+import { readRunningPlatforms } from "../channels/status.ts";
+import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
+import { openJsonFromApp } from "../crypto/terminalUnseal.ts";
+import { verifyChannelSave } from "../crypto/accountVerify.ts";
+import { loadAccountSignKey, loadLastChannelTs, saveLastChannelTs } from "../crypto/accountTrust.ts";
 import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, spawnAccountCredentials } from "../auth/privateer.ts";
 import {
   loadRoutines,
@@ -97,6 +104,24 @@ export class Daemon {
   private controllerAttached = false;
   private relayTerminated = false;
 
+  // App-facing routine management (list/save/delete/pause/run) over the daemon's
+  // relay. Run-now is injected here since only the daemon can actually fire one;
+  // webhook validation reads config fresh so a just-declared endpoint is honored.
+  private readonly routines = makeRoutinesControl({
+    defaultCwd: () => process.cwd(),
+    webhookExists: (name) => !!loadDaemonConfig().webhooks?.[name],
+    runNow: (routine) => void this.runRoutine(routine),
+  });
+
+  // App-facing channel management (list/save/remove) over the daemon's relay. The
+  // channels daemon (channels/run.ts) is a SEPARATE process that may be down, so
+  // this edits config.json directly; `runningPlatforms` is a best-effort heartbeat
+  // read for a live/offline badge, never a dependency. Edits apply on the channels
+  // daemon's next restart (its deliberate fail-safe posture).
+  private readonly channels = makeChannelsControl({
+    runningPlatforms: () => readRunningPlatforms(),
+  });
+
   private readonly pushRelay: RelayPusher = (routine, content) => {
     if (this.controllerAttached && this.relay?.sendRoutineResult(routine.name, content)) return "live";
     addPendingRelay({ routine: routine.name, at: new Date().toISOString(), content });
@@ -131,9 +156,10 @@ export class Daemon {
 
   private syncRelay(): void {
     if (this.relay || this.relayTerminated) return;
+    // Connect whenever the account is signed in — not only when a routine wants
+    // `relay` delivery — so the "Privateer Routines" terminal is always reachable
+    // from the app for management (including creating the very first routine).
     if (!hasCredentials()) return;
-    const wantsRelay = loadRoutines().some((r) => r.enabled && r.delivery.includes("relay"));
-    if (!wantsRelay) return;
     this.relay = new RelayClient(
       {
         onPrompt: () => {},
@@ -141,6 +167,20 @@ export class Daemon {
         onApprovalResponse: () => {},
         onControllerAttached: () => this.onControllerAttached(),
         onAttachment: () => {},
+        // Routine management from the app. Each mutation goes through the shared
+        // routinesControl (validate → persist → schedule) then re-pushes the list
+        // with a one-line result so the screen reconciles.
+        onRoutinesList: () => this.pushRoutines(),
+        onRoutinesSave: (draft) => this.pushRoutines(this.routines.save(draft).message),
+        onRoutinesDelete: (idOrName) => this.pushRoutines(this.routines.remove(idOrName).message),
+        onRoutinesSetEnabled: (idOrName, enabled) => this.pushRoutines(this.routines.setEnabled(idOrName, enabled).message),
+        onRoutinesRun: (idOrName) => this.pushRoutines(this.routines.run(idOrName).message),
+        // Channel management from the app. Each mutation goes through channelsControl
+        // (validate → write config.json) then re-pushes the list with a one-line
+        // result so the screen reconciles.
+        onChannelsList: () => this.pushChannels(),
+        onChannelsSave: (draft, sealedSecrets, sig, ts) => this.pushChannels(this.applyChannelSave(draft, sealedSecrets, sig, ts)),
+        onChannelsRemove: (platform) => this.pushChannels(this.channels.remove(platform as any).message),
         onTerminate: () => {
           this.relayTerminated = true;
           this.controllerAttached = false;
@@ -156,15 +196,72 @@ export class Daemon {
       { termId: routineRelayId(), label: "Privateer Routines" },
     );
     void this.relay.start();
-    log("relay connection starting (routine has relay delivery + account signed in)");
+    log("relay connection starting (account signed in — routines terminal reachable from the app)");
+  }
+
+  // Push the current routines list to an attached controller (its routines
+  // manager). `message` is a one-line result from the last mutation, if any.
+  private pushRoutines(message?: string): void {
+    this.relay?.sendRoutines({ items: this.routines.list(), message });
+  }
+
+  // Push the current channel config to an attached controller (its channels
+  // manager). `message` is a one-line result from the last mutation, if any.
+  private pushChannels(message?: string): void {
+    this.relay?.sendChannels({ items: this.channels.list(), message });
+  }
+
+  // Apply an app channel-save. Defense in depth, all fail-closed:
+  //   1. AUTHENTICITY (F7/F8): the whole save is signed with the account key we pinned
+  //      at link. Verify it — a hostile relay can't forge a token or inject an admin
+  //      because it can't produce this signature. No pin yet ⇒ refuse (re-link needed).
+  //   2. FRESHNESS (F9): reject a ts below the last applied — no replay/rollback of an
+  //      older signed envelope.
+  //   3. CONFIDENTIALITY: open any sealed bot credentials (the server never could) and
+  //      re-check the embedded termId (belt-and-suspenders over the signature's binding).
+  private applyChannelSave(draft: Record<string, unknown>, sealedSecrets?: string, sig?: string, ts?: number): string | undefined {
+    const accountPub = loadAccountSignKey();
+    if (!accountPub) return "This terminal can't accept channel changes from the app yet — re-link it to establish trust.";
+    if (!sig || typeof ts !== "number") return "Refused an unsigned channel change.";
+    // Verify against OUR termId — a signature made for a different terminal won't match,
+    // which also subsumes the misroute check.
+    if (!verifyChannelSave(accountPub, { termId: routineRelayId(), ts, draft, sealedSecrets }, sig)) {
+      return "Couldn't verify this change came from your account.";
+    }
+    const lastTs = loadLastChannelTs();
+    if (ts < lastTs) return "Ignored an out-of-date channel change.";
+    saveLastChannelTs(Math.max(lastTs, ts));
+
+    let withSecrets = draft;
+    if (sealedSecrets) {
+      let opened: { termId?: string; secrets?: Record<string, string> };
+      try {
+        opened = openJsonFromApp(sealedSecrets);
+      } catch {
+        return "Couldn't decrypt the credentials — they may have been sealed to a different terminal.";
+      }
+      if (opened.termId !== routineRelayId()) {
+        return "These credentials were addressed to a different terminal.";
+      }
+      withSecrets = { ...draft, secrets: opened.secrets ?? {} };
+    }
+    return this.channels.save(withSecrets as any).message;
   }
 
   private onControllerAttached(): void {
     this.controllerAttached = true;
     this.relay?.sendSnapshot([{ kind: "notice", text: "Privateer routines — results will appear here as they run." }]);
-    // Version only — the routines terminal isn't a single-model session, so no
-    // model field (and no cwd, per RelayClient.sendContext's non-PII stance).
-    this.relay?.sendContext({ version: agentVersion() });
+    // Version + this terminal's identity public key (so the app can confirm this is
+    // the terminal it PINNED at link time before sealing channel tokens to it). No
+    // model/cwd — the routines terminal isn't a single-model session, and cwd is PII.
+    let terminalPub: string | undefined;
+    try { terminalPub = terminalPublicKeyBase64(); } catch { /* no key → app can't seal, falls back */ }
+    this.relay?.sendContext({ version: agentVersion(), terminalPub });
+    // Prime the app's routines manager so it has the list on open (it also asks
+    // explicitly via routines_list; this just avoids a first-frame wait).
+    this.pushRoutines();
+    // Same for the channels manager.
+    this.pushChannels();
     const pending = drainPendingRelay();
     if (pending.length === 0) return;
     log(`controller attached — flushing ${pending.length} pending routine result(s)`);

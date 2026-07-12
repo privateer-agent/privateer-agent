@@ -64,14 +64,16 @@ const PX: Record<string, number | null> = {
   ".": null, // transparent — the frame (and the knocked-out keyhole) shows through
   O: 39, // ocean blue — the silhouette (matches the wordmark "P")
 };
-// 12 wide; an EVEN number of rows so they pair cleanly into half-block cells. Top half
-// is the padlock (shackle → body → keyhole slot); bottom half is the anchor (shank →
-// upturned fluke barbs → crown → bill).
+// 12 wide; an EVEN number of rows so they pair cleanly into half-block cells. Two blank
+// leading rows give the lock headroom and drop it to sit lower (closer to the anchor).
+// A padlock rides on top as the anchor's ring (shackle → 8-wide body → keyhole slot) —
+// bold enough to read as a solid lock without being chunky; then a short shank →
+// upturned fluke barbs → crown → bill.
 const PIXELS = [
-  "....OOOO....", "...OO..OO...", "..OO....OO..", "..OO....OO..",
-  ".OOOOOOOOOO.", ".OOOOOOOOOO.", ".OOOO..OOOO.", ".OOOO..OOOO.",
-  ".OOOO..OOOO.", ".OOOOOOOOOO.", ".OOOOOOOOOO.", ".....OO.....",
-  "O....OO....O", "OO...OO...OO", "OOO..OO..OOO", ".OOO.OO.OOO.",
+  "............", "............", "....OOOO....", "...OO..OO...",
+  "..OO....OO..", "..OOOOOOOO..", "..OOOOOOOO..", "..OOO..OOO..",
+  "..OOO..OOO..", "..OOOOOOOO..", "..OOOOOOOO..", ".....OO.....",
+  "O....OO....O", "OO...OO...OO", ".OO..OO..OO.", "..OO.OO.OO..",
   "..OOOOOOOO..", "...OOOOOO...", "....OOOO....", ".....OO.....",
 ];
 // Build the mark once at load. Each cell resets SGR so a background color can never

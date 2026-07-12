@@ -16,13 +16,14 @@ function makeFakeRelay() {
   const notices: string[] = [];
   const commandLists: { name: string; description?: string }[][] = [];
   const selects: { id: string; req: any }[] = [];
+  const inputs: { id: string; req: any }[] = [];
   const extensions: any[] = [];
   const skills: any[] = [];
   let connected = true;
   const relay: RelayLike & {
     approvals: typeof approvals; events: typeof events; noQuarter: typeof noQuarter;
     notices: typeof notices; commandLists: typeof commandLists; selects: typeof selects;
-    extensions: typeof extensions; skills: typeof skills;
+    inputs: typeof inputs; extensions: typeof extensions; skills: typeof skills;
     setConnected(v: boolean): void;
   } = {
     approvals,
@@ -31,6 +32,7 @@ function makeFakeRelay() {
     notices,
     commandLists,
     selects,
+    inputs,
     extensions,
     skills,
     setConnected(v) { connected = v; },
@@ -42,6 +44,7 @@ function makeFakeRelay() {
     sendNotice(text) { notices.push(text); },
     sendCommands(commands) { commandLists.push(commands); },
     requestSelect(id, req) { selects.push({ id, req }); },
+    requestInput(id, req) { inputs.push({ id, req }); },
     sendExtensions(payload) { extensions.push(payload); },
     sendSkills(payload) { skills.push(payload); },
   };
@@ -140,6 +143,35 @@ test("a disconnect resolves pending selects to null", async () => {
   const relay = makeFakeRelay();
   bridge.attachRelay(relay);
   const p = bridge.selectRemote({ title: "M", options: [{ value: "x", label: "x" }] });
+  await tick();
+  bridge.callbacks.onDisconnected();
+  assert.equal(await p, null);
+});
+
+test("inputRemote relays the prompt and resolves on the app's submission", async () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  const p = bridge.inputRemote({ title: "Name", placeholder: "e.g. main" });
+  await tick();
+  assert.equal(relay.inputs.length, 1);
+  bridge.callbacks.onInputResponse(relay.inputs[0].id, "release");
+  assert.equal(await p, "release");
+});
+
+test("inputRemote fails to null with no connected controller", async () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  relay.setConnected(false);
+  bridge.attachRelay(relay);
+  assert.equal(await bridge.inputRemote({ title: "Name" }), null);
+});
+
+test("a disconnect resolves pending inputs to null", async () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  const p = bridge.inputRemote({ title: "Name" });
   await tick();
   bridge.callbacks.onDisconnected();
   assert.equal(await p, null);

@@ -16,6 +16,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync }
 import { hostname, userInfo } from "node:os";
 import { globalDir, credentialsPath } from "../config/paths.ts";
 import { isAccountCapCode } from "../engine/errors.ts";
+import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
+import { pinAccountSignKey, clearAccountSignKey } from "../crypto/accountTrust.ts";
 
 // Default Privateer API host. NOTE: this is still the legacy "helix" Render
 // hostname the mobile/web client also points at (client/config/environment.ts);
@@ -145,6 +147,9 @@ export function clearCredentials(): void {
   } catch {
     /* nothing to remove */
   }
+  // Drop the pinned account signing key too — it belongs to the account that just
+  // signed out; a different account must re-pin its own at link.
+  clearAccountSignKey();
   _cache = null;
   _child = null;
   _account = null;
@@ -251,7 +256,17 @@ async function postJson(base: string, path: string, body: unknown, init: Request
 // Step 1: ask the server for a device + user code the human will approve in-app.
 export async function requestDeviceCode(deviceLabel = defaultDeviceLabel()): Promise<DeviceCode> {
   const base = serverBaseUrl();
-  const res = await postJson(base, "/auth/device/code", { deviceLabel });
+  // This terminal's public key rides the grant so the app can PIN it on approval
+  // (TOFU) — the trust anchor for later sealing secrets (channel tokens) that only
+  // this machine can open. Best-effort: if keygen fails we just omit it and the app
+  // falls back to terminal-only secret entry rather than blocking login.
+  let terminalPub: string | undefined;
+  try {
+    terminalPub = terminalPublicKeyBase64();
+  } catch {
+    /* no key → no app-sealed secrets for this terminal; login still proceeds */
+  }
+  const res = await postJson(base, "/auth/device/code", { deviceLabel, terminalPub });
   if (!res.ok) {
     throw new Error(`Couldn't start login (${res.status}). Check your connection or PRIVATEER_SERVER_URL.`);
   }
@@ -280,9 +295,12 @@ export async function pollForToken(
     const res = await postJson(base, "/auth/device/token", { device_code: code.device_code });
 
     if (res.ok) {
-      const data = (await res.json()) as Omit<Credentials, "serverBaseUrl">;
-      const creds: Credentials = { ...data, serverBaseUrl: base };
+      const data = (await res.json()) as Omit<Credentials, "serverBaseUrl"> & { accountSignPub?: string };
+      const creds: Credentials = { accessToken: data.accessToken, refreshToken: data.refreshToken, user: data.user, serverBaseUrl: base };
       saveCredentials(creds);
+      // Pin the account's signing public key (TOFU) so channel-config from the app can
+      // be verified as genuinely coming from the account, not a forging relay (F7/F8).
+      pinAccountSignKey(data.accountSignPub);
       notifySignedIn();
       return creds;
     }

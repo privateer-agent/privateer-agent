@@ -26,6 +26,7 @@ export interface RelayLike {
   sendNotice(text: string): void;
   sendCommands(commands: { name: string; description?: string }[]): void;
   requestSelect(id: string, req: SelectRequest): void;
+  requestInput(id: string, req: InputRequest): void;
   sendExtensions(payload: ExtensionsPayload): void;
   sendSkills(payload: SkillsPayload): void;
 }
@@ -51,6 +52,13 @@ export interface SelectRequest {
   title: string;
   options: { value: string; label: string; hint?: string }[];
   current?: string;
+}
+
+// A CLI-initiated free-form text prompt relayed to the app (e.g. a skill asking
+// for a value that isn't a fixed choice).
+export interface InputRequest {
+  title: string;
+  placeholder?: string;
 }
 
 export interface RemoteAttachment {
@@ -93,6 +101,7 @@ export class RemoteBridge {
   private noQuarter = false;
   private readonly pending = new Map<string, (d: AskOutcome) => void>();
   private readonly pendingSelects = new Map<string, (v: string | null) => void>();
+  private readonly pendingInputs = new Map<string, (v: string | null) => void>();
   private pendingAttachments: RemoteAttachment[] = [];
 
   constructor(private readonly cfg: RemoteBridgeConfig) {}
@@ -123,12 +132,30 @@ export class RemoteBridge {
     onSkillCreate: (skill) => this.cfg.onSkillCreate?.(skill),
     onSkillDelete: (name) => this.cfg.onSkillDelete?.(name),
     onSkillSetEnabled: (name, enabled) => this.cfg.onSkillSetEnabled?.(name, enabled),
+    // Routines are owned by the daemon, not an interactive session, so its own relay
+    // (not this bridge) handles routines_*. These no-ops just satisfy Required — an
+    // interactive terminal never surfaces the routines manager in the app.
+    onRoutinesList: () => {},
+    onRoutinesSave: () => {},
+    onRoutinesDelete: () => {},
+    onRoutinesSetEnabled: () => {},
+    onRoutinesRun: () => {},
+    // Channels, like routines, are owned by the daemon (its channels/run.ts config),
+    // not an interactive session — the daemon's own relay handles channels_*. These
+    // no-ops just satisfy Required; an interactive terminal never surfaces channels.
+    onChannelsList: () => {},
+    onChannelsSave: () => {},
+    onChannelsRemove: () => {},
     onApprovalResponse: (id, decision) => {
       const resolve = this.pending.get(id);
       if (resolve) resolve(decision);
     },
     onSelectResponse: (id, value) => {
       const resolve = this.pendingSelects.get(id);
+      if (resolve) resolve(value);
+    },
+    onInputResponse: (id, value) => {
+      const resolve = this.pendingInputs.get(id);
       if (resolve) resolve(value);
     },
     onNoQuarter: (on) => {
@@ -217,6 +244,28 @@ export class RemoteBridge {
     });
   };
 
+  // A CLI-initiated free-form text prompt: relay it to the app and await the typed
+  // line. Same fail-closed posture as selectRemote — null if no controller, on
+  // abort, or on disconnect. Callers get the submitted string or null.
+  inputRemote = (req: InputRequest, signal?: AbortSignal): Promise<string | null> => {
+    if (!this.relay || !this.relay.isConnected()) return Promise.resolve(null);
+    const id = randomUUID();
+    return new Promise<string | null>((resolve) => {
+      const onAbort = () => settle(null);
+      const settle = (v: string | null) => {
+        this.pendingInputs.delete(id);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(v);
+      };
+      this.pendingInputs.set(id, settle);
+      if (signal) {
+        if (signal.aborted) return onAbort();
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.relay!.requestInput(id, req);
+    });
+  };
+
   // ── turn lifecycle + event forwarding ───────────────────────────────────────
 
   // Mark the end of a turn so the next (possibly local) turn isn't treated as
@@ -248,5 +297,8 @@ export class RemoteBridge {
     // A relayed selection prompt whose controller vanished resolves to "no choice".
     for (const resolve of this.pendingSelects.values()) resolve(null);
     this.pendingSelects.clear();
+    // Same for a relayed text prompt: a gone controller resolves to "no input".
+    for (const resolve of this.pendingInputs.values()) resolve(null);
+    this.pendingInputs.clear();
   }
 }

@@ -248,6 +248,64 @@ async function main() {
     model,
   } as any));
 
+  // Dialog UI for extensions/skills that ask the user to CHOOSE mid-turn (Pi's
+  // ctx.ui.select/confirm/input). Without a bound uiContext Pi hands extensions a
+  // no-op UI, so those prompts silently resolve to "cancelled" — the agent could
+  // never ask a question. A remote-driven turn relays the choice to the app as the
+  // same `select_request` the /model picker uses (→ the app's SelectionSheet, then
+  // a `select_response` back); a local turn falls back to the terminal. This is a
+  // separate channel from the permission gate (which relays as `approval_request`
+  // → the app's global approval modal). Binding it also flips ctx.hasUI true, which
+  // is correct: this REPL is interactive. The abort signal Pi passes (to dismiss a
+  // dialog on interrupt) is threaded through so a cancelled turn doesn't wedge.
+  const driven = (): boolean => bridge.getRemote() && bridge.isConnected();
+  const uiContext = {
+    // Pick one of `options`. Returns the chosen string, or undefined if cancelled.
+    async select(title: string, options: string[], opts?: { signal?: AbortSignal }): Promise<string | undefined> {
+      if (!options.length) return undefined;
+      if (driven()) {
+        const choice = await bridge.selectRemote(
+          { title, options: options.map((o) => ({ value: o, label: o })) },
+          opts?.signal,
+        );
+        return choice ?? undefined;
+      }
+      console.log(`\n${YELLOW}${title}${RESET}`);
+      options.forEach((o, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${o}`));
+      const n = Number((await ask(`Choose [1-${options.length}]: `)).trim());
+      return Number.isInteger(n) && n >= 1 && n <= options.length ? options[n - 1] : undefined;
+    },
+    // Yes/No. Remotely a two-option selection (the app has no dedicated confirm UI).
+    async confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean> {
+      if (driven()) {
+        const choice = await bridge.selectRemote(
+          { title: title || message, options: [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }] },
+          opts?.signal,
+        );
+        return choice === "yes";
+      }
+      const a = (await ask(`\n${YELLOW}${title}${message ? ` — ${message}` : ""}${RESET} [y/N] `)).trim().toLowerCase();
+      return a === "y" || a === "yes";
+    },
+    // Free-form text. A remote turn relays a text-input prompt to the app (its
+    // own input sheet); a local turn reads the line over the terminal.
+    async input(title: string, placeholder?: string, opts?: { signal?: AbortSignal }): Promise<string | undefined> {
+      if (driven()) {
+        const value = await bridge.inputRemote({ title, placeholder }, opts?.signal);
+        return value ?? undefined;
+      }
+      const a = await ask(`\n${YELLOW}${title}${placeholder ? ` (${placeholder})` : ""}: ${RESET}`);
+      return a === "/quit" ? undefined : a;
+    },
+    // A one-line status message: printed locally and surfaced in the app's feed.
+    notify(message: string, type?: "info" | "warning" | "error"): void {
+      const color = type === "error" ? RED : type === "warning" ? YELLOW : DIM;
+      console.log(`${color}${message}${RESET}`);
+      if (driven()) bridge.sendNotice(message);
+    },
+  };
+  await (session as any).bindExtensions({ uiContext });
+
   // Stream the turn as EngineEvents — printed locally AND forwarded to the app
   // (the relay only sends when a controller is attached, so this is safe always).
   const adapter = createEngineEventAdapter();
