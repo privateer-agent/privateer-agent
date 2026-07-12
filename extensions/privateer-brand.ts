@@ -34,18 +34,19 @@ const VERSION: string = (() => {
   }
 })();
 
-// ── palette (Privateer "Open Water" ocean-blue brand) ────────────────────────
+// ── palette (Privateer brand) ────────────────────────────────────────────────
 // 256-color (8-bit), NOT 24-bit truecolor: macOS Terminal.app doesn't support
 // truecolor and mangles it (the old indigo/cyan came out green). These indices are
-// universally supported. Navy (the logo mark) is too dark to read on a dark terminal,
-// so we use the app's ocean blues — the same "Open Water" gradient as the brand.
+// universally supported. Navy (the logo mark) is too dark to read on a dark terminal, so
+// the whole banner — silhouette, wordmark, frame, and accents — is painted white: a clean
+// single-color mark, like the logo but legible on dark.
 const ESC = "\x1b[";
 const RESET = `${ESC}0m`;
 const BOLD = `${ESC}1m`;
 const c = (n: number): string => `${ESC}38;5;${n}m`;
-const OCEAN = c(39); // ≈ #00afff — primary ocean blue (anchor, wordmark "P")
-const OCEAN_LIGHT = c(81); // ≈ #5fd7ff — light sky accent (wordmark, version, path)
-const BORDER = c(32); // ≈ #0087d7 — deeper ocean, the frame
+const OCEAN = c(231); // white (#ffffff) — anchor / wordmark "P"
+const OCEAN_LIGHT = c(231); // white (#ffffff) — wordmark, version, path
+const BORDER = c(231); // white (#ffffff) — the frame
 const DIM = `${ESC}90m`;
 const GREEN = `${ESC}32m`;
 const YELLOW = `${ESC}33m`;
@@ -62,18 +63,24 @@ const YELLOW = `${ESC}33m`;
 const MARK_W = 12;
 const PX: Record<string, number | null> = {
   ".": null, // transparent — the frame (and the knocked-out keyhole) shows through
-  O: 39, // ocean blue — the silhouette (matches the wordmark "P")
+  O: 231, // white (#ffffff, top of the 256-color cube) — the silhouette, a clean single-color mark
 };
 // 12 wide; an EVEN number of rows so they pair cleanly into half-block cells. Two blank
-// leading rows give the lock headroom and drop it to sit lower (closer to the anchor).
-// A padlock rides on top as the anchor's ring (shackle → 8-wide body → keyhole slot) —
-// bold enough to read as a solid lock without being chunky; then a short shank →
-// upturned fluke barbs → crown → bill.
+// leading rows give the lock a little headroom without dropping the whole mark too low.
+// A small padlock rides on top as the anchor's ring: a narrow rounded shackle over an
+// 8-wide body that OVERHANGS the shackle on both sides (matching the logo's proportions,
+// where the body is clearly wider than the shackle), with a small centered 2×2 keyhole
+// knocked out of it — reads clearly as a lock without dominating the anchor. Then a short
+// shank → hooked fluke barbs (a 2-tall blade tip that turns up-and-out) → crown → bill.
 const PIXELS = [
-  "............", "............", "....OOOO....", "...OO..OO...",
-  "..OO....OO..", "..OOOOOOOO..", "..OOOOOOOO..", "..OOO..OOO..",
-  "..OOO..OOO..", "..OOOOOOOO..", "..OOOOOOOO..", ".....OO.....",
-  "O....OO....O", "OO...OO...OO", ".OO..OO..OO.", "..OO.OO.OO..",
+  "............", "............",
+  "....OOOO....", "...OO..OO...", "...OO..OO...",
+  "..OOOOOOOO..", "..OOOOOOOO..",
+  "..OOO..OOO..", "..OOO..OOO..",
+  "..OOOOOOOO..", "..OOOOOOOO..",
+  ".....OO.....", ".....OO.....",
+  "O....OO....O", "OO...OO...OO", "OO...OO...OO",
+  ".OO..OO..OO.", "..OO.OO.OO..",
   "..OOOOOOOO..", "...OOOOOO...", "....OOOO....", ".....OO.....",
 ];
 // Build the mark once at load. Each cell resets SGR so a background color can never
