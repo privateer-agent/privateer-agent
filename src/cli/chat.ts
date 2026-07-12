@@ -34,6 +34,9 @@ async function main() {
   const provider = spec.slice(0, slash);
   const modelId = spec.slice(slash + 1);
   const cwd = process.cwd();
+  // The live model spec ("provider/id"). Starts at the launch model and follows
+  // /model switches, so the app banner + picker reflect what's actually selected.
+  let currentSpec = spec;
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let closed = false;
@@ -63,12 +66,16 @@ async function main() {
   const bridge = new RemoteBridge({
     onPrompt: (text) => void runTurn(text, true),
     onInterrupt: () => void session?.abort?.(),
-    // On (re)attach, resync the transcript AND push live context (model +
-    // version) so the app's session banner shows what this terminal is really
-    // running. NON-PII: no cwd — see RelayClient.sendContext.
+    // A slash command typed in the app composer (e.g. /model) — run it through the
+    // same dispatcher the local REPL uses, tagged remote so it never blocks on stdin.
+    onCommand: (text) => void runCommand(text, true),
+    // On (re)attach, resync the transcript AND push live context (model + version)
+    // so the app's banner shows what this terminal is really running. The model
+    // catalog isn't pushed here — /model relays it on demand as a selection prompt.
+    // NON-PII: no cwd — see RelayClient.sendContext.
     onControllerAttached: () => {
       relay?.sendSnapshot([]);
-      relay?.sendContext({ model: spec, version: agentVersion() });
+      relay?.sendContext({ model: currentSpec, version: agentVersion() });
     },
     onStatus: (t) => console.log(`\n${DIM}⟿ ${t}${RESET}`),
   });
@@ -235,27 +242,104 @@ async function main() {
       : `${DIM}Not signed in. /login to enable remote access & the account provider.${RESET}`,
   );
 
-  const HELP = "Commands: /remote-access <on|off>  /login  /models [filter]  /verify  /mode <…>  /quit";
+  const HELP = "Commands: /remote-access <on|off>  /login  /model <provider/id>  /models [filter]  /verify  /mode <…>  /quit";
   console.log(`${DIM}Ready. Type a prompt. ${HELP}${RESET}`);
   await showPosture();
+
+  // The available model catalog as sorted "provider/id" specs. Same source the
+  // /models list and the app's picker draw from.
+  async function availableModelSpecs(): Promise<string[]> {
+    const all: any[] = (services.modelRegistry as any).getAvailable ? await (services.modelRegistry as any).getAvailable() : [];
+    return all.map((m) => `${m.provider}/${m.id}`).sort();
+  }
+
+  // Switch the live session's model in place (history preserved — see
+  // AgentSession.setModel). Re-pushes context so the app's banner follows the
+  // change; feedback goes to the console AND (when driven) the app.
+  async function switchModel(specArg: string, remote: boolean): Promise<void> {
+    const sp = specArg.trim();
+    const at = sp.indexOf("/");
+    if (at < 0) { const m = "Usage: /model provider/id"; console.log(`${RED}${m}${RESET}`); if (remote) relay?.sendNotice(m); return; }
+    const p = sp.slice(0, at), id = sp.slice(at + 1);
+    const model = (session.modelRegistry as any).find?.(p, id) ?? (services.modelRegistry as any).find?.(p, id);
+    if (!model) { const m = `Model ${sp} not found — try /models.`; console.log(`${RED}${m}${RESET}`); if (remote) relay?.sendNotice(m); return; }
+    try {
+      await session.setModel(model);
+      currentSpec = sp;
+      const m = `model → ${sp}`;
+      console.log(`${DIM}${m}${RESET}`);
+      relay?.sendContext({ model: currentSpec, version: agentVersion() }); // banner follows the switch
+      if (remote) relay?.sendNotice(m);
+    } catch (e) {
+      const m = `Couldn't switch model: ${(e as Error).message}`;
+      console.log(`${RED}${m}${RESET}`);
+      if (remote) relay?.sendNotice(m);
+    }
+  }
+
+  // The terminal-driven model picker: relay THIS machine's real catalog to the app
+  // as a selection prompt and switch to whatever the driver picks. This is the
+  // remote /model flow — the terminal owns the options, the app just renders them.
+  async function pickModelRemote(filter: string): Promise<void> {
+    const specs = (await availableModelSpecs()).filter((sp) => !filter || sp.toLowerCase().includes(filter));
+    const choice = await bridge.selectRemote({
+      title: "Choose a model",
+      options: specs.map((sp) => ({ value: sp, label: sp })),
+      current: currentSpec,
+    });
+    if (choice) await switchModel(choice, true);
+  }
+
+  // Shared slash-command dispatcher for the local REPL and app-sent commands (the
+  // relay `command` frame). Returns true when `line` was a recognized command, so
+  // the REPL knows not to fall through and treat it as a prompt. `remote` commands
+  // are driven from the app: they never touch local stdin and mirror feedback back
+  // over the relay.
+  async function runCommand(line: string, remote: boolean): Promise<boolean> {
+    if (line === "/help" || line === "?") { console.log(`${DIM}${HELP}${RESET}`); if (remote) relay?.sendNotice(HELP); return true; }
+    if (line === "/verify") { await showPosture(); return true; }
+    // Enabling remote access is a physical-terminal action; ignore it if the app
+    // (already remote) asks. Disabling remotely is the /remote-access off path,
+    // which has its own terminate frame, so we don't handle it here for remote.
+    if (line === "/remote-access" || line === "/remote-access on" || line === "/remote") { if (!remote) await remoteAccess(true); return true; }
+    if (line === "/remote-access off") { if (!remote) await remoteAccess(false); return true; }
+    if (line === "/login") { if (!remote) await login(); return true; }
+    if (line.startsWith("/model ")) { await switchModel(line.slice(7), remote); return true; }
+    // Bare /model (or /models [filter]) → the picker. Remote: relay the catalog as
+    // a selection prompt the app renders; local: just print the list.
+    if (line === "/model" || line === "/models" || line.startsWith("/models ")) {
+      const filter = line.startsWith("/models ") ? line.slice(8).trim().toLowerCase() : "";
+      if (remote) { await pickModelRemote(filter); return true; }
+      const rows = (await availableModelSpecs()).filter((sp) => !filter || sp.toLowerCase().includes(filter));
+      console.log(rows.slice(0, 40).join("\n") + (rows.length > 40 ? `\n${DIM}… ${rows.length - 40} more (try /models <filter>)${RESET}` : ""));
+      return true;
+    }
+    if (line.startsWith("/mode ")) { mode = line.slice(6).trim() as typeof mode; const m = `mode → ${mode}`; console.log(`${DIM}${m}${RESET}`); if (remote) relay?.sendNotice(m); return true; }
+    // Bare /mode → the picker (remote) or a hint (local).
+    if (line === "/mode") {
+      if (remote) {
+        const choice = await bridge.selectRemote({
+          title: "Permission mode",
+          options: ["default", "acceptEdits", "plan", "bypass"].map((v) => ({ value: v, label: v })),
+          current: mode,
+        });
+        if (choice) { mode = choice as typeof mode; relay?.sendNotice(`mode → ${mode}`); }
+      } else {
+        console.log(`${DIM}modes: default · acceptEdits · plan · bypass (current: ${mode})${RESET}`);
+      }
+      return true;
+    }
+    // Unknown command: tell a remote driver (so its composer doesn't look ignored);
+    // locally, fall through so a prompt that happens to start with "/" still runs.
+    if (remote) relay?.sendNotice(`Unknown command: ${line}`);
+    return false;
+  }
 
   for (;;) {
     const line = (await ask(`\n${CYAN}›${RESET} `)).trim();
     if (line === "/quit" || line === "/exit") break;
-    if (line === "/verify") { await showPosture(); continue; }
-    if (line === "/remote-access" || line === "/remote-access on" || line === "/remote") { await remoteAccess(true); continue; }
-    if (line === "/remote-access off") { await remoteAccess(false); continue; }
-    if (line === "/login") { await login(); continue; }
-    if (line === "/help" || line === "?") { console.log(`${DIM}${HELP}${RESET}`); continue; }
-    if (line.startsWith("/models")) {
-      const filter = line.slice(7).trim().toLowerCase();
-      const all: any[] = (services.modelRegistry as any).getAvailable ? await (services.modelRegistry as any).getAvailable() : [];
-      const rows = all.map((m) => `${m.provider}/${m.id}`).filter((s) => !filter || s.toLowerCase().includes(filter)).sort();
-      console.log(rows.slice(0, 40).join("\n") + (rows.length > 40 ? `\n${DIM}… ${rows.length - 40} more (try /models <filter>)${RESET}` : ""));
-      continue;
-    }
-    if (line.startsWith("/mode ")) { mode = line.slice(6).trim() as typeof mode; console.log(`${DIM}mode → ${mode}${RESET}`); continue; }
     if (!line) continue;
+    if ((line.startsWith("/") || line === "?") && (await runCommand(line, false))) continue;
     await runTurn(line, false);
   }
   await cleanup();

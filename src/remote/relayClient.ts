@@ -67,6 +67,13 @@ export interface RelayCallbacks {
   onNoQuarter?: (on: boolean) => void;
   // A controller attached — push a transcript snapshot so it can catch up.
   onControllerAttached: () => void;
+  // The app ran a slash command from its composer (e.g. "/model provider/id").
+  // Routed to the same command dispatcher the local REPL uses. Optional so
+  // callbacks that predate the app command UI keep compiling.
+  onCommand?: (text: string) => void;
+  // The app answered a CLI-initiated selection prompt (the id from requestSelect).
+  // A null value means the app dismissed the picker without choosing.
+  onSelectResponse?: (id: string, value: string | null) => void;
   // A file finished transferring from the app (reassembled from chunks). Held to
   // ride along with the next remote prompt.
   onAttachment: (file: { name: string; mediaType: string; base64: string }) => void;
@@ -255,6 +262,7 @@ export class RelayClient {
       seq?: number;
       data?: string;
       on?: boolean;
+      value?: string;
     };
     try {
       frame = JSON.parse(data.toString());
@@ -283,6 +291,12 @@ export class RelayClient {
         break;
       case "controller_attached":
         this.cb.onControllerAttached();
+        break;
+      case "command":
+        if (typeof frame.text === "string") this.cb.onCommand?.(frame.text);
+        break;
+      case "select_response":
+        if (frame.id) this.cb.onSelectResponse?.(frame.id, typeof frame.value === "string" ? frame.value : null);
         break;
       case "attach_begin":
         this.beginAttachment(frame);
@@ -433,6 +447,28 @@ export class RelayClient {
     if (typeof ctx.model === "string" && ctx.model) frame.model = ctx.model;
     if (typeof ctx.version === "string" && ctx.version) frame.version = ctx.version;
     this.rawSend(frame);
+  }
+
+  // A one-line notice for the app's feed (e.g. "model → …", "unknown command").
+  // The generic command-feedback channel back to the driver.
+  sendNotice(text: string): void {
+    this.rawSend({ type: "notice", text: safe(text, 500) });
+  }
+
+  // Ask the app to pick from a set of options — a CLI-initiated selection prompt.
+  // The app renders the same picker as /model and replies with a select_response
+  // (resolved by the bridge). Generic so any future prompt reuses one UI.
+  requestSelect(
+    id: string,
+    req: { title: string; options: { value: string; label: string; hint?: string }[]; current?: string },
+  ): void {
+    this.rawSend({
+      type: "select_request",
+      id,
+      title: safe(req.title, 200),
+      options: req.options.slice(0, 500).map((o) => ({ value: o.value, label: safe(o.label, 200), hint: o.hint ? safe(o.hint, 200) : undefined })),
+      current: req.current,
+    });
   }
 
   requestApproval(id: string, req: PermissionRequest): void {

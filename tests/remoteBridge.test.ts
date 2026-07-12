@@ -13,17 +13,27 @@ function makeFakeRelay() {
   const approvals: { id: string; req: PermissionRequest }[] = [];
   const events: EngineEvent[] = [];
   const noQuarter: boolean[] = [];
+  const notices: string[] = [];
+  const selects: { id: string; req: any }[] = [];
   let connected = true;
-  const relay: RelayLike & { approvals: typeof approvals; events: typeof events; noQuarter: typeof noQuarter; setConnected(v: boolean): void } = {
+  const relay: RelayLike & {
+    approvals: typeof approvals; events: typeof events; noQuarter: typeof noQuarter;
+    notices: typeof notices; selects: typeof selects;
+    setConnected(v: boolean): void;
+  } = {
     approvals,
     events,
     noQuarter,
+    notices,
+    selects,
     setConnected(v) { connected = v; },
     requestApproval(id, req) { approvals.push({ id, req }); },
     sendEvent(ev) { events.push(ev); },
     isConnected() { return connected; },
     sendNoQuarter(on) { noQuarter.push(on); },
     async sendFile() { return { ok: connected }; },
+    sendNotice(text) { notices.push(text); },
+    requestSelect(id, req) { selects.push({ id, req }); },
   };
   return relay;
 }
@@ -86,6 +96,51 @@ test("a disconnect fails all pending approvals closed", async () => {
   await tick();
   bridge.callbacks.onDisconnected();
   assert.equal(await p, "deny");
+});
+
+test("onCommand routes an app slash-command to the dispatcher", () => {
+  const seen: string[] = [];
+  const bridge = new RemoteBridge({ onPrompt: () => {}, onCommand: (t) => seen.push(t) });
+  bridge.attachRelay(makeFakeRelay());
+  bridge.callbacks.onCommand("/model openrouter/openai/gpt-4o");
+  assert.deepEqual(seen, ["/model openrouter/openai/gpt-4o"]);
+});
+
+test("selectRemote relays options and resolves on the app's choice", async () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  const p = bridge.selectRemote({ title: "Model", options: [{ value: "a/b", label: "a/b" }] });
+  await tick();
+  assert.equal(relay.selects.length, 1);
+  bridge.callbacks.onSelectResponse(relay.selects[0].id, "a/b");
+  assert.equal(await p, "a/b");
+});
+
+test("selectRemote fails to null with no connected controller", async () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  relay.setConnected(false);
+  bridge.attachRelay(relay);
+  assert.equal(await bridge.selectRemote({ title: "M", options: [] }), null);
+});
+
+test("a disconnect resolves pending selects to null", async () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  const p = bridge.selectRemote({ title: "M", options: [{ value: "x", label: "x" }] });
+  await tick();
+  bridge.callbacks.onDisconnected();
+  assert.equal(await p, null);
+});
+
+test("sendNotice passes through to the relay", () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  bridge.sendNotice("model → a/b");
+  assert.deepEqual(relay.notices, ["model → a/b"]);
 });
 
 // ── the payoff: the real Phase-2 gate, driven remotely through the bridge ──

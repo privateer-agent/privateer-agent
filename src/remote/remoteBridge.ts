@@ -23,6 +23,15 @@ export interface RelayLike {
   isConnected(): boolean;
   sendNoQuarter(on: boolean): void;
   sendFile(file: { name: string; mediaType: string; base64: string; size: number }): Promise<{ ok: boolean; reason?: string }>;
+  sendNotice(text: string): void;
+  requestSelect(id: string, req: SelectRequest): void;
+}
+
+// A CLI-initiated selection prompt relayed to the app (e.g. pick a model).
+export interface SelectRequest {
+  title: string;
+  options: { value: string; label: string; hint?: string }[];
+  current?: string;
 }
 
 export interface RemoteAttachment {
@@ -37,6 +46,9 @@ export interface RemoteBridgeConfig {
   onPrompt: (text: string, attachments: RemoteAttachment[]) => void;
   onInterrupt?: () => void;
   onTerminate?: () => void;
+  // A slash command arrived from the app composer (e.g. "/model provider/id").
+  // Route it to the same command dispatcher the local REPL uses.
+  onCommand?: (text: string) => void;
   // A controller (re)attached — the owner should push a transcript snapshot.
   onControllerAttached?: () => void;
   onStatus?: (text: string) => void;
@@ -50,6 +62,7 @@ export class RemoteBridge {
   private remote = false;
   private noQuarter = false;
   private readonly pending = new Map<string, (d: AskOutcome) => void>();
+  private readonly pendingSelects = new Map<string, (v: string | null) => void>();
   private pendingAttachments: RemoteAttachment[] = [];
 
   constructor(private readonly cfg: RemoteBridgeConfig) {}
@@ -72,9 +85,14 @@ export class RemoteBridge {
     },
     onInterrupt: () => this.cfg.onInterrupt?.(),
     onTerminate: () => this.cfg.onTerminate?.(),
+    onCommand: (text) => this.cfg.onCommand?.(text),
     onApprovalResponse: (id, decision) => {
       const resolve = this.pending.get(id);
       if (resolve) resolve(decision);
+    },
+    onSelectResponse: (id, value) => {
+      const resolve = this.pendingSelects.get(id);
+      if (resolve) resolve(value);
     },
     onNoQuarter: (on) => {
       this.noQuarter = on;
@@ -120,6 +138,33 @@ export class RemoteBridge {
     });
   };
 
+  // Surface a one-line notice in the app's feed (command feedback).
+  sendNotice(text: string): void {
+    this.relay?.sendNotice(text);
+  }
+
+  // A CLI-initiated selection prompt: relay the options to the app and await its
+  // choice. Fail closed (null) if no controller, on abort, or on disconnect — the
+  // same posture as remoteAsk. Callers get the chosen `value` or null.
+  selectRemote = (req: SelectRequest, signal?: AbortSignal): Promise<string | null> => {
+    if (!this.relay || !this.relay.isConnected()) return Promise.resolve(null);
+    const id = randomUUID();
+    return new Promise<string | null>((resolve) => {
+      const onAbort = () => settle(null);
+      const settle = (v: string | null) => {
+        this.pendingSelects.delete(id);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(v);
+      };
+      this.pendingSelects.set(id, settle);
+      if (signal) {
+        if (signal.aborted) return onAbort();
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.relay!.requestSelect(id, req);
+    });
+  };
+
   // ── turn lifecycle + event forwarding ───────────────────────────────────────
 
   // Mark the end of a turn so the next (possibly local) turn isn't treated as
@@ -148,5 +193,8 @@ export class RemoteBridge {
   private rejectAllPending(): void {
     for (const resolve of this.pending.values()) resolve("deny");
     this.pending.clear();
+    // A relayed selection prompt whose controller vanished resolves to "no choice".
+    for (const resolve of this.pendingSelects.values()) resolve(null);
+    this.pendingSelects.clear();
   }
 }
