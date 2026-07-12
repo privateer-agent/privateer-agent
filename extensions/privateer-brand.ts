@@ -50,19 +50,50 @@ const DIM = `${ESC}90m`;
 const GREEN = `${ESC}32m`;
 const YELLOW = `${ESC}33m`;
 
-// The Privateer mark in ASCII: a padlock (with keyhole) atop an anchor — "bring your
-// own model" meets lock-and-key privacy, echoing the app's anchor+padlock logo. Every
-// line is the SAME visible width (MARK_W) and centers on column 5 (the shank/keyhole),
-// so the text column beside it stays aligned. Keep them equal-width if you edit the art.
-const MARK_W = 11;
-const ANCHOR = [
-  "    .-.    ", // shackle arch
-  "   |___|   ", // lock body top (the shackle's base)
-  "   |_t_|   ", // lock body + keyhole
-  " /\\  |  /\\ ", // stock — arms flare from the shank (each \\ is one backslash)
-  "  \\  |  /  ", // arms
-  "   \\_|_/   ", // flukes
+// The Privateer mark: our symbol — a padlock (with a keyhole) fused into an anchor,
+// "bring your own model" meets lock-and-key privacy — drawn from the app's logo. It's
+// rendered with terminal HALF-BLOCKS, so each text row packs TWO pixel rows: a "▀"
+// whose FOREGROUND paints the top pixel and BACKGROUND the bottom (one pixel → "▀"/"▄"
+// on the default bg; none → a plain space). 256-color indices only, same reason as the
+// palette above. Every built line is MARK_W visible cells wide (SGR escapes don't
+// count), so the text column beside it stays aligned. To redraw: edit PIXELS (each char
+// is a PX palette key), keeping every row MARK_W long and the row COUNT even — the
+// builder derives the escapes from that.
+const MARK_W = 12;
+const PX: Record<string, number | null> = {
+  ".": null, // transparent — the frame (and the knocked-out keyhole) shows through
+  O: 39, // ocean blue — the silhouette (matches the wordmark "P")
+};
+// 12 wide; an EVEN number of rows so they pair cleanly into half-block cells. Top half
+// is the padlock (shackle → body → keyhole slot); bottom half is the anchor (shank →
+// upturned fluke barbs → crown → bill).
+const PIXELS = [
+  "....OOOO....", "...OO..OO...", "..OO....OO..", "..OO....OO..",
+  ".OOOOOOOOOO.", ".OOOOOOOOOO.", ".OOOO..OOOO.", ".OOOO..OOOO.",
+  ".OOOO..OOOO.", ".OOOOOOOOOO.", ".OOOOOOOOOO.", ".....OO.....",
+  "O....OO....O", "OO...OO...OO", "OOO..OO..OOO", ".OOO.OO.OOO.",
+  "..OOOOOOOO..", "...OOOOOO...", "....OOOO....", ".....OO.....",
 ];
+// Build the mark once at load. Each cell resets SGR so a background color can never
+// bleed into the row padding the framer adds after it.
+const MARK: string[] = (() => {
+  const rows: string[] = [];
+  for (let r = 0; r < PIXELS.length; r += 2) {
+    const top = PIXELS[r];
+    const bot = PIXELS[r + 1] ?? ".".repeat(MARK_W);
+    let line = "";
+    for (let x = 0; x < MARK_W; x++) {
+      const t = PX[top[x]];
+      const bcol = PX[bot[x]];
+      if (t == null && bcol == null) line += " ";
+      else if (t != null && bcol != null) line += `${ESC}38;5;${t}m${ESC}48;5;${bcol}m▀${RESET}`;
+      else if (t != null) line += `${ESC}38;5;${t}m▀${RESET}`;
+      else line += `${ESC}38;5;${bcol}m▄${RESET}`;
+    }
+    rows.push(line);
+  }
+  return rows;
+})();
 
 // Visible width = characters after stripping SGR escapes. Everything we render inside
 // the box is ASCII or a BMP width-1 symbol, so a plain length is exact here.
@@ -200,10 +231,11 @@ function renderBanner(width: number, modelProvider?: string): string[] {
   // Zip the mark and the text column by row. Rows past the mark's height get a blank
   // gutter of the mark's width, so the text stays in one column throughout.
   const gap = "  ";
-  const height = Math.max(ANCHOR.length, text.length);
+  const height = Math.max(MARK.length, text.length);
   const rows: string[] = [];
   for (let i = 0; i < height; i++) {
-    const left = i < ANCHOR.length ? `${OCEAN}${ANCHOR[i]}${RESET}` : " ".repeat(MARK_W);
+    // The mark lines already carry their own per-pixel colors, so we don't wrap them.
+    const left = i < MARK.length ? MARK[i] : " ".repeat(MARK_W);
     rows.push(`${left}${gap}${text[i] ?? ""}`.trimEnd());
   }
 

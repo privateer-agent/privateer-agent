@@ -16,10 +16,13 @@ function makeFakeRelay() {
   const notices: string[] = [];
   const commandLists: { name: string; description?: string }[][] = [];
   const selects: { id: string; req: any }[] = [];
+  const extensions: any[] = [];
+  const skills: any[] = [];
   let connected = true;
   const relay: RelayLike & {
     approvals: typeof approvals; events: typeof events; noQuarter: typeof noQuarter;
     notices: typeof notices; commandLists: typeof commandLists; selects: typeof selects;
+    extensions: typeof extensions; skills: typeof skills;
     setConnected(v: boolean): void;
   } = {
     approvals,
@@ -28,6 +31,8 @@ function makeFakeRelay() {
     notices,
     commandLists,
     selects,
+    extensions,
+    skills,
     setConnected(v) { connected = v; },
     requestApproval(id, req) { approvals.push({ id, req }); },
     sendEvent(ev) { events.push(ev); },
@@ -37,6 +42,8 @@ function makeFakeRelay() {
     sendNotice(text) { notices.push(text); },
     sendCommands(commands) { commandLists.push(commands); },
     requestSelect(id, req) { selects.push({ id, req }); },
+    sendExtensions(payload) { extensions.push(payload); },
+    sendSkills(payload) { skills.push(payload); },
   };
   return relay;
 }
@@ -146,6 +153,68 @@ test("sendNotice / sendCommands pass through to the relay", () => {
   bridge.sendCommands([{ name: "/model", description: "Switch the model" }]);
   assert.deepEqual(relay.notices, ["model → a/b"]);
   assert.deepEqual(relay.commandLists, [[{ name: "/model", description: "Switch the model" }]]);
+});
+
+test("extensions_* callbacks route to the config handlers", () => {
+  const listed: number[] = [];
+  const added: string[] = [];
+  const removed: string[] = [];
+  const bridge = new RemoteBridge({
+    onPrompt: () => {},
+    onExtensionsList: () => listed.push(1),
+    onExtensionsAdd: (s) => added.push(s),
+    onExtensionsRemove: (s) => removed.push(s),
+  });
+  bridge.attachRelay(makeFakeRelay());
+  bridge.callbacks.onExtensionsList();
+  bridge.callbacks.onExtensionsAdd("npm:pi-hello");
+  bridge.callbacks.onExtensionsRemove("npm:pi-hello");
+  assert.deepEqual(listed, [1]);
+  assert.deepEqual(added, ["npm:pi-hello"]);
+  assert.deepEqual(removed, ["npm:pi-hello"]);
+});
+
+test("sendExtensions passes the installed snapshot through to the relay", () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  bridge.sendExtensions({ installed: [{ source: "npm:pi-hello", scope: "user" }], needsRestart: true, message: "Restart to activate." });
+  assert.equal(relay.extensions.length, 1);
+  assert.deepEqual(relay.extensions[0].installed, [{ source: "npm:pi-hello", scope: "user" }]);
+  assert.equal(relay.extensions[0].needsRestart, true);
+});
+
+test("skills_* callbacks route to the config handlers", () => {
+  const listed: number[] = [];
+  const created: any[] = [];
+  const deleted: string[] = [];
+  const toggled: { name: string; enabled: boolean }[] = [];
+  const bridge = new RemoteBridge({
+    onPrompt: () => {},
+    onSkillsList: () => listed.push(1),
+    onSkillCreate: (s) => created.push(s),
+    onSkillDelete: (n) => deleted.push(n),
+    onSkillSetEnabled: (n, e) => toggled.push({ name: n, enabled: e }),
+  });
+  bridge.attachRelay(makeFakeRelay());
+  bridge.callbacks.onSkillsList();
+  bridge.callbacks.onSkillCreate({ name: "pdf-tools", description: "d", instructions: "b" });
+  bridge.callbacks.onSkillDelete("pdf-tools");
+  bridge.callbacks.onSkillSetEnabled("pdf-tools", false);
+  assert.deepEqual(listed, [1]);
+  assert.deepEqual(created, [{ name: "pdf-tools", description: "d", instructions: "b" }]);
+  assert.deepEqual(deleted, ["pdf-tools"]);
+  assert.deepEqual(toggled, [{ name: "pdf-tools", enabled: false }]);
+});
+
+test("sendSkills passes the skills snapshot through to the relay", () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  bridge.sendSkills({ items: [{ name: "pdf-tools", description: "d", source: "user", editable: true, disabled: false }], needsRestart: true });
+  assert.equal(relay.skills.length, 1);
+  assert.equal(relay.skills[0].items[0].name, "pdf-tools");
+  assert.equal(relay.skills[0].needsRestart, true);
 });
 
 // ── the payoff: the real Phase-2 gate, driven remotely through the bridge ──

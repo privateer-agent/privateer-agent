@@ -26,6 +26,24 @@ export interface RelayLike {
   sendNotice(text: string): void;
   sendCommands(commands: { name: string; description?: string }[]): void;
   requestSelect(id: string, req: SelectRequest): void;
+  sendExtensions(payload: ExtensionsPayload): void;
+  sendSkills(payload: SkillsPayload): void;
+}
+
+// The installed-extensions snapshot relayed to the app's extensions manager.
+export interface ExtensionsPayload {
+  installed: { source: string; scope: string; filtered?: boolean; installed?: boolean }[];
+  busy?: boolean;
+  message?: string;
+  needsRestart?: boolean;
+}
+
+// The skills snapshot relayed to the app's skills manager.
+export interface SkillsPayload {
+  items: { name: string; description: string; source: string; editable: boolean; disabled: boolean }[];
+  busy?: boolean;
+  message?: string;
+  needsRestart?: boolean;
 }
 
 // A CLI-initiated selection prompt relayed to the app (e.g. pick a model).
@@ -50,6 +68,17 @@ export interface RemoteBridgeConfig {
   // A slash command arrived from the app composer (e.g. "/model provider/id").
   // Route it to the same command dispatcher the local REPL uses.
   onCommand?: (text: string) => void;
+  // The app's extensions manager opened — the owner should push the installed list.
+  onExtensionsList?: () => void;
+  // The app asked to install / remove a Pi extension by source spec.
+  onExtensionsAdd?: (source: string) => void;
+  onExtensionsRemove?: (source: string) => void;
+  // The app's skills manager opened — the owner should push the skills list.
+  onSkillsList?: () => void;
+  // The app asked to create/overwrite, delete, or toggle a user skill.
+  onSkillCreate?: (skill: { name: string; description: string; instructions: string }) => void;
+  onSkillDelete?: (name: string) => void;
+  onSkillSetEnabled?: (name: string, enabled: boolean) => void;
   // A controller (re)attached — the owner should push a transcript snapshot.
   onControllerAttached?: () => void;
   onStatus?: (text: string) => void;
@@ -87,6 +116,13 @@ export class RemoteBridge {
     onInterrupt: () => this.cfg.onInterrupt?.(),
     onTerminate: () => this.cfg.onTerminate?.(),
     onCommand: (text) => this.cfg.onCommand?.(text),
+    onExtensionsList: () => this.cfg.onExtensionsList?.(),
+    onExtensionsAdd: (source) => this.cfg.onExtensionsAdd?.(source),
+    onExtensionsRemove: (source) => this.cfg.onExtensionsRemove?.(source),
+    onSkillsList: () => this.cfg.onSkillsList?.(),
+    onSkillCreate: (skill) => this.cfg.onSkillCreate?.(skill),
+    onSkillDelete: (name) => this.cfg.onSkillDelete?.(name),
+    onSkillSetEnabled: (name, enabled) => this.cfg.onSkillSetEnabled?.(name, enabled),
     onApprovalResponse: (id, decision) => {
       const resolve = this.pending.get(id);
       if (resolve) resolve(decision);
@@ -147,6 +183,16 @@ export class RemoteBridge {
   // Advertise the terminal's available commands to the app (on attach).
   sendCommands(commands: { name: string; description?: string }[]): void {
     this.relay?.sendCommands(commands);
+  }
+
+  // Push the installed-extensions snapshot to the app's extensions manager.
+  sendExtensions(payload: ExtensionsPayload): void {
+    this.relay?.sendExtensions(payload);
+  }
+
+  // Push the skills snapshot to the app's skills manager.
+  sendSkills(payload: SkillsPayload): void {
+    this.relay?.sendSkills(payload);
   }
 
   // A CLI-initiated selection prompt: relay the options to the app and await its

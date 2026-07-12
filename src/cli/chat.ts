@@ -25,6 +25,8 @@ async function main() {
   const { agentDir } = await import("../config/paths.ts");
   const { RemoteBridge } = await import("../remote/remoteBridge.ts");
   const { RelayClient } = await import("../remote/relayClient.ts");
+  const { makeExtensionsControl } = await import("../remote/extensionsControl.ts");
+  const { makeSkillsControl } = await import("../remote/skillsControl.ts");
   const priv = await import("../auth/privateer.ts");
   const { makeAccountProvider, accountPosture } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
@@ -59,6 +61,10 @@ async function main() {
   let session: any = null;
   let relay: any = null;
   let turnActive = false;
+  // Pi-extension manager for the app's extensions screen (built after services below).
+  let extensions: ReturnType<typeof makeExtensionsControl> | null = null;
+  // Skills manager for the app's skills screen (built after services below).
+  let skills: ReturnType<typeof makeSkillsControl> | null = null;
 
   // The relay bridge: wires the app (when /remote-access is on) to the same gate +
   // turn loop. Its gate hooks (getRemote/remoteAsk) are handed to the gate below,
@@ -85,7 +91,60 @@ async function main() {
       relay?.sendCommands(availableCommands());
     },
     onStatus: (t) => console.log(`\n${DIM}⟿ ${t}${RESET}`),
+    // The app's extensions manager: list the user's installed Pi extensions, or
+    // add/remove one. add/remove persist immediately but only load on the next
+    // terminal launch — so the final frame flags needsRestart. See runExtMutation.
+    onExtensionsList: () => relay?.sendExtensions({ installed: extensions?.listInstalled() ?? [] }),
+    onExtensionsAdd: (source) => void runExtMutation("add", source),
+    onExtensionsRemove: (source) => void runExtMutation("remove", source),
+    // The app's skills manager: list the terminal's skills, or create/delete/toggle
+    // a user one. A create/delete/toggle only reaches the model's <available_skills>
+    // on the next launch (needsRestart); Run-now goes through the command frame as
+    // /skill:name, which Pi expands immediately. See runSkillMutation.
+    onSkillsList: () => relay?.sendSkills({ items: skills?.listSkills() ?? [] }),
+    onSkillCreate: (skill) => void runSkillMutation(() => skills!.createSkill(skill), "Saved"),
+    onSkillDelete: (name) => void runSkillMutation(() => skills!.deleteSkill(name), "Deleted"),
+    onSkillSetEnabled: (name, enabled) => void runSkillMutation(() => skills!.setEnabled(name, enabled), enabled ? "Enabled" : "Disabled"),
   });
+
+  // Run a skills create/delete/toggle for the app and relay the fresh list + result.
+  // The final frame flags needsRestart on success so the app tells the user the
+  // change reaches the model on relaunch (Run-now works without a restart).
+  async function runSkillMutation(op: () => Promise<{ ok: boolean; message?: string }>, verb: string): Promise<void> {
+    if (!skills) return;
+    const res = await op();
+    relay?.sendSkills({
+      items: skills.listSkills(),
+      message: res.ok ? `${verb} — restart the terminal to update the model's skill list.` : res.message,
+      needsRestart: res.ok,
+    });
+  }
+
+  // Run an extensions add/remove for the app and relay progress → result. Progress
+  // events (npm install / git clone steps) push busy frames; the final frame carries
+  // the fresh list plus needsRestart so the app tells the user to relaunch to activate.
+  async function runExtMutation(kind: "add" | "remove", source: string): Promise<void> {
+    if (!extensions) return;
+    extensions.setProgress((ev) =>
+      relay?.sendExtensions({
+        installed: extensions!.listInstalled(),
+        busy: ev.type !== "complete" && ev.type !== "error",
+        message: ev.message,
+      }),
+    );
+    try {
+      const res = kind === "add" ? await extensions.add(source) : await extensions.remove(source);
+      relay?.sendExtensions({
+        installed: extensions.listInstalled(),
+        message: res.ok
+          ? `${kind === "add" ? "Added" : "Removed"} ${source} — restart the terminal to activate.`
+          : res.message,
+        needsRestart: res.ok,
+      });
+    } finally {
+      extensions.setProgress(undefined);
+    }
+  }
 
   // Serialize turns so a remote prompt and a locally-typed one can't overlap.
   // `echo` prints the "⟿ [app] …" line; the caller suppresses it when it already
@@ -135,6 +194,15 @@ async function main() {
     },
   });
   for (const d of services.diagnostics) if (d.type === "error") console.log(`${RED}! ${d.message}${RESET}`);
+
+  // Pi-extension management for the app's extensions screen. Reuse the session's own
+  // SettingsManager so the list reflects exactly what Pi loaded (and add/remove write
+  // the same settings.json). The Privateer moat is excluded — it's shim files, not
+  // configured "packages" (see extensionsControl).
+  extensions = makeExtensionsControl({ cwd, agentDir: agentDir(), settingsManager: services.settingsManager });
+  // Skills manager for the app's skills screen. Same SettingsManager so configured
+  // skill paths + the user's <agentDir>/skills are both discovered.
+  skills = makeSkillsControl({ cwd, agentDir: agentDir(), settingsManager: services.settingsManager });
 
   // Exit cleanup: revoke the server-side sessions THIS run created (the child API
   // session AND the account inference session) so the terminal drops off the app's
@@ -323,6 +391,21 @@ async function main() {
       console.log(rows.slice(0, 40).join("\n") + (rows.length > 40 ? `\n${DIM}… ${rows.length - 40} more (try /models <filter>)${RESET}` : ""));
       return true;
     }
+    // Extensions: remote drives the app's manager (list frame); local prints the list.
+    if (line === "/extensions" || line === "/ext") {
+      const installed = extensions?.listInstalled() ?? [];
+      if (remote) { relay?.sendExtensions({ installed }); return true; }
+      console.log(installed.length ? installed.map((e) => `  ${e.source}${e.installed ? "" : ` ${DIM}(not installed)${RESET}`}`).join("\n") : `${DIM}No extensions installed. Add them from the Privateer app.${RESET}`);
+      return true;
+    }
+    // Skills: remote drives the app's manager (list frame); local prints the list.
+    // Note `/skill:name` (invoke) is NOT handled here — it falls through to Pi.
+    if (line === "/skills") {
+      const items = skills?.listSkills() ?? [];
+      if (remote) { relay?.sendSkills({ items }); return true; }
+      console.log(items.length ? items.map((s) => `  ${s.name}${s.disabled ? ` ${DIM}(disabled)${RESET}` : ""}${s.editable ? "" : ` ${DIM}(read-only)${RESET}`} — ${s.description}`).join("\n") : `${DIM}No skills yet. Create them from the Privateer app.${RESET}`);
+      return true;
+    }
     if (line.startsWith("/mode ")) { mode = line.slice(6).trim() as typeof mode; const m = `mode → ${mode}`; console.log(`${DIM}${m}${RESET}`); if (remote) relay?.sendNotice(m); return true; }
     // Bare /mode → the picker (remote) or a hint (local).
     if (line === "/mode") {
@@ -352,6 +435,8 @@ async function main() {
       { name: "/model", description: "Switch the model" },
       { name: "/mode", description: "Change the approval mode (default/acceptEdits/plan/bypass)" },
       { name: "/models", description: "List available models" },
+      { name: "/extensions", description: "Manage installed Pi extensions" },
+      { name: "/skills", description: "Manage the terminal's skills" },
       { name: "/verify", description: "Re-check the model's privacy posture" },
       { name: "/help", description: "Show available commands" },
     ];

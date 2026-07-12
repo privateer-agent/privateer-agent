@@ -74,6 +74,22 @@ export interface RelayCallbacks {
   // The app answered a CLI-initiated selection prompt (the id from requestSelect).
   // A null value means the app dismissed the picker without choosing.
   onSelectResponse?: (id: string, value: string | null) => void;
+  // The app opened the extensions manager — reply with the current installed list
+  // (a sendExtensions frame). Optional so pre-extensions callbacks keep compiling.
+  onExtensionsList?: () => void;
+  // The app asked to install a Pi extension by source spec (npm:/git:/path).
+  onExtensionsAdd?: (source: string) => void;
+  // The app asked to remove a previously-installed extension by source spec.
+  onExtensionsRemove?: (source: string) => void;
+  // The app opened the skills manager — reply with the current skills list
+  // (a sendSkills frame). Optional so pre-skills callbacks keep compiling.
+  onSkillsList?: () => void;
+  // The app asked to create/overwrite a user skill (name + description + body).
+  onSkillCreate?: (skill: { name: string; description: string; instructions: string }) => void;
+  // The app asked to delete a user skill by name.
+  onSkillDelete?: (name: string) => void;
+  // The app toggled a user skill's model-invocation availability.
+  onSkillSetEnabled?: (name: string, enabled: boolean) => void;
   // A file finished transferring from the app (reassembled from chunks). Held to
   // ride along with the next remote prompt.
   onAttachment: (file: { name: string; mediaType: string; base64: string }) => void;
@@ -263,6 +279,10 @@ export class RelayClient {
       data?: string;
       on?: boolean;
       value?: string;
+      source?: string;
+      description?: string;
+      instructions?: string;
+      enabled?: boolean;
     };
     try {
       frame = JSON.parse(data.toString());
@@ -297,6 +317,33 @@ export class RelayClient {
         break;
       case "select_response":
         if (frame.id) this.cb.onSelectResponse?.(frame.id, typeof frame.value === "string" ? frame.value : null);
+        break;
+      case "extensions_list":
+        this.cb.onExtensionsList?.();
+        break;
+      case "extensions_add":
+        if (typeof frame.source === "string") this.cb.onExtensionsAdd?.(frame.source);
+        break;
+      case "extensions_remove":
+        if (typeof frame.source === "string") this.cb.onExtensionsRemove?.(frame.source);
+        break;
+      case "skills_list":
+        this.cb.onSkillsList?.();
+        break;
+      case "skills_create":
+        if (typeof frame.name === "string") {
+          this.cb.onSkillCreate?.({
+            name: frame.name,
+            description: typeof frame.description === "string" ? frame.description : "",
+            instructions: typeof frame.instructions === "string" ? frame.instructions : "",
+          });
+        }
+        break;
+      case "skills_delete":
+        if (typeof frame.name === "string") this.cb.onSkillDelete?.(frame.name);
+        break;
+      case "skills_set_enabled":
+        if (typeof frame.name === "string") this.cb.onSkillSetEnabled?.(frame.name, frame.enabled === true);
         break;
       case "attach_begin":
         this.beginAttachment(frame);
@@ -462,6 +509,58 @@ export class RelayClient {
     this.rawSend({
       type: "commands",
       commands: commands.slice(0, 200).map((c) => ({ name: c.name, description: c.description ? safe(c.description, 200) : undefined })),
+    });
+  }
+
+  // Push the terminal's installed Pi extensions (the user's own packages; the moat
+  // is excluded upstream) to the app's extensions manager. Sent on request and after
+  // each add/remove. `busy` drives a progress indicator; `needsRestart` tells the app
+  // the change only takes effect on the next terminal launch. NON-PII: package
+  // sources + scope only. Installed list bounded like sendCommands.
+  sendExtensions(payload: {
+    installed: { source: string; scope: string; filtered?: boolean; installed?: boolean }[];
+    busy?: boolean;
+    message?: string;
+    needsRestart?: boolean;
+  }): void {
+    this.rawSend({
+      type: "extensions",
+      installed: payload.installed.slice(0, 200).map((e) => ({
+        source: safe(e.source, 200),
+        scope: e.scope === "project" ? "project" : "user",
+        filtered: !!e.filtered,
+        installed: !!e.installed,
+      })),
+      busy: !!payload.busy,
+      message: payload.message ? safe(payload.message, 500) : undefined,
+      needsRestart: !!payload.needsRestart,
+    });
+  }
+
+  // Push the terminal's skills (user-authored + read-only package/project ones) to
+  // the app's skills manager. Sent on request and after each create/delete/toggle.
+  // `busy` drives a progress indicator; `needsRestart` tells the app a change only
+  // reaches the model (the <available_skills> prompt block) on the next launch —
+  // Run-now via /skill:name works immediately. NON-PII: names + descriptions +
+  // coarse source only. Items bounded like sendExtensions.
+  sendSkills(payload: {
+    items: { name: string; description: string; source: string; editable: boolean; disabled: boolean }[];
+    busy?: boolean;
+    message?: string;
+    needsRestart?: boolean;
+  }): void {
+    this.rawSend({
+      type: "skills",
+      items: payload.items.slice(0, 200).map((s) => ({
+        name: safe(s.name, 200),
+        description: safe(s.description, 1024),
+        source: safe(s.source, 200),
+        editable: !!s.editable,
+        disabled: !!s.disabled,
+      })),
+      busy: !!payload.busy,
+      message: payload.message ? safe(payload.message, 500) : undefined,
+      needsRestart: !!payload.needsRestart,
     });
   }
 
