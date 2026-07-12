@@ -220,6 +220,16 @@ only. The **cloud outbox** is the terminal→account mirror: a terminal seals un
 results to the account's public key (`crypto/outboxSeal.ts`) — terminals are
 **write-only** and hold no account key, so a stolen terminal can post but never read.
 
+Because the terminal holds no master key, it can't derive the outbox public key itself
+— it fetches it from the (untrusted) server. To stop a malicious server from
+**substituting a recipient key it controls** (which would let it read every sealed
+result), the app **signs the published outbox key** with the account signing key, and
+the terminal **verifies that signature** against the key it pinned at link
+(`accountVerify.ts` `verifyOutboxKey`, symmetric with the channel-config path) before
+sealing. Verification is fail-closed: no pin, a missing signature, or a bad signature
+makes the terminal refuse to seal, and the `cloud` channel falls back to a local
+`notice` (the result is deferred, never leaked). Residual: the F1 link-moment window.
+
 ### 6.4 App→terminal channel config: confidentiality + authenticity
 Channel config is set from the app with **two** independent protections, so the server
 neither reads the token nor can forge the config:
@@ -249,6 +259,22 @@ missing signature, a bad signature, or a stale `ts` all refuse the entire save.
   tamper with** channel config (tokens *or* admin list) — a change the account didn't
   sign is rejected.
 
+**Every mutating control frame is signed, not just `channels_save` (H2).** The same
+account-signature scheme covers **all** app→terminal mutations sent over the untrusted
+relay — `routines_save`/`delete`/`set_enabled`/`run`, `extensions_add`/`remove`,
+`skills_create`/`delete`/`set_enabled`, and `channels_remove`. Each is signed by the
+app (`client/services/accountSign.ts` `signControl`, domain `privateer-control-v1`,
+binding `termId` + `ts`) and verified terminal-side (`crypto/accountVerify.ts`
+`verifyControl` via `remote/controlAuth.ts`, fail-closed) before it takes effect. This
+matters because these frames have severe *local* side effects that bypass the agent's
+permission gate: a forged `routines_save`+`run` runs a headless **bypass-mode** session
+(→ RCE), a forged `extensions_add` installs an npm package (→ RCE), and a forged
+`skills_create` injects an auto-invoked system-prompt skill. Without signing, the
+untrusted server could forge any of them; with it, a server that turns malicious after
+link cannot. The replay watermark is **per-terminal** (`crypto/accountTrust.ts`
+`control-sig.json`), so the always-on daemon and interactive terminals don't
+cross-reject each other's independent `ts` streams.
+
 ### 6.5 Honest limits (what still trusts the server, and where)
 - **Link-moment TOFU (F1), both directions.** Both pins — the app's pin of the
   terminal key (§6.2) and the terminal's pin of the account signing key (§6.4) — are
@@ -256,9 +282,6 @@ missing signature, a bad signature, or a stale `ts` all refuse the entire save.
   malicious *at the single moment of linking* could substitute a key. A server that
   turns malicious *after* linking cannot (the pins reject a swap). Fingerprint
   verification is the future hardening that would close even the link-moment window.
-- **`channels_remove` is not signed.** A hostile relay could inject a channel *removal*
-  (a denial-of-service — the bot stops until re-added), though it cannot forge or alter
-  a channel. Signing removes is a small follow-up.
 - **Machine-local trust roots.** `config.json`, `terminal-key.json`, and
   `account-trust.json` are plaintext on the machine; an attacker with local filesystem
   access defeats these protections. Protect their permissions (all written `0600`).

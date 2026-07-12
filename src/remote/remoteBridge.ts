@@ -78,15 +78,18 @@ export interface RemoteBridgeConfig {
   onCommand?: (text: string) => void;
   // The app's extensions manager opened — the owner should push the installed list.
   onExtensionsList?: () => void;
-  // The app asked to install / remove a Pi extension by source spec.
-  onExtensionsAdd?: (source: string) => void;
-  onExtensionsRemove?: (source: string) => void;
+  // The app asked to install / remove a Pi extension by source spec. `sig`+`ts`
+  // authenticate the mutation with the account key (H2) — installing a package is code
+  // execution, so the owner verifies before acting (authorizeControl).
+  onExtensionsAdd?: (source: string, sig?: string, ts?: number) => void;
+  onExtensionsRemove?: (source: string, sig?: string, ts?: number) => void;
   // The app's skills manager opened — the owner should push the skills list.
   onSkillsList?: () => void;
-  // The app asked to create/overwrite, delete, or toggle a user skill.
-  onSkillCreate?: (skill: { name: string; description: string; instructions: string }) => void;
-  onSkillDelete?: (name: string) => void;
-  onSkillSetEnabled?: (name: string, enabled: boolean) => void;
+  // The app asked to create/overwrite, delete, or toggle a user skill. Signed (H2) —
+  // a skill is an auto-invoked system-prompt instruction, so mutations are verified.
+  onSkillCreate?: (skill: { name: string; description: string; instructions: string }, sig?: string, ts?: number) => void;
+  onSkillDelete?: (name: string, sig?: string, ts?: number) => void;
+  onSkillSetEnabled?: (name: string, enabled: boolean, sig?: string, ts?: number) => void;
   // A controller (re)attached — the owner should push a transcript snapshot.
   onControllerAttached?: () => void;
   onStatus?: (text: string) => void;
@@ -126,12 +129,12 @@ export class RemoteBridge {
     onTerminate: () => this.cfg.onTerminate?.(),
     onCommand: (text) => this.cfg.onCommand?.(text),
     onExtensionsList: () => this.cfg.onExtensionsList?.(),
-    onExtensionsAdd: (source) => this.cfg.onExtensionsAdd?.(source),
-    onExtensionsRemove: (source) => this.cfg.onExtensionsRemove?.(source),
+    onExtensionsAdd: (source, sig, ts) => this.cfg.onExtensionsAdd?.(source, sig, ts),
+    onExtensionsRemove: (source, sig, ts) => this.cfg.onExtensionsRemove?.(source, sig, ts),
     onSkillsList: () => this.cfg.onSkillsList?.(),
-    onSkillCreate: (skill) => this.cfg.onSkillCreate?.(skill),
-    onSkillDelete: (name) => this.cfg.onSkillDelete?.(name),
-    onSkillSetEnabled: (name, enabled) => this.cfg.onSkillSetEnabled?.(name, enabled),
+    onSkillCreate: (skill, sig, ts) => this.cfg.onSkillCreate?.(skill, sig, ts),
+    onSkillDelete: (name, sig, ts) => this.cfg.onSkillDelete?.(name, sig, ts),
+    onSkillSetEnabled: (name, enabled, sig, ts) => this.cfg.onSkillSetEnabled?.(name, enabled, sig, ts),
     // Routines are owned by the daemon, not an interactive session, so its own relay
     // (not this bridge) handles routines_*. These no-ops just satisfy Required — an
     // interactive terminal never surfaces the routines manager in the app.

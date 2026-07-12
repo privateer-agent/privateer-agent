@@ -1,4 +1,5 @@
-import { resolve, isAbsolute, relative } from "node:path";
+import { resolve, isAbsolute, relative, dirname, join, basename } from "node:path";
+import { realpathSync } from "node:fs";
 import { isProtectedPath } from "./protected.ts";
 import type { PermissionRequest } from "./gate.ts";
 
@@ -18,8 +19,31 @@ export interface ScopeOptions {
   allowedOutsideRoots?: string[];
 }
 
+// Resolve symlinks so an in-cwd symlink can't smuggle a path outside scope past the
+// lexical `resolve()` check (P5-1: `resolve` normalizes `..` but does NOT follow
+// symlinks, so `cwd/link/secret` where `link -> /etc` looks in-cwd lexically). We
+// realpath the DEEPEST EXISTING ancestor — a write target's leaf may not exist yet —
+// and re-append the missing tail; the escape lives in the existing prefix, so
+// canonicalizing that is what matters. Falls back to the lexical path when nothing
+// resolves (e.g. a fully-nonexistent tree, as in unit tests).
+function realBase(abs: string): string {
+  let dir = abs;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync(dir);
+      return tail.length ? join(real, ...tail) : real;
+    } catch {
+      const parent = dirname(dir);
+      if (parent === dir) return abs; // reached the FS root without resolving → lexical
+      tail.unshift(basename(dir));
+      dir = parent;
+    }
+  }
+}
+
 function resolveInCwd(cwd: string, p: string): string {
-  return isAbsolute(p) ? p : resolve(cwd, p);
+  return realBase(isAbsolute(p) ? p : resolve(cwd, p));
 }
 
 function isInsideDir(root: string, abs: string): boolean {
@@ -29,11 +53,14 @@ function isInsideDir(root: string, abs: string): boolean {
 }
 
 // Outside the agent's working-directory scope? Only when confinement is on and the
-// path is neither inside cwd nor inside a session-approved outside root.
+// path is neither inside cwd nor inside a session-approved outside root. Both sides are
+// symlink-canonicalized (realBase) so a symlinked cwd — or a symlink inside cwd — can't
+// fake containment (P5-1).
 export function isOutsideScope(scope: ScopeOptions, abs: string): boolean {
   if (scope.confineToCwd === false) return false;
-  if (isInsideDir(scope.cwd, abs)) return false;
-  return !(scope.allowedOutsideRoots ?? []).some((root) => isInsideDir(root, abs));
+  const target = realBase(abs);
+  if (isInsideDir(realBase(scope.cwd), target)) return false;
+  return !(scope.allowedOutsideRoots ?? []).some((root) => isInsideDir(realBase(root), target));
 }
 
 function str(v: unknown): string {
@@ -42,6 +69,21 @@ function str(v: unknown): string {
 
 function firstPath(input: Record<string, unknown>): string {
   return str(input.path ?? input.file_path ?? input.file ?? input.filename ?? input.dir ?? input.directory);
+}
+
+// A write/edit tool call whose target path we can't statically extract — an aliased
+// param name, or a patch tool whose target paths live in the DIFF BODY rather than a
+// param (P5-4). Fail safe: mark it outside-scope so it prompts (in default/acceptEdits)
+// instead of defaulting to a silent in-cwd auto-write. Precise patch-body path parsing
+// needs Pi's apply_patch schema — TODO(verify) against the full builtin tool catalog.
+function unknownTarget(toolName: string, kind: "write" | "edit"): PermissionRequest {
+  return {
+    tool: toolName,
+    kind,
+    title: kind === "write" ? "Write to an unverified path" : "Edit an unverified path",
+    detail: "(target path not statically known — approve to allow)",
+    outside: true,
+  };
 }
 
 // Known-safe read-only / meta builtins that never mutate and never leave the
@@ -96,6 +138,7 @@ export function classifyToolCall(
   // Write — create/overwrite a file.
   if (WRITE_TOOLS.has(name)) {
     const p = firstPath(obj);
+    if (!p) return unknownTarget(toolName, "write"); // P5-4: no extractable path → fail safe
     const abs = resolveInCwd(scope.cwd, p);
     const outside = isOutsideScope(scope, abs);
     return {
@@ -112,6 +155,7 @@ export function classifyToolCall(
   // Edit — modify an existing file.
   if (EDIT_TOOLS.has(name)) {
     const p = firstPath(obj);
+    if (!p) return unknownTarget(toolName, "edit"); // P5-4: no extractable path → fail safe
     const abs = resolveInCwd(scope.cwd, p);
     const outside = isOutsideScope(scope, abs);
     return {

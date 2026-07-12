@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { classifyToolCall, isOutsideScope } from "../src/permissions/classify.ts";
 
 // The NEW glue for the Pi rewrite: map a Pi tool_call { toolName, input } to a
@@ -87,4 +90,43 @@ test("create_routine → write-kind, trigger detail, email/webhook forces always
 test("confineToCwd:false disables outside gating", () => {
   const s = { cwd: CWD, confineToCwd: false };
   assert.equal(isOutsideScope(s, "/anywhere/a.ts"), false);
+});
+
+test("P5-1: a symlink inside cwd pointing outside is flagged outside (no lexical escape)", () => {
+  const base = mkdtempSync(join(tmpdir(), "priv-classify-"));
+  try {
+    const cwd = join(base, "proj");
+    const secrets = join(base, "secrets");
+    mkdirSync(cwd);
+    mkdirSync(secrets);
+    writeFileSync(join(secrets, "id_rsa"), "KEY");
+    symlinkSync(secrets, join(cwd, "link")); // cwd/link -> ../secrets (outside cwd)
+    const scope = { cwd };
+    // Lexically cwd/link/id_rsa looks inside cwd; symlink-canonicalization must see it's
+    // really under ../secrets and flag it outside.
+    assert.equal(isOutsideScope(scope, join(cwd, "link", "id_rsa")), true);
+    // A genuine in-cwd file still resolves inside.
+    writeFileSync(join(cwd, "a.ts"), "x");
+    assert.equal(isOutsideScope(scope, join(cwd, "a.ts")), false);
+    // A read through the symlink is now gated (outside), not treated as free in-cwd.
+    const r = classifyToolCall("read", { path: join(cwd, "link", "id_rsa") }, scope);
+    assert.equal(r?.kind, "read");
+    assert.equal(r?.outside, true);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("P5-4: write/edit with no extractable target path → fail-safe outside (prompts)", () => {
+  // Aliased param the classifier doesn't recognize as a path → can't prove in-cwd.
+  const w = classifyToolCall("write", { target: "/etc/passwd", content: "x" }, scope);
+  assert.equal(w?.kind, "write");
+  assert.equal(w?.outside, true);
+  // A patch tool whose target paths live in the diff body, not a param.
+  const e = classifyToolCall("apply_patch", { patch: "*** Update File: /etc/hosts\n+evil" }, scope);
+  assert.equal(e?.kind, "edit");
+  assert.equal(e?.outside, true);
+  // Sanity: a normal write with a real path param is unaffected (stays in-cwd).
+  const ok = classifyToolCall("write", { path: "src/a.ts", content: "x" }, scope);
+  assert.equal(ok?.outside, false);
 });

@@ -34,6 +34,16 @@ function terminalLabel(): string {
 // bounds size, this bounds obvious secret leakage (bearer tokens, API keys, env
 // secrets, PEM private keys). The "output may contain secrets" warning still
 // stands; a determined leak (unusual formats) can slip through.
+// Pull the account signature / freshness ts off a control frame, if well-formed.
+// Undefined when absent or the wrong type → the terminal's authorizeControl fails
+// closed (an unsigned mutation is refused).
+function sig(frame: { sig?: unknown }): string | undefined {
+  return typeof frame.sig === "string" ? frame.sig : undefined;
+}
+function tsOf(frame: { ts?: unknown }): number | undefined {
+  return typeof frame.ts === "number" ? frame.ts : undefined;
+}
+
 function redactSecrets(s: string): string {
   if (!s) return s;
   return s
@@ -81,30 +91,34 @@ export interface RelayCallbacks {
   // (a sendExtensions frame). Optional so pre-extensions callbacks keep compiling.
   onExtensionsList?: () => void;
   // The app asked to install a Pi extension by source spec (npm:/git:/path).
-  onExtensionsAdd?: (source: string) => void;
+  // `sig`+`ts` authenticate the mutation with the account key (H2, verified via
+  // controlAuth) — a forged extensions_add would install attacker code, so it's signed.
+  onExtensionsAdd?: (source: string, sig?: string, ts?: number) => void;
   // The app asked to remove a previously-installed extension by source spec.
-  onExtensionsRemove?: (source: string) => void;
+  onExtensionsRemove?: (source: string, sig?: string, ts?: number) => void;
   // The app opened the skills manager — reply with the current skills list
   // (a sendSkills frame). Optional so pre-skills callbacks keep compiling.
   onSkillsList?: () => void;
-  // The app asked to create/overwrite a user skill (name + description + body).
-  onSkillCreate?: (skill: { name: string; description: string; instructions: string }) => void;
+  // The app asked to create/overwrite a user skill (name + description + body). Signed
+  // (H2) — a forged skill would inject an auto-invoked system-prompt instruction.
+  onSkillCreate?: (skill: { name: string; description: string; instructions: string }, sig?: string, ts?: number) => void;
   // The app asked to delete a user skill by name.
-  onSkillDelete?: (name: string) => void;
+  onSkillDelete?: (name: string, sig?: string, ts?: number) => void;
   // The app toggled a user skill's model-invocation availability.
-  onSkillSetEnabled?: (name: string, enabled: boolean) => void;
+  onSkillSetEnabled?: (name: string, enabled: boolean, sig?: string, ts?: number) => void;
   // The app opened the routines manager — reply with the current routines list
   // (a sendRoutines frame). Owned by the daemon, so these only fire on its relay.
   onRoutinesList?: () => void;
   // The app asked to create (no id) or edit (id) a routine. The raw draft object is
-  // handed through untyped; the daemon's routinesControl validates it.
-  onRoutinesSave?: (draft: Record<string, unknown>) => void;
+  // handed through untyped; the daemon's routinesControl validates it. Signed (H2) —
+  // a forged routine runs a headless bypass-mode session (RCE), so it MUST be verified.
+  onRoutinesSave?: (draft: Record<string, unknown>, sig?: string, ts?: number) => void;
   // The app asked to delete a routine by id or name.
-  onRoutinesDelete?: (idOrName: string) => void;
+  onRoutinesDelete?: (idOrName: string, sig?: string, ts?: number) => void;
   // The app paused/resumed a routine by id or name.
-  onRoutinesSetEnabled?: (idOrName: string, enabled: boolean) => void;
+  onRoutinesSetEnabled?: (idOrName: string, enabled: boolean, sig?: string, ts?: number) => void;
   // The app asked to run a routine now, by id or name.
-  onRoutinesRun?: (idOrName: string) => void;
+  onRoutinesRun?: (idOrName: string, sig?: string, ts?: number) => void;
   // The app opened the channels manager — reply with the current channel config
   // (a sendChannels frame). Owned by the daemon, so these only fire on its relay.
   onChannelsList?: () => void;
@@ -115,8 +129,9 @@ export interface RelayCallbacks {
   // pinned at link (accountVerify) — the owner rejects an unsigned/forged/stale save,
   // so a hostile relay can neither forge a token nor inject an admin.
   onChannelsSave?: (draft: Record<string, unknown>, sealedSecrets?: string, sig?: string, ts?: number) => void;
-  // The app asked to delete a platform's channel config, by platform name.
-  onChannelsRemove?: (platform: string) => void;
+  // The app asked to delete a platform's channel config, by platform name. Signed
+  // (H2) — a forged removal is a DoS (the bot stops until re-added).
+  onChannelsRemove?: (platform: string, sig?: string, ts?: number) => void;
   // A file finished transferring from the app (reassembled from chunks). Held to
   // ride along with the next remote prompt.
   onAttachment: (file: { name: string; mediaType: string; base64: string }) => void;
@@ -208,6 +223,13 @@ export class RelayClient {
   ) {
     this.termId = opts?.termId ?? randomUUID();
     this.label = opts?.label ?? terminalLabel();
+  }
+
+  // This terminal's relay id — the value the app signs into a control envelope's
+  // `termId` and the terminal verifies against (authorizeControl). Exposed so the
+  // interactive handlers (extensions_*/skills_*) can bind their own id.
+  get id(): string {
+    return this.termId;
   }
 
   async start(): Promise<void> {
@@ -359,43 +381,47 @@ export class RelayClient {
         this.cb.onExtensionsList?.();
         break;
       case "extensions_add":
-        if (typeof frame.source === "string") this.cb.onExtensionsAdd?.(frame.source);
+        if (typeof frame.source === "string") this.cb.onExtensionsAdd?.(frame.source, sig(frame), tsOf(frame));
         break;
       case "extensions_remove":
-        if (typeof frame.source === "string") this.cb.onExtensionsRemove?.(frame.source);
+        if (typeof frame.source === "string") this.cb.onExtensionsRemove?.(frame.source, sig(frame), tsOf(frame));
         break;
       case "skills_list":
         this.cb.onSkillsList?.();
         break;
       case "skills_create":
         if (typeof frame.name === "string") {
-          this.cb.onSkillCreate?.({
-            name: frame.name,
-            description: typeof frame.description === "string" ? frame.description : "",
-            instructions: typeof frame.instructions === "string" ? frame.instructions : "",
-          });
+          this.cb.onSkillCreate?.(
+            {
+              name: frame.name,
+              description: typeof frame.description === "string" ? frame.description : "",
+              instructions: typeof frame.instructions === "string" ? frame.instructions : "",
+            },
+            sig(frame),
+            tsOf(frame),
+          );
         }
         break;
       case "skills_delete":
-        if (typeof frame.name === "string") this.cb.onSkillDelete?.(frame.name);
+        if (typeof frame.name === "string") this.cb.onSkillDelete?.(frame.name, sig(frame), tsOf(frame));
         break;
       case "skills_set_enabled":
-        if (typeof frame.name === "string") this.cb.onSkillSetEnabled?.(frame.name, frame.enabled === true);
+        if (typeof frame.name === "string") this.cb.onSkillSetEnabled?.(frame.name, frame.enabled === true, sig(frame), tsOf(frame));
         break;
       case "routines_list":
         this.cb.onRoutinesList?.();
         break;
       case "routines_save":
-        if (frame.routine && typeof frame.routine === "object") this.cb.onRoutinesSave?.(frame.routine);
+        if (frame.routine && typeof frame.routine === "object") this.cb.onRoutinesSave?.(frame.routine, sig(frame), tsOf(frame));
         break;
       case "routines_delete":
-        if (typeof frame.idOrName === "string") this.cb.onRoutinesDelete?.(frame.idOrName);
+        if (typeof frame.idOrName === "string") this.cb.onRoutinesDelete?.(frame.idOrName, sig(frame), tsOf(frame));
         break;
       case "routines_set_enabled":
-        if (typeof frame.idOrName === "string") this.cb.onRoutinesSetEnabled?.(frame.idOrName, frame.enabled === true);
+        if (typeof frame.idOrName === "string") this.cb.onRoutinesSetEnabled?.(frame.idOrName, frame.enabled === true, sig(frame), tsOf(frame));
         break;
       case "routines_run":
-        if (typeof frame.idOrName === "string") this.cb.onRoutinesRun?.(frame.idOrName);
+        if (typeof frame.idOrName === "string") this.cb.onRoutinesRun?.(frame.idOrName, sig(frame), tsOf(frame));
         break;
       case "channels_list":
         this.cb.onChannelsList?.();
@@ -405,13 +431,13 @@ export class RelayClient {
           this.cb.onChannelsSave?.(
             frame.draft,
             typeof frame.sealedSecrets === "string" ? frame.sealedSecrets : undefined,
-            typeof frame.sig === "string" ? frame.sig : undefined,
-            typeof frame.ts === "number" ? frame.ts : undefined,
+            sig(frame),
+            tsOf(frame),
           );
         }
         break;
       case "channels_remove":
-        if (typeof frame.platform === "string") this.cb.onChannelsRemove?.(frame.platform);
+        if (typeof frame.platform === "string") this.cb.onChannelsRemove?.(frame.platform, sig(frame), tsOf(frame));
         break;
       case "attach_begin":
         this.beginAttachment(frame);

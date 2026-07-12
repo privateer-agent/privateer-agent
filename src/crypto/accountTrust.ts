@@ -53,33 +53,60 @@ export function loadAccountSignKey(): string | undefined {
 }
 
 /** Drop the pin — called when local credentials are cleared (logout / session revoke),
- *  since it belongs to the signed-in account. */
+ *  since it belongs to the signed-in account.
+ *
+ *  We deliberately do NOT clear the anti-replay watermark (control-sig.json) here.
+ *  Resetting it to 0 on logout would let a hostile relay replay a previously-captured,
+ *  validly-signed channel-save after a re-link (its ts > 0 ≥ 0), rolling config back to
+ *  an earlier account-authored state — e.g. re-adding a removed admin (M1). The
+ *  watermark is safe to persist across a re-link: it's monotonic wall-clock ms, and a
+ *  DIFFERENT account that links later gets a different signing key, so its saves are
+ *  gated by signature (not by ts) and its own ts values only ever move forward. */
 export function clearAccountSignKey(): void {
   try { rmSync(trustPath(), { force: true }); } catch { /* nothing to remove */ }
-  try { rmSync(tsPath(), { force: true }); } catch { /* nothing to remove */ }
 }
 
-// ── Anti-replay watermark for signed channel-saves ──────────────────────────────
-// The highest `ts` we've applied. A save with a ts BELOW this is a replay/rollback of
-// an older signed envelope and is refused; at-or-above is accepted (an idempotent
-// replay of the latest is harmless, and this tolerates two saves in the same ms).
-// Persisted so the watermark survives a daemon restart.
+// ── Anti-replay watermark for signed control frames (per terminal) ───────────────
+// The highest `ts` we've applied, keyed by termId. A signed control frame (channel
+// save, routine save/run, extension add, skill create, …) whose ts is BELOW the
+// watermark for its terminal is a replay/rollback of an older signed envelope and is
+// refused; at-or-above is accepted (an idempotent replay of the latest is harmless).
+//
+// Keyed by termId — NOT global — so the always-on daemon (stable routines-… id) and
+// each interactive terminal (its own id) don't cross-reject each other's frames when
+// the app drives them near-simultaneously with independent ts streams. Each signed
+// frame binds its termId (see accountVerify.controlMessage), so a per-terminal
+// watermark is the matching granularity. Persisted so it survives a daemon restart;
+// deliberately NOT cleared on logout (see clearAccountSignKey — M1).
 function tsPath(): string {
-  return join(globalDir(), "channels-sig.json");
+  return join(globalDir(), "control-sig.json");
 }
 
-export function loadLastChannelTs(): number {
+interface ControlSigFile {
+  v: 1;
+  byTerm: Record<string, number>;
+}
+
+function loadControlSig(): ControlSigFile {
   try {
-    const parsed = JSON.parse(readFileSync(tsPath(), "utf8")) as { lastTs?: number };
-    return typeof parsed?.lastTs === "number" ? parsed.lastTs : 0;
+    const parsed = JSON.parse(readFileSync(tsPath(), "utf8")) as ControlSigFile;
+    if (parsed?.v === 1 && parsed.byTerm && typeof parsed.byTerm === "object") return parsed;
   } catch {
-    return 0;
+    /* missing/malformed → fresh */
   }
+  return { v: 1, byTerm: {} };
 }
 
-export function saveLastChannelTs(ts: number): void {
+export function loadLastControlTs(termId: string): number {
+  const ts = loadControlSig().byTerm[termId];
+  return typeof ts === "number" ? ts : 0;
+}
+
+export function saveLastControlTs(termId: string, ts: number): void {
   try {
-    writeFileSync(tsPath(), JSON.stringify({ lastTs: ts }), { mode: 0o600 });
+    const file = loadControlSig();
+    file.byTerm[termId] = Math.max(file.byTerm[termId] ?? 0, ts);
+    writeFileSync(tsPath(), JSON.stringify(file), { mode: 0o600 });
   } catch {
     /* best effort */
   }

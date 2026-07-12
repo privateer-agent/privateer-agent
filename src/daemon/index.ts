@@ -19,8 +19,9 @@ import { makeChannelsControl } from "../remote/channelsControl.ts";
 import { readRunningPlatforms } from "../channels/status.ts";
 import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
 import { openJsonFromApp } from "../crypto/terminalUnseal.ts";
-import { verifyChannelSave } from "../crypto/accountVerify.ts";
-import { loadAccountSignKey, loadLastChannelTs, saveLastChannelTs } from "../crypto/accountTrust.ts";
+import { verifyChannelSave, verifyOutboxKey } from "../crypto/accountVerify.ts";
+import { loadAccountSignKey, loadLastControlTs, saveLastControlTs } from "../crypto/accountTrust.ts";
+import { authorizeControl } from "../remote/controlAuth.ts";
 import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, spawnAccountCredentials } from "../auth/privateer.ts";
 import {
   loadRoutines,
@@ -167,20 +168,22 @@ export class Daemon {
         onApprovalResponse: () => {},
         onControllerAttached: () => this.onControllerAttached(),
         onAttachment: () => {},
-        // Routine management from the app. Each mutation goes through the shared
-        // routinesControl (validate → persist → schedule) then re-pushes the list
-        // with a one-line result so the screen reconciles.
+        // Routine management from the app. Each MUTATION is account-signed (H2) — a
+        // forged routine would run a headless bypass-mode session (RCE) — so it's
+        // verified (authorizeControl, fail-closed) before routinesControl validates +
+        // persists + re-pushes the list with a one-line result. `list` is read-only.
         onRoutinesList: () => this.pushRoutines(),
-        onRoutinesSave: (draft) => this.pushRoutines(this.routines.save(draft).message),
-        onRoutinesDelete: (idOrName) => this.pushRoutines(this.routines.remove(idOrName).message),
-        onRoutinesSetEnabled: (idOrName, enabled) => this.pushRoutines(this.routines.setEnabled(idOrName, enabled).message),
-        onRoutinesRun: (idOrName) => this.pushRoutines(this.routines.run(idOrName).message),
-        // Channel management from the app. Each mutation goes through channelsControl
-        // (validate → write config.json) then re-pushes the list with a one-line
-        // result so the screen reconciles.
+        onRoutinesSave: (draft, sig, ts) => this.pushRoutines(this.guardControl("routines_save", { routine: draft }, sig, ts, () => this.routines.save(draft).message)),
+        onRoutinesDelete: (idOrName, sig, ts) => this.pushRoutines(this.guardControl("routines_delete", { idOrName }, sig, ts, () => this.routines.remove(idOrName).message)),
+        onRoutinesSetEnabled: (idOrName, enabled, sig, ts) => this.pushRoutines(this.guardControl("routines_set_enabled", { idOrName, enabled }, sig, ts, () => this.routines.setEnabled(idOrName, enabled).message)),
+        onRoutinesRun: (idOrName, sig, ts) => this.pushRoutines(this.guardControl("routines_run", { idOrName }, sig, ts, () => this.routines.run(idOrName).message)),
+        // Channel management from the app. `save` has its own signed verify (it also
+        // carries sealed secrets — applyChannelSave); `remove` is account-signed here
+        // (H2 — a forged removal is a DoS). Then channelsControl writes config.json and
+        // re-pushes the list.
         onChannelsList: () => this.pushChannels(),
         onChannelsSave: (draft, sealedSecrets, sig, ts) => this.pushChannels(this.applyChannelSave(draft, sealedSecrets, sig, ts)),
-        onChannelsRemove: (platform) => this.pushChannels(this.channels.remove(platform as any).message),
+        onChannelsRemove: (platform, sig, ts) => this.pushChannels(this.guardControl("channels_remove", { platform }, sig, ts, () => this.channels.remove(platform as any).message)),
         onTerminate: () => {
           this.relayTerminated = true;
           this.controllerAttached = false;
@@ -228,9 +231,9 @@ export class Daemon {
     if (!verifyChannelSave(accountPub, { termId: routineRelayId(), ts, draft, sealedSecrets }, sig)) {
       return "Couldn't verify this change came from your account.";
     }
-    const lastTs = loadLastChannelTs();
+    const lastTs = loadLastControlTs(routineRelayId());
     if (ts < lastTs) return "Ignored an out-of-date channel change.";
-    saveLastChannelTs(Math.max(lastTs, ts));
+    saveLastControlTs(routineRelayId(), ts);
 
     let withSecrets = draft;
     if (sealedSecrets) {
@@ -246,6 +249,22 @@ export class Daemon {
       withSecrets = { ...draft, secrets: opened.secrets ?? {} };
     }
     return this.channels.save(withSecrets as any).message;
+  }
+
+  // Verify an account-signed mutating control frame (H2) against this daemon's termId,
+  // then run the mutation. Fail-closed: an unsigned/forged/stale frame returns the
+  // refusal message and the mutation NEVER runs. `routines_*` and `channels_remove`
+  // route through here; `channels_save` has its own verify (sealed secrets) above.
+  private guardControl(
+    action: string,
+    args: Record<string, unknown>,
+    sig: string | undefined,
+    ts: number | undefined,
+    run: () => string | undefined,
+  ): string | undefined {
+    const auth = authorizeControl(routineRelayId(), action, args, sig, ts);
+    if (!auth.ok) return auth.message;
+    return run();
   }
 
   private onControllerAttached(): void {
@@ -275,8 +294,16 @@ export class Daemon {
     try {
       const res = await apiRequest("/api/outbox/pubkey");
       if (!res.ok) return undefined;
-      const data = (await res.json()) as { outboxPublicKey?: string | null };
-      if (!data.outboxPublicKey) return undefined;
+      const data = (await res.json()) as { outboxPublicKey?: string | null; outboxPublicKeySig?: string | null };
+      if (!data.outboxPublicKey || !data.outboxPublicKeySig) return undefined;
+      // The key comes from the UNTRUSTED server. Verify the account's signature over it
+      // against the account signing key we pinned at link — otherwise a malicious server
+      // could substitute a key it controls and read every result we seal. Fail closed
+      // (no pin, missing sig, or bad sig ⇒ don't seal): the `cloud` channel then falls
+      // back to a local notice, so the result is deferred/kept, never leaked.
+      const accountPub = loadAccountSignKey();
+      if (!accountPub) return undefined;
+      if (!verifyOutboxKey(accountPub, data.outboxPublicKey, data.outboxPublicKeySig)) return undefined;
       this.outboxPub = decodeAccountPublicKey(data.outboxPublicKey);
       return this.outboxPub;
     } catch {

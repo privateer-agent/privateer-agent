@@ -27,6 +27,7 @@ async function main() {
   const { RelayClient } = await import("../remote/relayClient.ts");
   const { makeExtensionsControl } = await import("../remote/extensionsControl.ts");
   const { makeSkillsControl } = await import("../remote/skillsControl.ts");
+  const { authorizeControl } = await import("../remote/controlAuth.ts");
   const priv = await import("../auth/privateer.ts");
   const { makeAccountProvider, accountPosture } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
@@ -43,16 +44,49 @@ async function main() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let closed = false;
   rl.on("close", () => (closed = true));
+  // Local terminal output is coalesced and prompt-aware. Two stutter sources it kills:
+  //  1. Streaming a turn emits one delta per token; thousands of tiny stdout writes
+  //     visibly stutter a TTY when a turn makes a lot of changes. We batch each burst
+  //     into ~one write per frame (16 ms) instead.
+  //  2. A mid-turn prompt (approval / input) awaits the user via rl.question. Output
+  //     that streams in while it's pending prints INTO the question line, and readline
+  //     redraws that line on every keystroke — the "action required" flicker. While a
+  //     mid-turn prompt is pending we HOLD streamed output and flush it once they
+  //     answer, so the question line stays clean.
+  // Only the local path is batched; the relay path (bridge.forwardEvent) already does
+  // its own coalescing (TEXT_FLUSH_MS) and is untouched.
+  let outBuf = "";
+  let outTimer: ReturnType<typeof setTimeout> | undefined;
+  let holdDepth = 0; // >0 while a mid-turn prompt is awaiting the user
+  const flushOut = (): void => {
+    if (outTimer) { clearTimeout(outTimer); outTimer = undefined; }
+    if (outBuf) { process.stdout.write(outBuf); outBuf = ""; }
+  };
+  const out = (s: string): void => {
+    outBuf += s;
+    if (holdDepth > 0) return; // held until the prompt resolves
+    if (!outTimer) outTimer = setTimeout(flushOut, 16);
+  };
+
   // Resolve to /quit if the input stream ends (EOF / Ctrl-D / piped input), incl.
   // if it closes while a question is pending, so we never throw USE_AFTER_CLOSE.
   const ask = (q: string): Promise<string> =>
     new Promise((res) => {
       if (closed) return res("/quit");
-      const onClose = () => res("/quit");
+      flushOut(); // land buffered output ABOVE the prompt line
+      // Hold streamed output only for a MID-TURN prompt. The idle top-level `›` must
+      // still show a remote-driven turn streaming live, so don't hold when idle.
+      const hold = turnActive;
+      if (hold) holdDepth++;
+      const settle = (v: string): void => {
+        if (hold && holdDepth > 0 && --holdDepth === 0) flushOut();
+        res(v);
+      };
+      const onClose = () => settle("/quit");
       rl.once("close", onClose);
       rl.question(q, (a) => {
         rl.off("close", onClose);
-        res(a);
+        settle(a);
       });
     });
 
@@ -95,23 +129,52 @@ async function main() {
     // add/remove one. add/remove persist immediately but only load on the next
     // terminal launch — so the final frame flags needsRestart. See runExtMutation.
     onExtensionsList: () => relay?.sendExtensions({ installed: extensions?.listInstalled() ?? [] }),
-    onExtensionsAdd: (source) => void runExtMutation("add", source),
-    onExtensionsRemove: (source) => void runExtMutation("remove", source),
+    onExtensionsAdd: (source, sig, ts) => void runExtMutation("add", source, sig, ts),
+    onExtensionsRemove: (source, sig, ts) => void runExtMutation("remove", source, sig, ts),
     // The app's skills manager: list the terminal's skills, or create/delete/toggle
     // a user one. A create/delete/toggle only reaches the model's <available_skills>
     // on the next launch (needsRestart); Run-now goes through the command frame as
     // /skill:name, which Pi expands immediately. See runSkillMutation.
     onSkillsList: () => relay?.sendSkills({ items: skills?.listSkills() ?? [] }),
-    onSkillCreate: (skill) => void runSkillMutation(() => skills!.createSkill(skill), "Saved"),
-    onSkillDelete: (name) => void runSkillMutation(() => skills!.deleteSkill(name), "Deleted"),
-    onSkillSetEnabled: (name, enabled) => void runSkillMutation(() => skills!.setEnabled(name, enabled), enabled ? "Enabled" : "Disabled"),
+    onSkillCreate: (skill, sig, ts) =>
+      void runSkillMutation("skills_create", { name: skill.name, description: skill.description, instructions: skill.instructions }, () => skills!.createSkill(skill), "Saved", sig, ts),
+    onSkillDelete: (name, sig, ts) => void runSkillMutation("skills_delete", { name }, () => skills!.deleteSkill(name), "Deleted", sig, ts),
+    onSkillSetEnabled: (name, enabled, sig, ts) =>
+      void runSkillMutation("skills_set_enabled", { name, enabled }, () => skills!.setEnabled(name, enabled), enabled ? "Enabled" : "Disabled", sig, ts),
   });
+
+  // Verify an account-signed mutating control frame (H2) for this interactive terminal
+  // before it acts — a forged extensions_add installs code, a forged skills_create
+  // injects an auto-invoked skill. Binds this terminal's own relay id. Fail-closed: a
+  // missing relay or an unsigned/forged/stale frame refuses the mutation.
+  function guardInteractive(
+    action: string,
+    args: Record<string, unknown>,
+    sig?: string,
+    ts?: number,
+  ): { ok: boolean; message?: string } {
+    const termId = relay?.id as string | undefined;
+    if (!termId) return { ok: false, message: "Remote access isn't active on this terminal." };
+    return authorizeControl(termId, action, args, sig, ts);
+  }
 
   // Run a skills create/delete/toggle for the app and relay the fresh list + result.
   // The final frame flags needsRestart on success so the app tells the user the
   // change reaches the model on relaunch (Run-now works without a restart).
-  async function runSkillMutation(op: () => Promise<{ ok: boolean; message?: string }>, verb: string): Promise<void> {
+  async function runSkillMutation(
+    action: string,
+    args: Record<string, unknown>,
+    op: () => Promise<{ ok: boolean; message?: string }>,
+    verb: string,
+    sig?: string,
+    ts?: number,
+  ): Promise<void> {
     if (!skills) return;
+    const auth = guardInteractive(action, args, sig, ts);
+    if (!auth.ok) {
+      relay?.sendSkills({ items: skills.listSkills(), message: auth.message });
+      return;
+    }
     const res = await op();
     relay?.sendSkills({
       items: skills.listSkills(),
@@ -123,8 +186,13 @@ async function main() {
   // Run an extensions add/remove for the app and relay progress → result. Progress
   // events (npm install / git clone steps) push busy frames; the final frame carries
   // the fresh list plus needsRestart so the app tells the user to relaunch to activate.
-  async function runExtMutation(kind: "add" | "remove", source: string): Promise<void> {
+  async function runExtMutation(kind: "add" | "remove", source: string, sig?: string, ts?: number): Promise<void> {
     if (!extensions) return;
+    const auth = guardInteractive(kind === "add" ? "extensions_add" : "extensions_remove", { source }, sig, ts);
+    if (!auth.ok) {
+      relay?.sendExtensions({ installed: extensions.listInstalled(), message: auth.message });
+      return;
+    }
     extensions.setProgress((ev) =>
       relay?.sendExtensions({
         installed: extensions!.listInstalled(),
@@ -270,6 +338,7 @@ async function main() {
         );
         return choice ?? undefined;
       }
+      flushOut(); // drain buffered stream output before the option list prints
       console.log(`\n${YELLOW}${title}${RESET}`);
       options.forEach((o, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${o}`));
       const n = Number((await ask(`Choose [1-${options.length}]: `)).trim());
@@ -312,13 +381,13 @@ async function main() {
   session.subscribe((ev: any) => {
     for (const ee of adapter.toEngineEvents(ev)) {
       bridge.forwardEvent(ee);
-      if (ee.type === "text") process.stdout.write(ee.text);
-      else if (ee.type === "reasoning") process.stdout.write(`${DIM}${ee.text}${RESET}`);
-      else if (ee.type === "tool-call") process.stdout.write(`\n${CYAN}⏺ ${ee.name}${RESET} ${DIM}${JSON.stringify(ee.input).slice(0, 120)}${RESET}\n`);
-      else if (ee.type === "tool-result") process.stdout.write(`${DIM}  ↳ ${String(ee.output).slice(0, 200)}${RESET}\n`);
-      else if (ee.type === "tool-error") process.stdout.write(`\n${RED}✗ ${ee.name}: ${ee.error}${RESET}\n`);
-      else if (ee.type === "error") process.stdout.write(`\n${RED}error: ${ee.error}${RESET}\n`);
-      else if (ee.type === "finish") process.stdout.write("\n");
+      if (ee.type === "text") out(ee.text);
+      else if (ee.type === "reasoning") out(`${DIM}${ee.text}${RESET}`);
+      else if (ee.type === "tool-call") out(`\n${CYAN}⏺ ${ee.name}${RESET} ${DIM}${JSON.stringify(ee.input).slice(0, 120)}${RESET}\n`);
+      else if (ee.type === "tool-result") out(`${DIM}  ↳ ${String(ee.output).slice(0, 200)}${RESET}\n`);
+      else if (ee.type === "tool-error") out(`\n${RED}✗ ${ee.name}: ${ee.error}${RESET}\n`);
+      else if (ee.type === "error") out(`\n${RED}error: ${ee.error}${RESET}\n`);
+      else if (ee.type === "finish") { out("\n"); flushOut(); }
     }
   });
 
