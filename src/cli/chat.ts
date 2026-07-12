@@ -66,9 +66,10 @@ async function main() {
   const bridge = new RemoteBridge({
     onPrompt: (text) => void runTurn(text, true),
     onInterrupt: () => void session?.abort?.(),
-    // A slash command typed in the app composer (e.g. /model) — run it through the
-    // same dispatcher the local REPL uses, tagged remote so it never blocks on stdin.
-    onCommand: (text) => void runCommand(text, true),
+    // A slash command typed in the app composer (e.g. /model) — echo it (like the
+    // prompt echo) so the terminal shows it arrived, then run it through the same
+    // dispatcher the local REPL uses, tagged remote so it never blocks on stdin.
+    onCommand: (text) => { console.log(`\n${DIM}⟿ [app] ${text}${RESET}`); void runCommand(text, true); },
     // On (re)attach, resync the transcript AND push live context (model + version)
     // so the app's banner shows what this terminal is really running. The model
     // catalog isn't pushed here — /model relays it on demand as a selection prompt.
