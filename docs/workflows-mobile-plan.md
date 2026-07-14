@@ -226,6 +226,14 @@ Typechecks clean; not yet driven on a device. Still TODO from the redesign propo
 push-on-gate (interactive lock-screen Approve/Hold), Live Activity, and an empty-state
 starter-recipe on-ramp.
 
+**Push-on-gate (2026-07-14).** Client-side *local* notifications are wired
+(`treeview/client/services/notificationService.ts` + a `pendingSelect`/AppState effect in
+`RemoteDriveContext.tsx`; `expo-notifications ~0.32.17` added to package.json + app.json — needs
+`npm install` + a dev-client rebuild to activate). That covers a *backgrounded-but-alive* app.
+Waking a *fully-killed* app needs server-sent push — specced (design only, low priority) in
+[`push-on-gate-server.md`](./push-on-gate-server.md): content-free wake via a daemon `push_wake`
+frame → relay offline-check → Expo push, plus the `onAttachment` gate re-emit.
+
 ---
 
 ## 7. Open items / dependencies
