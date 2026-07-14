@@ -73,6 +73,9 @@ export interface RemoteBridgeConfig {
   onPrompt: (text: string, attachments: RemoteAttachment[]) => void;
   onInterrupt?: () => void;
   onTerminate?: () => void;
+  // The account signed this terminal out server-side (revoked from the app). The
+  // owner should tear down the login and stop the relay — see RelayCallbacks.onRevoked.
+  onRevoked?: () => void;
   // A slash command arrived from the app composer (e.g. "/model provider/id").
   // Route it to the same command dispatcher the local REPL uses.
   onCommand?: (text: string) => void;
@@ -127,6 +130,7 @@ export class RemoteBridge {
     },
     onInterrupt: () => this.cfg.onInterrupt?.(),
     onTerminate: () => this.cfg.onTerminate?.(),
+    onRevoked: () => this.cfg.onRevoked?.(),
     onCommand: (text) => this.cfg.onCommand?.(text),
     onExtensionsList: () => this.cfg.onExtensionsList?.(),
     onExtensionsAdd: (source, sig, ts) => this.cfg.onExtensionsAdd?.(source, sig, ts),
@@ -143,12 +147,25 @@ export class RemoteBridge {
     onRoutinesDelete: () => {},
     onRoutinesSetEnabled: () => {},
     onRoutinesRun: () => {},
+    // Ad-hoc task spawns are daemon-owned too (they run on / are stood up by the daemon,
+    // not an interactive session), so its own relay handles task_submit/task_spawn. These
+    // no-ops just satisfy Required — an interactive terminal never receives them.
+    onTaskSubmit: () => {},
+    onTaskSpawn: () => {},
     // Channels, like routines, are owned by the daemon (its channels/run.ts config),
     // not an interactive session — the daemon's own relay handles channels_*. These
     // no-ops just satisfy Required; an interactive terminal never surfaces channels.
     onChannelsList: () => {},
     onChannelsSave: () => {},
     onChannelsRemove: () => {},
+    // Workflows, like routines/channels, are daemon-owned — the daemon's own relay handles
+    // workflows_*. These no-ops just satisfy Required; an interactive terminal never
+    // surfaces workflows.
+    onWorkflowsList: () => {},
+    onWorkflowsGet: () => {},
+    onWorkflowsSave: () => {},
+    onWorkflowsRemove: () => {},
+    onWorkflowsRun: () => {},
     onApprovalResponse: (id, decision) => {
       const resolve = this.pending.get(id);
       if (resolve) resolve(decision);

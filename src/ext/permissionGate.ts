@@ -44,6 +44,14 @@ export interface GateController {
   confineToCwd?: boolean;
   getRemote?(): boolean;
   getNoQuarter?(): boolean;
+  // Block a tool outright while the turn is remote-driven (only consulted when
+  // getRemote() is true). For tools whose own prompts render on the host terminal
+  // rather than the relay — e.g. pi-subagents — so a driven turn can't wedge on an
+  // invisible local prompt. Returns true to block. See isRemoteUnsafeTool.
+  blockedWhenRemote?(toolName: string): boolean;
+  // Notified when blockedWhenRemote blocked a tool, so the controller can surface a
+  // one-line reason in the app feed (a `notice` frame) explaining why nothing ran.
+  onRemoteBlocked?(toolName: string): void;
   // Local interactive approval via the per-call ctx. Default provided below.
   localAsk(req: PermissionRequest, ctx: ToolCallCtx): Promise<AskOutcome>;
   // Remote (relay) approval. Optional until Phase 4; when absent, a remote turn
@@ -60,6 +68,23 @@ export interface GateBlock {
   reason: string;
 }
 
+// Tools that CANNOT be driven from the app and so are blocked outright on a
+// remote-driven turn (see chat.ts wiring). pi-subagents runs each subagent as a
+// child session/subprocess whose own permission gate + UI aren't wired to the
+// relay — its approvals and "TUI clarification" prompts surface on the HOST
+// terminal, never in the app. A driven turn that spawned one would wedge on a
+// prompt the phone can't answer. `contact_supervisor`/`intercom` are the child→
+// parent tools; they only exist in child sessions but are listed for safety.
+// Blocking is fail-closed and matches the "remote turns never auto-approve"
+// posture: the feature is simply disabled while driving until its prompts relay.
+export const REMOTE_UNSAFE_TOOLS: ReadonlySet<string> = new Set([
+  "subagent",
+  "contact_supervisor",
+  "intercom",
+]);
+
+export const isRemoteUnsafeTool = (toolName: string): boolean => REMOTE_UNSAFE_TOOLS.has(toolName);
+
 // THE decision path. Classify → policy → decision, fail-closed on any error.
 // Returns a block directive to deny, or undefined to let the tool run.
 export async function decideToolCall(
@@ -68,6 +93,19 @@ export async function decideToolCall(
   input: unknown,
   ctx: ToolCallCtx,
 ): Promise<GateBlock | undefined> {
+  // Remote-driven turn: a few tools can't be driven from the app because their own
+  // interactive prompts render on the host terminal, not the relay (pi-subagents
+  // spawns child sessions outside the bridge). Block them fail-closed BEFORE any
+  // classification so a driven turn never wedges on a prompt the phone can't answer,
+  // and tell the controller so it can post a notice to the app feed.
+  if (ctrl.getRemote?.() && ctrl.blockedWhenRemote?.(toolName)) {
+    ctrl.onRemoteBlocked?.(toolName);
+    return {
+      block: true,
+      reason: `${toolName} is unavailable while this terminal is driven remotely — its prompts can't reach the app. Complete the task without it, or ask the operator to run it from the terminal directly.`,
+    };
+  }
+
   const req = classifyToolCall(toolName, input, {
     cwd: ctrl.cwd,
     confineToCwd: ctrl.confineToCwd,

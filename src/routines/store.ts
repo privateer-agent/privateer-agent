@@ -209,10 +209,14 @@ export function drainPendingRelay(): PendingRelay[] {
 // disk until a later flush succeeds. Unlike PendingRelay this carries `status`, so
 // the sealed envelope the app opens can render ok/error without re-parsing markdown.
 export interface PendingCloud {
-  routine: string;
+  routine: string; // the routine name OR ad-hoc task title (see `kind`)
   at: string; // ISO timestamp
   status: "ok" | "error";
   content: string;
+  // What produced this — a scheduled routine (default, for back-compat with items
+  // written before ad-hoc tasks existed) or an app-submitted one-shot task. Preserved
+  // so the flush re-seals with the right `kind` and the app labels it correctly.
+  kind?: "routine" | "task";
 }
 
 function pendingCloudPath(): string {

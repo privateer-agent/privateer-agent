@@ -13,6 +13,12 @@
 import { makePermissionGate, defaultLocalAsk } from "../src/ext/permissionGate.ts";
 import { createEngineEventAdapter } from "../src/bridge/engineAdapter.ts";
 import { RemoteBridge } from "../src/remote/remoteBridge.ts";
+import {
+  isSubagentChild,
+  inheritedChannelDir,
+  makeChildGateAsk,
+  startParentApprovalRelay,
+} from "../src/remote/subagentRelay.ts";
 import { RelayClient } from "../src/remote/relayClient.ts";
 import { makeSendFileTool } from "../src/tools/sendFile.ts";
 import { makeSaveAttachmentTool } from "../src/tools/saveAttachment.ts";
@@ -31,6 +37,13 @@ let mode: PermissionMode = MODES.includes(process.env.PRIVATEER_MODE as Permissi
   : "default";
 const allowlist: string[] = [];
 const allowedOutsideRoots: string[] = [];
+
+// A turn driven from the app is in flight. Guards the remote onPrompt path against a
+// SECOND prompt arriving while Pi is still processing — which throws "Agent is already
+// processing" and wedges the session. This happens in normal use when the app drops
+// (backgrounded → socket suspended) and re-sends its prompt on reconnect. Mirrors the
+// REPL's `turnActive` guard. Set on a successful sendUserMessage, cleared on agent_end.
+let remoteTurnActive = false;
 
 let piRef: any = null;
 let relay: any = null;
@@ -248,6 +261,13 @@ let sinceLastPrompt: StoredAttachment[] = [];
 
 const bridge = new RemoteBridge({
   onPrompt: (text) => {
+    // Drop a prompt that arrives while a driven turn is already running (e.g. the app
+    // re-sending after a reconnect) — sendUserMessage would otherwise throw "Agent is
+    // already processing" and wedge the session. Tell the app why, don't crash.
+    if (remoteTurnActive) {
+      relay?.sendNotice("busy — a turn is already running; wait for it to finish.");
+      return;
+    }
     // Fold any files the app sent since the last prompt into a reference note so the
     // model knows they exist and can save_attachment them.
     const atts = sinceLastPrompt;
@@ -256,12 +276,28 @@ const bridge = new RemoteBridge({
       ? `\n\n[Files attached from the app: ${atts.map((a) => `#${a.n} ${a.name} (${a.mediaType})`).join(", ")}. ` +
         `Use the save_attachment tool with the ref number to write one to disk.]`
       : "";
-    piRef?.sendUserMessage?.(text + note); // drive a turn in Pi's TUI
+    try {
+      piRef?.sendUserMessage?.(text + note); // drive a turn in Pi's TUI
+      remoteTurnActive = true; // cleared on agent_end
+    } catch (e) {
+      // A synchronous "already processing" (or any send failure) must not wedge the
+      // bridge — surface it and stay idle so the next prompt still works.
+      relay?.sendNotice(`couldn't start turn: ${(e as Error).message}`);
+    }
   },
   onInterrupt: () => {}, // Pi owns interrupt; best-effort no-op
   // The app asked to end remote access from its side — stop the relay locally too so
   // the terminal doesn't keep reconnecting, and clear the green indicator.
   onTerminate: () => disableRemote(),
+  // The account signed this terminal out server-side (revoked from the app's Linked
+  // Devices). Unlike onTerminate, this wipes the machine login too: drop the relay,
+  // then tear down the session. handleServerRevoke fires onSessionExpired, which the
+  // brand extension handles (drops Pi's persisted account credential, refreshes the
+  // banner, and notifies "your session was signed out — run /signin").
+  onRevoked: () => {
+    disableRemote();
+    priv.handleServerRevoke();
+  },
   // A slash command typed in the app composer (e.g. /model) — dispatch it through the
   // same picker flow the REPL uses. Feedback returns as notice/select_request/context.
   onCommand: (text) => void runRemoteCommand(text),
@@ -296,13 +332,22 @@ const bridge = new RemoteBridge({
   onSkillSetEnabled: (name, enabled) => void runSkillMutation(() => skillControl().setEnabled(name, enabled), enabled ? "Enabled" : "Disabled"),
 });
 
+// Inside a subagent child (headless `pi`, stdin ignored), a gated action can't be
+// approved locally — decideAuto still forces dangerous shell / destructive / secret-
+// exfil to "ask", which would otherwise fail-closed to deny. If the root parent wired
+// an approval channel (env-inherited), forward those asks to it so they reach the app;
+// otherwise keep the fail-closed defaultLocalAsk (headless deny). A top-level TUI keeps
+// its own interactive/remote gate.
+const childChannel = isSubagentChild() ? inheritedChannelDir() : undefined;
+const localAsk = childChannel ? makeChildGateAsk(childChannel) : defaultLocalAsk;
+
 const gate = makePermissionGate({
   getMode: () => mode,
   setMode: (m) => (mode = m),
   allowlist,
   allowedOutsideRoots,
   cwd: process.cwd(),
-  localAsk: defaultLocalAsk,
+  localAsk,
   getRemote: bridge.getRemote,
   getNoQuarter: bridge.getNoQuarter,
   remoteAsk: bridge.remoteAsk,
@@ -311,6 +356,14 @@ const gate = makePermissionGate({
 export default function privateerControl(pi: any): void {
   piRef = pi;
   gate(pi); // tool_call (block/allow) + tool_result (redact)
+
+  // Top-level session: watch the subagent approval channel and relay each child's
+  // gated action to the app over this session's bridge. The bridge fails closed while
+  // no controller is attached, so an undriven terminal denies a subagent's gated
+  // action rather than auto-approving it. A subagent child never watches (it forwards).
+  if (!isSubagentChild()) {
+    startParentApprovalRelay(bridge, { onError: () => { /* best-effort; a poll error must not crash the turn */ } });
+  }
 
   // File transfer both ways: send_file_to_client (CLI→app, via the bridge's relay) and
   // save_attachment (app→CLI, from the AttachmentStore inbound files land in). Both
@@ -370,6 +423,7 @@ export default function privateerControl(pi: any): void {
   pi.on("agent_end", (ev: any) => {
     fwd(ev);
     bridge.settleTurn();
+    remoteTurnActive = false; // turn finished → the next app prompt may start one
   });
 
   pi.registerCommand?.("mode", {

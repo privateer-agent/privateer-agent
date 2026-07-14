@@ -27,6 +27,17 @@ export interface ControlAuthResult {
  * `termId` is THIS terminal's id (verification binds it, so a signature for another
  * terminal won't match). Returns { ok:true } to proceed, or { ok:false, message } to
  * refuse — the caller surfaces the message and does NOT perform the mutation.
+ *
+ * `opts.strict` (default false) governs the watermark comparison:
+ *   - non-strict: reject ts BELOW the watermark; ACCEPT at-or-above. Correct for
+ *     idempotent config mutations (routines/skills/extensions/channels save|delete),
+ *     where replaying the latest signed frame just re-applies the same state — harmless.
+ *   - strict: reject ts AT-or-below the watermark. Required for NON-idempotent, effectful
+ *     actions (task_submit/task_spawn — each RUNS a headless session), where a malicious
+ *     relay replaying the latest signed frame (same ts) would re-run the task / spawn
+ *     another session (inference-cost + resource abuse). Strict forces every accepted
+ *     effectful frame to carry a strictly-fresh ts, which the server cannot fabricate (it
+ *     can't sign) — so it can only replay old frames, all of which are now refused.
  */
 export function authorizeControl(
   termId: string,
@@ -34,6 +45,7 @@ export function authorizeControl(
   args: Record<string, unknown>,
   sig?: string,
   ts?: number,
+  opts?: { strict?: boolean },
 ): ControlAuthResult {
   const accountPub = loadAccountSignKey();
   if (!accountPub) {
@@ -46,7 +58,8 @@ export function authorizeControl(
     return { ok: false, message: "Couldn't verify this change came from your account." };
   }
   const last = loadLastControlTs(termId);
-  if (ts < last) {
+  const tooOld = opts?.strict ? ts <= last : ts < last;
+  if (tooOld) {
     return { ok: false, message: "Ignored an out-of-date change from the app." };
   }
   saveLastControlTs(termId, ts);

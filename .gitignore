@@ -19,3 +19,6 @@ secrets.json
 
 # Spike/scratch working dirs
 work/
+
+# pi-subagents runtime artifacts (transcripts/outputs from subagent runs)
+.pi-subagents/

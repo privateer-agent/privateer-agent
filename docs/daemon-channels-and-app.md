@@ -319,3 +319,104 @@ cross-reject each other's independent `ts` streams.
    (admins), how freely (posture), and how far (tools) are security decisions; prefer
    authenticated/terminal-confirmed paths for them over server-forwarded plaintext
    (see §6.5).
+
+---
+
+## 8. Workflows (proposed) — routed multi-agent routines
+
+> **Status: agent/daemon side built & tested; app side planned.** This section
+> specifies *declarative multi-agent workflows* on the daemon — the schema, runner,
+> store, control, and relay wiring now exist (`src/workflows/*`,
+> `src/remote/workflowsControl.ts`, the `workflows_*` frames, `tests/workflows.test.ts`).
+> It pins down the shape and — above all — the security seam, because a workflow file is
+> an **executable control artifact**, not passive data. The **mobile UX + sharing plan**
+> lives in [`workflows-mobile-plan.md`](./workflows-mobile-plan.md).
+
+### 8.1 What it adds, and why it isn't just a bigger routine
+A routine (§2.1) is **one prompt** on a trigger. A workflow is a **routed graph of
+steps** — the same unattended, daemon-run, safe-tool-gated execution model, but with
+branching, fan-out, human gates, and sub-workflow composition between steps. It is the
+thing the [[spawn-agent-from-app]] and [[subagents-blocked-when-driven]] work gestures
+at, made *declarative* and *deterministic* rather than agent-improvised.
+
+The file format deliberately adopts the vocabulary of **Microsoft Conductor**
+(`microsoft/conductor`, MIT) rather than inventing one — a flat list of typed steps
+plus a per-step `routes:` graph. We reuse its taxonomy; we do **not** reuse its trust
+model (Conductor is a local CLI with no untrusted server; we have §6).
+
+### 8.2 The step taxonomy, mapped onto existing primitives
+| Conductor `type:` | Privateer execution | Notes |
+|---|---|---|
+| `agent` | a headless Pi session under the **`SAFE_TOOLS` auto-approve gate** (as routines run today) | `tools:` is the ceiling, same semantics as `Routine.tools` |
+| `script` | a shell command | ⚠️ **bypasses the agent permission gate — RCE surface**, see §8.4 |
+| `human_gate` | pause → surface `options:` to the app as an **approval over the daemon relay** | native fit for the existing `approval_response` frame + app approval UI |
+| `set` / `wait` | pure context transform / sleep | no LLM, no tools, harmless |
+| `workflow` | sub-workflow (local path only — **no registry/GitHub refs**, §8.4) | composition |
+| `terminate` | end `success|failed` | the fail-closed exit (§7.2) |
+
+`for_each` / `parallel` fan-out map onto spawning N gated Pi sessions with a
+`max_concurrent` cap (mirror the daemon's existing one-at-a-time discipline; don't let
+a workflow outrun it).
+
+### 8.3 Storage and the control surface (mirror routines exactly)
+Follow principle §7.4 — **one control, one frame family, one screen**:
+- **Store:** workflow files live one-per-file in `~/.privateer/workflows/`, alongside
+  `routines/`. A `workflows/store.ts` + Zod `schema.ts` (the §8.2 subset of Conductor's
+  grammar — we validate strictly and reject unknown `type:`s) is the sibling of
+  `routines/store.ts`. **Canonical on-disk format is `w-<id>.json`** (what the app
+  authors); hand-edited `*.yaml` authoring is a follow-up that adds a YAML parser and an
+  async loader accepting both — deliberately out of the first skeleton so it stays
+  dependency-free.
+- **Trigger:** a workflow is invoked exactly like a routine — a `cron`/`at` entry in
+  `routines.json` may name a `workflow:` instead of a `prompt:`, so the resident
+  scheduler (§2.1) is the single entry point. No second scheduler.
+- **Control:** `src/remote/workflowsControl.ts` (UI-agnostic, no React/relay import,
+  like `routinesControl.ts`): `list / save / remove / setEnabled / run`.
+- **Frames:** a `workflows_*` family, `workflowsControl` on the **daemon relay**.
+- **Screen:** a `WorkflowsScreen`, on the "Privateer Routines" terminal card next to
+  Routines/Channels.
+
+### 8.4 Security — the load-bearing part
+A workflow file can run shell (`script`) and can run `agent` steps with write tools.
+Both **bypass the interactive permission gate** the same way a `routines_save`+`run`
+does — this is precisely the RCE surface §6.4 (H2) already identified. So the workflow
+path inherits H2's rules, no exceptions:
+
+1. **Every mutating `workflows_*` frame is account-signed and fail-closed.** `save`,
+   `remove`, `setEnabled` route through `authorizeControl` (`remote/controlAuth.ts`)
+   in **non-strict** mode (idempotent config writes). `run` — which *executes* — routes
+   through **`strict` mode** (`ts` must be strictly fresh), exactly as `task_spawn`
+   does, so a hostile relay can't replay a run frame to re-fire the graph. A server that
+   turns malicious after link can neither install a workflow nor trigger one.
+
+2. **The workflow body is inside the signed envelope.** The signature binds the whole
+   file (or its content hash), not just the frame verb — otherwise the server could
+   sign-wrap an app's innocuous `save` around a body it swapped. The pinned account key
+   (§6.4) is the only signer.
+
+3. **`script` and unattended write-tools are gated by posture, not free.** In the
+   unattended path (no human driving), `script` steps and dangerous tools **fail-closed
+   to a `human_gate`** — the run pauses and seals a "needs approval" notice to the cloud
+   outbox (§6.3) rather than proceeding. `human_gate` resolves *only* through the
+   account-authenticated approval path, never an unsigned relay frame.
+
+4. **Sub-workflows are local-path only.** Conductor's `name@team#version` registry and
+   `name@owner/repo#ref` GitHub refs are **rejected by the schema** — a remote ref is an
+   unsigned code-fetch, i.e. an RCE the server could redirect. Composition stays within
+   the user's own signed, on-disk `workflows/`.
+
+5. **Content that transits the relay for app visibility is E2EE.** A workflow's
+   intermediate step outputs shown live in `WorkflowsScreen` ride the same
+   content-encryption as every other feed frame (§6.3); results delivered while the app
+   is offline go to the sealed cloud outbox, never plaintext.
+
+- **Guarantee (inherited from H2):** the untrusted server can neither **install** a
+  workflow, **trigger** one, nor **tamper** with a step's tools/script — every such
+  change is an account-signed, replay-guarded, fail-closed control frame. Residual trust
+  is the same as everything else: the F1 link moment and local filesystem access (§6.5).
+
+### 8.5 What we deliberately do *not* take from Conductor
+- No `budget_usd`-as-trust-boundary — budget is a resource cap, not a security control;
+  the gate is still the tool posture.
+- No remote workflow registry (§8.4 #4).
+- No live in-graph privilege change — restart/re-sign is the fail-safe, per §7.3.

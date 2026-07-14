@@ -44,6 +44,26 @@ function tsOf(frame: { ts?: unknown }): number | undefined {
   return typeof frame.ts === "number" ? frame.ts : undefined;
 }
 
+// Parse a task_submit/task_spawn frame into a TaskSpec, keeping ONLY well-typed,
+// present fields (absent → left undefined). The daemon re-derives the canonical signed
+// args from this (taskControlArgs, undefined → null), so it must not invent fields.
+export function parseTaskSpec(frame: {
+  prompt?: string;
+  cwd?: string;
+  model?: string;
+  title?: string;
+  tools?: unknown;
+}): TaskSpec {
+  const spec: TaskSpec = { prompt: typeof frame.prompt === "string" ? frame.prompt : "" };
+  if (typeof frame.cwd === "string") spec.cwd = frame.cwd;
+  if (typeof frame.model === "string") spec.model = frame.model;
+  if (typeof frame.title === "string") spec.title = frame.title;
+  if (Array.isArray(frame.tools) && frame.tools.every((t) => typeof t === "string")) {
+    spec.tools = frame.tools as string[];
+  }
+  return spec;
+}
+
 function redactSecrets(s: string): string {
   if (!s) return s;
   return s
@@ -59,6 +79,19 @@ function safe(s: string, max: number): string {
   return clip(redactSecrets(s), max);
 }
 
+// An ad-hoc task the app asks the daemon to run headlessly (task_submit) or to spawn
+// as a live-drivable session (task_spawn). Only `prompt` is required; the rest fall back
+// to daemon defaults. The SAME field set is what the app canonical-signs into the control
+// envelope (client/services/accountSign.ts) and the daemon re-derives to verify (index.ts
+// taskControlArgs) — keep the two in sync, byte for byte, like the other signed frames.
+export interface TaskSpec {
+  prompt: string;
+  cwd?: string;
+  model?: string;
+  tools?: string[];
+  title?: string;
+}
+
 export interface RelayCallbacks {
   // A prompt arrived from the app — feed it into the turn loop (tagged remote).
   onPrompt: (text: string) => void;
@@ -69,6 +102,13 @@ export interface RelayCallbacks {
   // client and not reconnect. Optional: the routines daemon handles it too, but
   // callbacks that predate it keep compiling.
   onTerminate?: () => void;
+  // The account signed this terminal out server-side (revoked from the app's
+  // Linked Devices). Distinct from onTerminate: that only ends remote-access and
+  // leaves the login intact, whereas this wipes the machine login too. The owner
+  // should tear down the session (clear credentials, announce it) AND stop the
+  // relay. Optional so callbacks that predate the frame keep compiling; an older
+  // CLI that ignores it still gets signed out by the ≤25s heartbeat kill.
+  onRevoked?: () => void;
   // The app answered a relayed approval request.
   onApprovalResponse: (id: string, decision: "allow" | "deny") => void;
   // The app toggled no-quarter (unattended) mode: remote turns auto-approve like
@@ -119,6 +159,16 @@ export interface RelayCallbacks {
   onRoutinesSetEnabled?: (idOrName: string, enabled: boolean, sig?: string, ts?: number) => void;
   // The app asked to run a routine now, by id or name.
   onRoutinesRun?: (idOrName: string, sig?: string, ts?: number) => void;
+  // The app submitted an AD-HOC one-shot task (not a stored routine) to run headlessly
+  // right now — a fresh restricted-tool bypass session whose result is sealed to the
+  // account outbox. Signed (H2) — a forged task_submit runs an arbitrary headless
+  // session (RCE), identical in blast radius to a forged routines_run, so it MUST be
+  // verified via controlAuth before it runs. Daemon-owned (fires only on its relay).
+  onTaskSubmit?: (spec: TaskSpec, sig?: string, ts?: number) => void;
+  // The app asked to SPAWN a fresh interactive session it can drive live (mode:"live").
+  // The daemon stands up a new RemoteBridge terminal and replies (sendTaskSpawned) with
+  // its termId so the app can attach. Same signed-RCE gate as task_submit.
+  onTaskSpawn?: (spec: TaskSpec, sig?: string, ts?: number) => void;
   // The app opened the channels manager — reply with the current channel config
   // (a sendChannels frame). Owned by the daemon, so these only fire on its relay.
   onChannelsList?: () => void;
@@ -132,6 +182,21 @@ export interface RelayCallbacks {
   // The app asked to delete a platform's channel config, by platform name. Signed
   // (H2) — a forged removal is a DoS (the bot stops until re-added).
   onChannelsRemove?: (platform: string, sig?: string, ts?: number) => void;
+  // The app opened the workflows manager — reply with the current workflow summaries
+  // (a sendWorkflows frame). Owned by the daemon, so these only fire on its relay.
+  onWorkflowsList?: () => void;
+  // The app opened one workflow in its editor — reply with the full graph (sendWorkflow).
+  onWorkflowsGet?: (idOrName: string) => void;
+  // The app asked to create (no workflow.id) or edit (id) a workflow. The raw graph is
+  // handed through untyped; the daemon's workflowsControl strict-validates it. Signed
+  // (H2) — a forged save plants a `script` step that BYPASSES the permission gate (RCE),
+  // exactly like a forged routine, so it MUST be verified before it persists.
+  onWorkflowsSave?: (draft: Record<string, unknown>, sig?: string, ts?: number) => void;
+  // The app asked to delete a workflow by id or name. Signed (H2).
+  onWorkflowsRemove?: (idOrName: string, sig?: string, ts?: number) => void;
+  // The app asked to run a workflow now, by id or name. Signed (H2) and verified in
+  // STRICT mode (it executes a graph — non-idempotent, like task_spawn).
+  onWorkflowsRun?: (idOrName: string, sig?: string, ts?: number) => void;
   // A file finished transferring from the app (reassembled from chunks). Held to
   // ride along with the next remote prompt.
   onAttachment: (file: { name: string; mediaType: string; base64: string }) => void;
@@ -337,6 +402,12 @@ export class RelayClient {
       platform?: string;
       draft?: Record<string, unknown>;
       sealedSecrets?: string;
+      prompt?: string;
+      cwd?: string;
+      model?: string;
+      title?: string;
+      tools?: unknown;
+      mode?: string;
       sig?: string;
       ts?: number;
     };
@@ -358,6 +429,9 @@ export class RelayClient {
         break;
       case "terminate":
         this.cb.onTerminate?.();
+        break;
+      case "session_revoked":
+        this.cb.onRevoked?.();
         break;
       case "approval_response":
         if (frame.id) this.cb.onApprovalResponse(frame.id, frame.decision === "deny" ? "deny" : "allow");
@@ -423,6 +497,12 @@ export class RelayClient {
       case "routines_run":
         if (typeof frame.idOrName === "string") this.cb.onRoutinesRun?.(frame.idOrName, sig(frame), tsOf(frame));
         break;
+      case "task_submit":
+        if (typeof frame.prompt === "string") this.cb.onTaskSubmit?.(parseTaskSpec(frame), sig(frame), tsOf(frame));
+        break;
+      case "task_spawn":
+        if (typeof frame.prompt === "string") this.cb.onTaskSpawn?.(parseTaskSpec(frame), sig(frame), tsOf(frame));
+        break;
       case "channels_list":
         this.cb.onChannelsList?.();
         break;
@@ -438,6 +518,23 @@ export class RelayClient {
         break;
       case "channels_remove":
         if (typeof frame.platform === "string") this.cb.onChannelsRemove?.(frame.platform, sig(frame), tsOf(frame));
+        break;
+      case "workflows_list":
+        this.cb.onWorkflowsList?.();
+        break;
+      case "workflows_get":
+        if (typeof frame.idOrName === "string") this.cb.onWorkflowsGet?.(frame.idOrName);
+        break;
+      case "workflows_save":
+        // The graph rides in `draft` (same slot as channels_save), untyped — the daemon
+        // strict-validates it via workflowsControl.save after the signature check.
+        if (frame.draft && typeof frame.draft === "object") this.cb.onWorkflowsSave?.(frame.draft, sig(frame), tsOf(frame));
+        break;
+      case "workflows_remove":
+        if (typeof frame.idOrName === "string") this.cb.onWorkflowsRemove?.(frame.idOrName, sig(frame), tsOf(frame));
+        break;
+      case "workflows_run":
+        if (typeof frame.idOrName === "string") this.cb.onWorkflowsRun?.(frame.idOrName, sig(frame), tsOf(frame));
         break;
       case "attach_begin":
         this.beginAttachment(frame);
@@ -521,6 +618,32 @@ export class RelayClient {
     this.flushDeltas();
     this.rawSend({ type: "event", event: { type: "text", text: safe(`⏺ Routine "${name}"\n\n${content}`, 8000) } });
     return true;
+  }
+
+  // Push a finished ad-hoc task result to any attached controller as a text event (the
+  // durable copy still goes to the outbox). Same shape as sendRoutineResult.
+  sendTaskResult(title: string, content: string): boolean {
+    if (!this.isConnected()) return false;
+    this.flushDeltas();
+    this.rawSend({ type: "event", event: { type: "text", text: safe(`⏺ Task "${title}"\n\n${content}`, 8000) } });
+    return true;
+  }
+
+  // Push a workflow's live step text / final result to any attached controller as a text
+  // event, so it renders in the daemon terminal's feed. Same durable-copy caveat as
+  // sendRoutineResult (the outbox is the source of truth).
+  sendWorkflowResult(name: string, content: string): boolean {
+    if (!this.isConnected()) return false;
+    this.flushDeltas();
+    this.rawSend({ type: "event", event: { type: "text", text: safe(`⏺ Workflow "${name}"\n\n${content}`, 8000) } });
+    return true;
+  }
+
+  // Tell the app that a live task session was stood up on `termId` (label for display),
+  // so it can open a controller connection to that terminal and drive it. Fire-and-forget
+  // over the daemon's management relay.
+  sendTaskSpawned(termId: string, label: string): void {
+    this.rawSend({ type: "task_spawned", termId, label });
   }
 
   sendEvent(ev: EngineEvent): void {
@@ -750,6 +873,46 @@ export class RelayClient {
       busy: !!payload.busy,
       message: payload.message ? clip(payload.message, 500) : undefined,
     });
+  }
+
+  // Push the daemon's saved workflows to the app's workflows manager as SUMMARIES (not
+  // the full graphs — the editor fetches one at a time via sendWorkflow). Sent on request
+  // and after each save/remove/run. The user's OWN config echoed to their OWN app, so
+  // fields are clipped (not redacted). List bounded like the other managers.
+  sendWorkflows(payload: {
+    items: {
+      id: string;
+      name: string;
+      description?: string;
+      entryPoint: string;
+      stepCount: number;
+      gateCount: number;
+      scriptCount: number;
+    }[];
+    busy?: boolean;
+    message?: string;
+  }): void {
+    this.rawSend({
+      type: "workflows",
+      items: payload.items.slice(0, 200).map((w) => ({
+        id: w.id,
+        name: clip(w.name, 200),
+        description: w.description ? clip(w.description, 1000) : undefined,
+        entryPoint: clip(w.entryPoint, 64),
+        stepCount: Math.max(0, Math.floor(w.stepCount) || 0),
+        gateCount: Math.max(0, Math.floor(w.gateCount) || 0),
+        scriptCount: Math.max(0, Math.floor(w.scriptCount) || 0),
+      })),
+      busy: !!payload.busy,
+      message: payload.message ? clip(payload.message, 500) : undefined,
+    });
+  }
+
+  // Push ONE full workflow graph to the app's editor (reply to workflows_get). The graph
+  // is the user's own authored config, so it's sent whole (clipped only by the relay's
+  // per-frame cap); `null` means the requested workflow wasn't found.
+  sendWorkflow(workflow: unknown | null): void {
+    this.rawSend({ type: "workflow", workflow: workflow ?? null });
   }
 
   // Ask the app to pick from a set of options — a CLI-initiated selection prompt.

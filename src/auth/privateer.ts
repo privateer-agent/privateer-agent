@@ -120,13 +120,21 @@ let _refreshInFlight: Promise<ChildSession> | null = null;
 let _account: { accessToken: string } | null = null;
 
 export function loadCredentials(): Credentials | null {
-  if (_cache !== undefined) return _cache;
+  // Only a successfully-read credential is memoized. A NEGATIVE result (file absent
+  // or unreadable) is deliberately NOT cached: the credential can appear mid-session
+  // — the account /login writes credentials.json AFTER the extensions have already
+  // booted, and under jiti each extension gets its OWN module instance of this file,
+  // so a login's saveCredentials() never reaches another extension's `_cache`. If we
+  // memoized the pre-login "absent" as null, that instance would report "not signed
+  // in" forever (e.g. /remote-access refusing after a successful sign-in). Re-reading
+  // disk on each miss lets a later call see what a sign-in just wrote.
+  if (_cache) return _cache;
   const path = credentialsPath();
-  if (!existsSync(path)) return (_cache = null);
+  if (!existsSync(path)) return null;
   try {
     _cache = JSON.parse(readFileSync(path, "utf8")) as Credentials;
   } catch {
-    _cache = null;
+    return null;
   }
   return _cache;
 }
@@ -195,6 +203,19 @@ function notifySessionExpired(): void {
       /* a failing listener must not break the auth path */
     }
   }
+}
+
+// A server-pushed `session_revoked` relay frame arrived: the account signed this
+// terminal out (from the app's Linked Devices). Treat it exactly like a lazily-
+// detected expiry — wipe the local machine login and announce it via
+// onSessionExpired — but PROMPTLY, while the process is live, instead of waiting
+// for the next authedFetch/launch to hit a 401. The relay owner additionally
+// drops remote access. No-op if we're already signed out, so a duplicate frame
+// (or a frame racing an in-flight /signout) doesn't fire a spurious notice.
+export function handleServerRevoke(): void {
+  if (!hasCredentials()) return;
+  clearCredentials();
+  notifySessionExpired();
 }
 
 // ── Sign-in notification ─────────────────────────────────────────────────────

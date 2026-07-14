@@ -298,3 +298,13 @@ test("remote turn still hard-denies plan mode without relaying", async () => {
   assert.equal(res?.block, true);
   assert.equal(relay.approvals.length, 0); // read-only stance can't be talked around remotely
 });
+
+test("onRevoked forwards through the bridge to the config handler", () => {
+  // The server pushes a `session_revoked` frame → RelayClient calls onRevoked →
+  // the bridge forwards it to the owner's teardown. Guards that wiring (distinct
+  // from onTerminate, which only ends remote access and leaves the login intact).
+  let revoked = 0;
+  const bridge = new RemoteBridge({ onPrompt: () => {}, onRevoked: () => { revoked += 1; } });
+  bridge.callbacks.onRevoked();
+  assert.equal(revoked, 1);
+});

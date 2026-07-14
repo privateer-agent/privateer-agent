@@ -110,6 +110,38 @@ test("remote turn routes to remoteAsk, not localAsk", async () => {
   assert.equal(ctrl.localAsks, 0);
 });
 
+test("remote turn blocks a remote-unsafe tool before it can ask", async () => {
+  // A subagent tool on a driven turn must be blocked outright (not relayed for
+  // approval) — its own prompts would surface on the host terminal, invisible to
+  // the driver. The block is fail-closed and fires the onRemoteBlocked notice.
+  let blockedTool: string | undefined;
+  const ctrl = makeCtrl({
+    getRemote: () => true,
+    remoteAsk: async () => "allow", // must NOT be consulted
+    blockedWhenRemote: (name) => name === "subagent",
+    onRemoteBlocked: (name) => { blockedTool = name; },
+  });
+  const r = await decideToolCall(ctrl, "subagent", { action: "list" }, noCtx);
+  assert.equal(r?.block, true);
+  assert.match(r!.reason, /driven remotely|unavailable/i);
+  assert.equal(blockedTool, "subagent");
+  assert.equal(ctrl.localAsks, 0);
+});
+
+test("a remote-unsafe tool still runs on a LOCAL turn", async () => {
+  // Not driven → blockedWhenRemote is never consulted; the tool is gated normally
+  // (classified unknown → asks) and the local approval decides it.
+  let blocked = false;
+  const ctrl = makeCtrl({
+    getRemote: () => false,
+    blockedWhenRemote: () => { blocked = true; return true; },
+    localAsk: async () => "allow",
+  });
+  const r = await decideToolCall(ctrl, "subagent", { action: "list" }, noCtx);
+  assert.equal(r, undefined);
+  assert.equal(blocked, false);
+});
+
 test("headless default asker (no ui) fails closed to deny", async () => {
   // Uses the real defaultLocalAsk via makePermissionGate's default assignment path:
   // here we simulate a controller whose localAsk is the default (no ui in ctx).

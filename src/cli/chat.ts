@@ -8,6 +8,7 @@
 //        e.g. tinfoil/llama3-3-70b to watch TEE posture go green.
 
 import "../boot.ts"; // env + attestation dispatcher, before any Pi import
+import { fileURLToPath } from "node:url"; // builtin, safe pre-boot
 import type { GateController } from "../ext/permissionGate.ts"; // type-only → erased, safe pre-boot
 
 const RESET = "\x1b[0m", DIM = "\x1b[2m", CYAN = "\x1b[36m", YELLOW = "\x1b[33m", RED = "\x1b[31m", GREEN = "\x1b[32m";
@@ -20,10 +21,11 @@ async function main() {
     SessionManager,
   } = await import("@earendil-works/pi-coding-agent");
   const { createEngineEventAdapter } = await import("../bridge/engineAdapter.ts");
-  const { makePermissionGate } = await import("../ext/permissionGate.ts");
+  const { makePermissionGate, isRemoteUnsafeTool } = await import("../ext/permissionGate.ts");
   const { makePiPrivacyExtension, verifyModelPosture, TIERS } = await import("pi-privacy");
   const { agentDir } = await import("../config/paths.ts");
   const { RemoteBridge } = await import("../remote/remoteBridge.ts");
+  const { startParentApprovalRelay } = await import("../remote/subagentRelay.ts");
   const { RelayClient } = await import("../remote/relayClient.ts");
   const { makeExtensionsControl } = await import("../remote/extensionsControl.ts");
   const { makeSkillsControl } = await import("../remote/skillsControl.ts");
@@ -37,6 +39,13 @@ async function main() {
   const provider = spec.slice(0, slash);
   const modelId = spec.slice(slash + 1);
   const cwd = process.cwd();
+  // Point pi-subagents at our moat-injecting wrapper (unless overridden). This REPL
+  // loads the gate/privacy/account as in-code factories, which a subagent child can't
+  // inherit; the wrapper injects them explicitly (‑e) with discovery off, so children
+  // run gated + private with no parent double-load. Also fixes the plain ENOENT: `pi`
+  // isn't on PATH, so without this every subagent spawn would fail. See bin/privateer-
+  // subagent.mjs. Absolute path, resolved relative to this module (src/cli/chat.ts).
+  process.env.PI_SUBAGENT_PI_BINARY ??= fileURLToPath(new URL("../../bin/privateer-subagent.mjs", import.meta.url));
   // The live model spec ("provider/id"). Starts at the launch model and follows
   // /model switches, so the app banner + picker reflect what's actually selected.
   let currentSpec = spec;
@@ -106,6 +115,15 @@ async function main() {
   const bridge = new RemoteBridge({
     onPrompt: (text) => void runTurn(text, true),
     onInterrupt: () => void session?.abort?.(),
+    // The account signed this terminal out from the app (session revoked). Drop the
+    // relay and wipe the local machine login so we don't keep reconnecting with a dead
+    // token; the user re-runs /login to sign back in.
+    onRevoked: () => {
+      try { relay?.stop(); } catch { /* already stopped */ }
+      relay = null;
+      priv.handleServerRevoke();
+      console.log(`\n${YELLOW}⟿ Signed out — this terminal's Privateer session was revoked from the app. Run /login to sign back in.${RESET}`);
+    },
     // A slash command typed in the app composer (e.g. /model) — echo it (like the
     // prompt echo), then run it through the same dispatcher the local REPL uses.
     // Anything the dispatcher doesn't recognize falls through to the turn loop, so
@@ -142,6 +160,12 @@ async function main() {
     onSkillSetEnabled: (name, enabled, sig, ts) =>
       void runSkillMutation("skills_set_enabled", { name, enabled }, () => skills!.setEnabled(name, enabled), enabled ? "Enabled" : "Disabled", sig, ts),
   });
+
+  // Watch the subagent approval channel: a subagent child's gated action (dangerous
+  // shell / out-of-scope / destructive — the ones decideAuto forces to "ask") forwards
+  // here and relays to the app over this session's bridge. The bridge fails closed while
+  // no controller is attached, so an undriven terminal denies rather than auto-approves.
+  startParentApprovalRelay(bridge, { onError: () => { /* best-effort; a poll error must not crash a turn */ } });
 
   // Verify an account-signed mutating control frame (H2) for this interactive terminal
   // before it acts — a forged extensions_add installs code, a forged skills_create
@@ -249,6 +273,16 @@ async function main() {
     getRemote: bridge.getRemote,
     getNoQuarter: bridge.getNoQuarter,
     remoteAsk: bridge.remoteAsk,
+    // Subagents (and their child-only intercom tools) can't be driven from the app
+    // yet — pi-subagents runs each in a child session whose gate/UI bypass the relay,
+    // so its prompts surface on THIS terminal, invisible to the driver. Block them on
+    // a driven turn (fail-closed) and post a notice so the app shows why it stopped.
+    blockedWhenRemote: isRemoteUnsafeTool,
+    onRemoteBlocked: (toolName) => {
+      const msg = `${toolName} is disabled while driving remotely — its prompts can't reach the app.`;
+      console.log(`\n${DIM}⛔ ${msg}${RESET}`);
+      bridge.sendNotice(msg);
+    },
   };
 
   console.log(`${DIM}privateer-agent — lean REPL. Loading ${provider}/${modelId}…${RESET}`);

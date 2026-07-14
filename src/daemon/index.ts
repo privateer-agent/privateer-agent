@@ -1,5 +1,7 @@
 import type { Server } from "node:net";
 import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 // Pi session stack. The daemon MUST be launched after ./boot.ts (env +
 // attestation dispatcher) — these are evaluated on import.
 import {
@@ -13,16 +15,20 @@ import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { makePermissionGate, type GateController } from "../ext/permissionGate.ts";
 import { makePiPrivacyExtension } from "pi-privacy";
 import { makeAccountProvider } from "../providers/account.ts";
-import { RelayClient } from "../remote/relayClient.ts";
+import { RelayClient, type TaskSpec } from "../remote/relayClient.ts";
+import { createLiveTaskSession, type LiveTaskHandle } from "../remote/liveTaskSession.ts";
 import { makeRoutinesControl } from "../remote/routinesControl.ts";
 import { makeChannelsControl } from "../remote/channelsControl.ts";
+import { makeWorkflowsControl } from "../remote/workflowsControl.ts";
+import { runWorkflow as executeWorkflow, type RunnerDeps, type AgentRunSpec, type AgentRunResult, type ScriptRunResult } from "../workflows/runner.ts";
+import type { Workflow, Step } from "../workflows/schema.ts";
 import { readRunningPlatforms } from "../channels/status.ts";
 import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
 import { openJsonFromApp } from "../crypto/terminalUnseal.ts";
 import { verifyChannelSave, verifyOutboxKey } from "../crypto/accountVerify.ts";
 import { loadAccountSignKey, loadLastControlTs, saveLastControlTs } from "../crypto/accountTrust.ts";
 import { authorizeControl } from "../remote/controlAuth.ts";
-import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, spawnAccountCredentials } from "../auth/privateer.ts";
+import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, spawnAccountCredentials, handleServerRevoke } from "../auth/privateer.ts";
 import {
   loadRoutines,
   upsertRoutine,
@@ -53,6 +59,10 @@ const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 
 const TICK_MS = 60_000; // scan for due routines once a minute
 const MAX_CLOUD_PLAINTEXT = 45_000;
+// How long a workflow `human_gate` (or a script-approval prompt) waits for the app to
+// answer before it fail-closes to "no response" (the runner then defers the run). Bounds
+// a stuck graph from pinning a `running` slot forever when the controller wanders off.
+const GATE_TIMEOUT_MS = 5 * 60_000;
 
 interface DaemonConfig {
   defaultModel: string;
@@ -96,6 +106,47 @@ function formatResult(routine: Routine, body: string, status: "ok" | "error", er
   return `${head}${body.trim() || "(no output)"}\n`;
 }
 
+// A short human title for an ad-hoc task: the app's explicit title, else the first
+// non-empty line of the prompt, clipped. Exported for the signed-args round-trip test.
+export function deriveTaskTitle(spec: TaskSpec): string {
+  const explicit = spec.title?.trim();
+  if (explicit) return explicit.slice(0, 80);
+  const firstLine = spec.prompt.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "task";
+  return firstLine.slice(0, 80);
+}
+
+function formatTaskResult(title: string, body: string, status: "ok" | "error", error?: string, model?: string): string {
+  const when = new Date().toISOString();
+  const head = `# ${title}\n\n_${when} · ${status}${model ? ` · ${model}` : ""}_\n\n`;
+  if (status === "error") return `${head}**Task failed:** ${error ?? "unknown error"}\n\n${body}`.trimEnd() + "\n";
+  return `${head}${body.trim() || "(no output)"}\n`;
+}
+
+// Render a finished workflow run into the delivery/outbox markdown: the terminal status,
+// the workflow-level `output:` (if any), and the halt reason for a failed/deferred run.
+function formatWorkflowResult(name: string, result: { status: string; output: Record<string, unknown>; reason?: string }): string {
+  const when = new Date().toISOString();
+  const head = `# Workflow: ${name}\n\n_${when} · ${result.status}_\n\n`;
+  const body = Object.keys(result.output).length > 0 ? "```json\n" + JSON.stringify(result.output, null, 2) + "\n```\n" : "";
+  const reason = result.reason ? `\n${result.status === "success" ? "" : "**"}${result.reason}${result.status === "success" ? "" : "**"}\n` : "";
+  return `${head}${body}${reason}`.trimEnd() + "\n";
+}
+
+// Canonical control-envelope args for a task_submit / task_spawn signature. MUST match
+// the app's signer (client/services/accountSign.ts) byte-for-byte: the SAME key set with
+// undefined → null, so the recursive-key-sorted JSON both sides sign is identical. A
+// mismatch here fails the signature and the task is refused (fail-closed). Exported so
+// the test pins the exact shape the app must sign.
+export function taskControlArgs(spec: TaskSpec): Record<string, unknown> {
+  return {
+    prompt: spec.prompt,
+    cwd: spec.cwd ?? null,
+    model: spec.model ?? null,
+    tools: spec.tools ?? null,
+    title: spec.title ?? null,
+  };
+}
+
 export class Daemon {
   private server?: Server;
   private timer?: ReturnType<typeof setInterval>;
@@ -104,6 +155,9 @@ export class Daemon {
   private relay?: RelayClient;
   private controllerAttached = false;
   private relayTerminated = false;
+  // Live, app-drivable sessions spawned on demand (task_spawn). Each has its OWN relay
+  // terminal (task-<uuid>); the daemon just keeps handles so it can reap them on shutdown.
+  private readonly liveTasks = new Map<string, LiveTaskHandle>();
 
   // App-facing routine management (list/save/delete/pause/run) over the daemon's
   // relay. Run-now is injected here since only the daemon can actually fire one;
@@ -122,6 +176,19 @@ export class Daemon {
   private readonly channels = makeChannelsControl({
     runningPlatforms: () => readRunningPlatforms(),
   });
+
+  // App-facing workflow management (list/get/save/remove/run) over the daemon's relay.
+  // Run-now is injected here since only the daemon owns the runner + its seams. A
+  // workflow can carry a `script` step (RCE if forged), so every mutation is
+  // account-signed + verified (guardControl) before reaching this control.
+  private readonly workflows = makeWorkflowsControl({
+    runNow: (wf) => void this.runWorkflow(wf),
+  });
+
+  // Pending human_gate / script-approval prompts a running workflow is blocked on,
+  // keyed by the select/approval frame id. Resolved when the app answers (onSelectResponse
+  // / onApprovalResponse) or when GATE_TIMEOUT_MS elapses (fail-closed → null).
+  private readonly pendingGates = new Map<string, (value: string | null) => void>();
 
   private readonly pushRelay: RelayPusher = (routine, content) => {
     if (this.controllerAttached && this.relay?.sendRoutineResult(routine.name, content)) return "live";
@@ -153,6 +220,9 @@ export class Daemon {
     if (this.timer) clearInterval(this.timer);
     this.server?.close();
     this.relay?.stop();
+    // Tear down any live spawned sessions (each revokes its own account session).
+    for (const handle of this.liveTasks.values()) void handle.stop();
+    this.liveTasks.clear();
   }
 
   private syncRelay(): void {
@@ -165,7 +235,11 @@ export class Daemon {
       {
         onPrompt: () => {},
         onInterrupt: () => {},
-        onApprovalResponse: () => {},
+        // A workflow human_gate / script-approval is surfaced as a select_request; the app
+        // answers with select_response (option name) or an approval_response (allow/deny).
+        // Both resolve the pending gate — otherwise the daemon relay ignores approvals.
+        onApprovalResponse: (id, decision) => this.resolveGate(id, decision === "deny" ? "deny" : "approve"),
+        onSelectResponse: (id, value) => this.resolveGate(id, value),
         onControllerAttached: () => this.onControllerAttached(),
         onAttachment: () => {},
         // Routine management from the app. Each MUTATION is account-signed (H2) — a
@@ -177,6 +251,22 @@ export class Daemon {
         onRoutinesDelete: (idOrName, sig, ts) => this.pushRoutines(this.guardControl("routines_delete", { idOrName }, sig, ts, () => this.routines.remove(idOrName).message)),
         onRoutinesSetEnabled: (idOrName, enabled, sig, ts) => this.pushRoutines(this.guardControl("routines_set_enabled", { idOrName, enabled }, sig, ts, () => this.routines.setEnabled(idOrName, enabled).message)),
         onRoutinesRun: (idOrName, sig, ts) => this.pushRoutines(this.guardControl("routines_run", { idOrName }, sig, ts, () => this.routines.run(idOrName).message)),
+        // Ad-hoc task spawns from the app. A forged task_submit/task_spawn runs an
+        // arbitrary headless session (RCE) — same blast radius as routines_run — so both
+        // are account-signed and verified here (guardControl, fail-closed) BEFORE any
+        // session starts. The canonical signed args come from taskControlArgs (undefined
+        // → null), matching the app's signer.
+        onTaskSubmit: (spec, sig, ts) => {
+          const msg = this.guardControl("task_submit", taskControlArgs(spec), sig, ts, () => {
+            void this.runTask(spec);
+            return `Task "${deriveTaskTitle(spec)}" accepted — running now; the result will appear in your app.`;
+          });
+          if (msg) this.relay?.sendNotice(msg);
+        },
+        onTaskSpawn: (spec, sig, ts) => {
+          const msg = this.guardControl("task_spawn", taskControlArgs(spec), sig, ts, () => this.spawnLiveTask(spec));
+          if (msg) this.relay?.sendNotice(msg);
+        },
         // Channel management from the app. `save` has its own signed verify (it also
         // carries sealed secrets — applyChannelSave); `remove` is account-signed here
         // (H2 — a forged removal is a DoS). Then channelsControl writes config.json and
@@ -184,12 +274,35 @@ export class Daemon {
         onChannelsList: () => this.pushChannels(),
         onChannelsSave: (draft, sealedSecrets, sig, ts) => this.pushChannels(this.applyChannelSave(draft, sealedSecrets, sig, ts)),
         onChannelsRemove: (platform, sig, ts) => this.pushChannels(this.guardControl("channels_remove", { platform }, sig, ts, () => this.channels.remove(platform as any).message)),
+        // Workflow management from the app. Each MUTATION is account-signed (H2) — a forged
+        // workflows_save plants a `script` step that bypasses the permission gate (RCE),
+        // and workflows_run executes the graph — so all three are verified (guardControl,
+        // fail-closed) before the control acts. workflows_run verifies in STRICT mode (it's
+        // effectful, like task_spawn). list/get are read-only.
+        onWorkflowsList: () => this.pushWorkflows(),
+        onWorkflowsGet: (idOrName) => this.relay?.sendWorkflow(this.workflows.get(idOrName) ?? null),
+        onWorkflowsSave: (draft, sig, ts) => this.pushWorkflows(this.guardControl("workflows_save", { workflow: draft }, sig, ts, () => this.workflows.save(draft).message)),
+        onWorkflowsRemove: (idOrName, sig, ts) => this.pushWorkflows(this.guardControl("workflows_remove", { idOrName }, sig, ts, () => this.workflows.remove(idOrName).message)),
+        onWorkflowsRun: (idOrName, sig, ts) => this.pushWorkflows(this.guardControl("workflows_run", { idOrName }, sig, ts, () => this.workflows.run(idOrName).message)),
         onTerminate: () => {
           this.relayTerminated = true;
           this.controllerAttached = false;
           this.relay?.stop();
           this.relay = undefined;
           log("relay terminated from the app; staying offline until the daemon restarts");
+        },
+        // The account signed this daemon out server-side (revoked from the app's Linked
+        // Devices). Beyond ending remote access (onTerminate), this wipes the machine
+        // login: drop the relay and clear credentials, so routines/tasks stop cleanly
+        // instead of dead-ending on a 401 each run. Stays idle until you /signin on this
+        // machine and restart the daemon (the relayTerminated guard, as with onTerminate).
+        onRevoked: () => {
+          this.relayTerminated = true;
+          this.controllerAttached = false;
+          this.relay?.stop();
+          this.relay = undefined;
+          handleServerRevoke();
+          log("account signed out from the app (session revoked) — cleared credentials; idle until you run /signin on this machine and restart the daemon");
         },
         onStatus: (text) => log(`relay: ${text}`),
         onDisconnected: () => {
@@ -212,6 +325,22 @@ export class Daemon {
   // manager). `message` is a one-line result from the last mutation, if any.
   private pushChannels(message?: string): void {
     this.relay?.sendChannels({ items: this.channels.list(), message });
+  }
+
+  // Push the current workflow summaries to an attached controller (its workflows
+  // manager). `message` is a one-line result from the last mutation, if any.
+  private pushWorkflows(message?: string): void {
+    this.relay?.sendWorkflows({ items: this.workflows.list(), message });
+  }
+
+  // Resolve a pending workflow gate with the app's answer (an option name, "allow"/
+  // "deny" mapped to approve/deny, or null when dismissed/timed out). No-op if the id is
+  // unknown (a stale/duplicate response), so a late frame can't crash the runner.
+  private resolveGate(id: string, value: string | null): void {
+    const resolve = this.pendingGates.get(id);
+    if (!resolve) return;
+    this.pendingGates.delete(id);
+    resolve(value);
   }
 
   // Apply an app channel-save. Defense in depth, all fail-closed:
@@ -262,7 +391,12 @@ export class Daemon {
     ts: number | undefined,
     run: () => string | undefined,
   ): string | undefined {
-    const auth = authorizeControl(routineRelayId(), action, args, sig, ts);
+    // task_submit/task_spawn are NON-idempotent (each runs a headless session), so they
+    // require a strictly-fresh ts — a replayed frame with an equal ts must NOT re-run.
+    // The idempotent config mutations (routines/channels save|delete) keep the default
+    // at-or-above acceptance. See authorizeControl's strict note.
+    const strict = action === "task_submit" || action === "task_spawn" || action === "workflows_run";
+    const auth = authorizeControl(routineRelayId(), action, args, sig, ts, { strict });
     if (!auth.ok) return auth.message;
     return run();
   }
@@ -281,6 +415,8 @@ export class Daemon {
     this.pushRoutines();
     // Same for the channels manager.
     this.pushChannels();
+    // …and the workflows manager.
+    this.pushWorkflows();
     const pending = drainPendingRelay();
     if (pending.length === 0) return;
     log(`controller attached — flushing ${pending.length} pending routine result(s)`);
@@ -311,11 +447,11 @@ export class Daemon {
     }
   }
 
-  private async postOutbox(routine: string, at: string, status: "ok" | "error", content: string): Promise<boolean> {
+  private async postOutbox(name: string, at: string, status: "ok" | "error", content: string, kind: "routine" | "task" = "routine"): Promise<boolean> {
     const pub = await this.ensureOutboxPub();
     if (!pub) return false;
     const body = content.length > MAX_CLOUD_PLAINTEXT ? content.slice(0, MAX_CLOUD_PLAINTEXT) + "\n…truncated" : content;
-    const sealed = sealJson(pub, { v: 1, kind: "routine", name: routine, status, at, content: body });
+    const sealed = sealJson(pub, { v: 1, kind, name, status, at, content: body });
     try {
       const res = await apiRequest("/api/outbox", {
         method: "POST",
@@ -334,7 +470,7 @@ export class Daemon {
     if (queue.length === 0) return;
     const remaining: PendingCloud[] = [];
     for (const p of queue) {
-      if (remaining.length === 0 && (await this.postOutbox(p.routine, p.at, p.status, p.content))) continue;
+      if (remaining.length === 0 && (await this.postOutbox(p.routine, p.at, p.status, p.content, p.kind ?? "routine"))) continue;
       remaining.push(p);
     }
     if (remaining.length !== queue.length) {
@@ -385,87 +521,12 @@ export class Daemon {
       log("  note: MCP tools + email delivery are not wired yet (Phase 5) — skipping those");
     }
 
-    let out = "";
-    let status: "ok" | "error" = "ok";
-    let error: string | undefined;
-    // Track this run's account inference session so it can be torn down when the
-    // routine finishes — each run force-spawns a fresh one (below), so without this
-    // a long-lived daemon would leave one orphaned account "device" per run lingering
-    // in the app's Linked Devices until its token TTL.
-    let servicesRef: { authStorage?: { remove?: (p: string) => void } } | null = null;
-    let spawnedAccount = false;
-    try {
-      // Auto-approve (bypass) gate — safety is `tools: allowedTools`; a dangerous
-      // shell command still fail-closes headlessly (localAsk denies).
-      const gate: GateController = {
-        getMode: () => "bypass",
-        setMode: () => {},
-        allowlist: [],
-        allowedOutsideRoots: [],
-        cwd: routine.cwd,
-        confineToCwd: true,
-        async localAsk() {
-          return "deny";
-        },
-      };
-      const services = await createAgentSessionServices({
-        cwd: routine.cwd,
-        agentDir: agentDir(),
-        resourceLoaderOptions: {
-          extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider()] as any,
-        },
-      });
-      servicesRef = services as any;
-
-      const { provider, modelId } = parseSpec(modelSpec);
-      if (provider === "privateer") {
-        try {
-          const creds = await spawnAccountCredentials();
-          (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
-          spawnedAccount = true;
-        } catch (e) {
-          log(`  account channel unavailable: ${(e as Error).message}`);
-        }
-      }
-
-      const model = (services.modelRegistry as any).find(provider, modelId);
-      if (!model) {
-        status = "error";
-        error = `model ${provider}/${modelId} not found`;
-      } else {
-        const { session } = await createAgentSessionFromServices({
-          services,
-          sessionManager: SessionManager.inMemory(routine.cwd),
-          model,
-          tools: allowedTools,
-        } as any);
-        const adapter = createEngineEventAdapter();
-        session.subscribe((ev: any) => {
-          for (const ee of adapter.toEngineEvents(ev)) {
-            if (ee.type === "text") out += ee.text;
-            else if (ee.type === "error") {
-              status = "error";
-              error = ee.error;
-            }
-          }
-        });
-        await session.prompt(routine.prompt);
-      }
-    } catch (err) {
-      status = "error";
-      error = err instanceof Error ? err.message : String(err);
-    } finally {
-      // Tear down THIS run's account inference session so it doesn't linger in the
-      // app's Linked Devices after the routine finishes. Revoke only the account
-      // session — the daemon's child API session (relay/outbox) must stay alive for
-      // the daemon's lifetime and is revoked on shutdown. Also drop Pi's persisted
-      // copy so a later run's fallback never reuses this revoked token. Best-effort;
-      // the next run force-spawns a fresh account session.
-      if (spawnedAccount) {
-        try { await revokeAccountSession(); } catch { /* best effort — server TTL is the fallback */ }
-        try { servicesRef?.authStorage?.remove?.("privateer"); } catch { /* nothing persisted */ }
-      }
-    }
+    const { out, status, error } = await this.runSession({
+      prompt: routine.prompt,
+      cwd: routine.cwd,
+      model: modelSpec,
+      tools: allowedTools,
+    });
 
     const content = formatResult(routine, out, status, error);
     const report = await deliver(routine, content, status, {
@@ -484,6 +545,286 @@ export class Daemon {
     });
     this.running.delete(routine.id);
     return { ok: status === "ok", message: report.delivered.join(", ") || undefined };
+  }
+
+  // Drive one headless Pi turn to completion and return its collected text + status.
+  // The shared core of BOTH a scheduled routine and an app-submitted ad-hoc task: an
+  // auto-approve (bypass) gate whose safety is the restricted `tools` list — a dangerous
+  // shell command still fail-closes headlessly (localAsk denies) — plus per-run account
+  // credentials that are revoked in the finally so they never linger as an orphaned
+  // "device" in the app's Linked Devices.
+  private async runSession(spec: { prompt: string; cwd: string; model: string; tools: string[] }): Promise<{ out: string; status: "ok" | "error"; error?: string }> {
+    let out = "";
+    let status: "ok" | "error" = "ok";
+    let error: string | undefined;
+    let servicesRef: { authStorage?: { remove?: (p: string) => void } } | null = null;
+    let spawnedAccount = false;
+    try {
+      const gate: GateController = {
+        getMode: () => "bypass",
+        setMode: () => {},
+        allowlist: [],
+        allowedOutsideRoots: [],
+        cwd: spec.cwd,
+        confineToCwd: true,
+        async localAsk() {
+          return "deny";
+        },
+      };
+      const services = await createAgentSessionServices({
+        cwd: spec.cwd,
+        agentDir: agentDir(),
+        resourceLoaderOptions: {
+          extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider()] as any,
+        },
+      });
+      servicesRef = services as any;
+
+      const { provider, modelId } = parseSpec(spec.model);
+      if (provider === "privateer") {
+        try {
+          const creds = await spawnAccountCredentials();
+          (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+          spawnedAccount = true;
+        } catch (e) {
+          log(`  account channel unavailable: ${(e as Error).message}`);
+        }
+      }
+
+      const model = (services.modelRegistry as any).find(provider, modelId);
+      if (!model) {
+        status = "error";
+        error = `model ${provider}/${modelId} not found`;
+      } else {
+        const { session } = await createAgentSessionFromServices({
+          services,
+          sessionManager: SessionManager.inMemory(spec.cwd),
+          model,
+          tools: spec.tools,
+        } as any);
+        const adapter = createEngineEventAdapter();
+        session.subscribe((ev: any) => {
+          for (const ee of adapter.toEngineEvents(ev)) {
+            if (ee.type === "text") out += ee.text;
+            else if (ee.type === "error") {
+              status = "error";
+              error = ee.error;
+            }
+          }
+        });
+        await session.prompt(spec.prompt);
+      }
+    } catch (err) {
+      status = "error";
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      // Revoke ONLY this run's account inference session (the daemon's own child API
+      // session — relay/outbox — stays alive until shutdown). Drop Pi's persisted copy
+      // too so a later run's fallback never reuses a revoked token. Best-effort.
+      if (spawnedAccount) {
+        try { await revokeAccountSession(); } catch { /* best effort — server TTL is the fallback */ }
+        try { servicesRef?.authStorage?.remove?.("privateer"); } catch { /* nothing persisted */ }
+      }
+    }
+    return { out, status, error };
+  }
+
+  // Run an app-submitted AD-HOC task (task_submit): one restricted headless turn whose
+  // result is sealed to the account outbox (durable, server-can't-read) and, if a
+  // controller is attached, mirrored live. NOT a stored routine — no schedule, no
+  // persistence beyond delivery. The signed-frame gate (guardControl) already ran; this
+  // just executes. Concurrency-guarded by a `task:<title>` key in `this.running` (never
+  // collides with routine ids, which are uuids).
+  async runTask(spec: TaskSpec): Promise<void> {
+    const config = loadDaemonConfig();
+    const cwd = spec.cwd && spec.cwd.trim() ? spec.cwd : process.cwd();
+    const modelSpec = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
+    const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
+    const allowedTools = split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS;
+    const title = deriveTaskTitle(spec);
+    const key = `task:${title}`;
+    if (this.running.has(key)) {
+      this.relay?.sendNotice(`A task titled "${title}" is already running.`);
+      return;
+    }
+    this.running.add(key);
+    log(`running task "${title}"`);
+    try {
+      const { out, status, error } = await this.runSession({ prompt: spec.prompt, cwd, model: modelSpec, tools: allowedTools });
+      const content = redactText(formatTaskResult(title, out, status, error, modelSpec), collectSecrets(config.providers));
+      const at = new Date().toISOString();
+      // Durable delivery: seal to the outbox. If we can't seal yet (no verified pubkey /
+      // offline), queue it with kind:"task" so the flush re-seals it correctly later.
+      const sealed = await this.postOutbox(title, at, status, content, "task");
+      if (!sealed) addPendingCloud({ routine: title, at, status, content, kind: "task" });
+      // Live mirror if a controller is attached (the outbox copy is the source of truth).
+      if (this.controllerAttached) this.relay?.sendTaskResult(title, content);
+      log(`  task "${title}" ${status}; ${sealed ? "sealed to outbox" : "queued for outbox"}`);
+    } finally {
+      this.running.delete(key);
+    }
+  }
+
+  // Stand up a live, app-drivable session (task_spawn). Async: the session + its own relay
+  // terminal are created in the background, then the app is told the new termId via
+  // sendTaskSpawned so it can attach and drive. Returns an immediate ack for the notice.
+  // The signed-frame gate (guardControl) already ran before this is called.
+  private spawnLiveTask(spec: TaskSpec): string {
+    void (async () => {
+      try {
+        const handle = await createLiveTaskSession(spec, {
+          defaultModel: loadDaemonConfig().defaultModel,
+          parseSpec,
+          log,
+          onClosed: (id) => this.liveTasks.delete(id),
+        });
+        this.liveTasks.set(handle.termId, handle);
+        this.relay?.sendTaskSpawned(handle.termId, handle.label);
+        log(`live task spawned: ${handle.termId} (${handle.label})`);
+      } catch (e) {
+        const msg = `Couldn't spawn a live session: ${(e as Error).message}`;
+        log(msg);
+        this.relay?.sendNotice(msg);
+      }
+    })();
+    const title = deriveTaskTitle(spec);
+    return `Spawning a live session "${title}" — it'll open in your app in a moment.`;
+  }
+
+  // Run a saved workflow graph to completion (workflows_run / the injected runNow). The
+  // signed-frame gate (guardControl, STRICT) already ran before this is reached. Wires the
+  // runner's injected seams to the daemon's real capabilities: agent steps → runSession
+  // (SAFE_TOOLS gate), gates → relay approvals, scripts → a gated child process (only when
+  // attended + approved; the runner fail-closes an unattended script itself), and the
+  // result is sealed to the outbox + mirrored live, exactly like an ad-hoc task.
+  async runWorkflow(wf: Workflow): Promise<void> {
+    const key = `wf:${wf.workflow.id}`;
+    if (this.running.has(key)) {
+      this.relay?.sendNotice(`Workflow "${wf.workflow.name}" is already running.`);
+      return;
+    }
+    this.running.add(key);
+    log(`running workflow "${wf.workflow.name}"`);
+    try {
+      const deps: RunnerDeps = {
+        runAgent: (spec) => this.runWorkflowAgent(spec),
+        runScript: (step, cwd) => this.runScript(step, cwd),
+        askGate: (step, promptText) => this.askGate(step.options.map((o) => ({ name: o.name, description: o.description })), promptText),
+        attended: () => this.controllerAttached,
+        // Preserve the daemon's one-at-a-time discipline: fan-out (parallel/for_each) runs
+        // sequentially here, so a workflow never spawns concurrent headless sessions on the
+        // resident daemon. (The standalone runner defaults to 4; a UI host can raise it.)
+        concurrency: 1,
+        // An effectful step reached while unattended: seal a "needs approval" notice so the
+        // user catches up, and (if a controller is somehow attached) surface it live.
+        deferForApproval: async (reason) => {
+          const at = new Date().toISOString();
+          if (!(await this.postOutbox(wf.workflow.name, at, "error", reason, "task"))) {
+            addPendingCloud({ routine: wf.workflow.name, at, status: "error", content: reason, kind: "task" });
+          }
+          this.relay?.sendNotice(reason);
+        },
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        log: (m) => log(`  [wf ${wf.workflow.name}] ${m}`),
+        // Live progress: announce each step start in the daemon terminal's feed.
+        onEvent: (ev) => {
+          if (ev.type === "step_start") this.relay?.sendNotice(`▶ ${ev.name}`);
+        },
+      };
+
+      const result = await executeWorkflow(wf, {}, deps);
+      const status: "ok" | "error" = result.status === "success" ? "ok" : "error";
+      const content = formatWorkflowResult(wf.workflow.name, result);
+      const at = new Date().toISOString();
+      // Durable delivery: seal to the outbox (queue on failure to re-seal later).
+      if (!(await this.postOutbox(wf.workflow.name, at, status, content, "task"))) {
+        addPendingCloud({ routine: wf.workflow.name, at, status, content, kind: "task" });
+      }
+      if (this.controllerAttached) this.relay?.sendWorkflowResult(wf.workflow.name, content);
+      log(`  workflow "${wf.workflow.name}" ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
+      this.pushWorkflows();
+    } finally {
+      this.running.delete(key);
+    }
+  }
+
+  // Bridge a workflow human_gate to a relay selection prompt. Returns the chosen option
+  // name, or null when there's no controller / the app dismisses it / it times out — the
+  // runner treats null as fail-closed (defer the run). Only one gate is outstanding per
+  // running workflow (the runner awaits it), so a fresh id per call is sufficient.
+  private askGate(options: { name: string; description?: string }[], promptText: string): Promise<string | null> {
+    if (!this.controllerAttached || !this.relay) return Promise.resolve(null);
+    const id = randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingGates.delete(id);
+        resolve(null);
+      }, GATE_TIMEOUT_MS);
+      this.pendingGates.set(id, (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+      this.relay!.requestSelect(id, {
+        title: promptText,
+        options: options.map((o) => ({ value: o.name, label: o.description || o.name })),
+      });
+    });
+  }
+
+  // Execute a workflow `script` step as a gated child process. The runner ONLY calls this
+  // after its fail-closed posture check (attended + approved), so reaching here means the
+  // account authorized this exact command. Args are passed as argv (no shell), stdout is
+  // parsed as JSON into `output` when it's an object, and the process is hard-killed at its
+  // timeout so a hung script can't pin the run.
+  private runScript(step: Extract<Step, { type: "script" }>, cwd: string): Promise<ScriptRunResult> {
+    return new Promise((resolve) => {
+      let out = "";
+      let err = "";
+      let done = false;
+      const finish = (r: ScriptRunResult) => {
+        if (done) return;
+        done = true;
+        resolve(r);
+      };
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn(step.command, step.args, {
+          cwd,
+          env: { ...process.env, ...(step.env ?? {}) },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (e) {
+        return finish({ output: {}, status: "error", exitCode: -1, error: (e as Error).message });
+      }
+      const timer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        finish({ output: {}, status: "error", exitCode: -1, error: `script timed out after ${step.timeout ?? 120}s` });
+      }, (step.timeout ?? 120) * 1000);
+      child.stdout?.on("data", (d) => { out += String(d); });
+      child.stderr?.on("data", (d) => { err += String(d); });
+      child.on("error", (e) => { clearTimeout(timer); finish({ output: {}, status: "error", exitCode: -1, error: e.message }); });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        let output: Record<string, unknown> = {};
+        try { const p = JSON.parse(out.trim()); if (p && typeof p === "object" && !Array.isArray(p)) output = p as Record<string, unknown>; } catch { /* non-JSON stdout → no structured output */ }
+        finish({ output, status: code === 0 ? "ok" : "error", exitCode: code ?? -1, error: code === 0 ? undefined : (err.trim().slice(0, 500) || `exited ${code}`) });
+      });
+    });
+  }
+
+  // Drive one workflow `agent` step through the shared headless runSession (SAFE_TOOLS
+  // gate), then best-effort parse its stdout as a JSON object into structured `output`
+  // (so a later step can route on `{{ step.output.field }}`). Non-JSON output leaves
+  // `output` empty and lives in `text` — the raw/display path.
+  private async runWorkflowAgent(spec: AgentRunSpec): Promise<AgentRunResult> {
+    const config = loadDaemonConfig();
+    const model = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
+    const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
+    const tools = split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS;
+    const { out, status, error } = await this.runSession({ prompt: spec.prompt, cwd: spec.cwd, model, tools });
+    let output: Record<string, unknown> = {};
+    try { const p = JSON.parse(out.trim()); if (p && typeof p === "object" && !Array.isArray(p)) output = p as Record<string, unknown>; } catch { /* non-JSON → raw text only */ }
+    return { text: out, output, status, error };
   }
 
   private persistRun(id: string, patch: Partial<Routine>): void {

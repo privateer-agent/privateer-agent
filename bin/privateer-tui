@@ -38,6 +38,18 @@ pick_node() {
   echo "node"
 }
 
+# `privateer daemon [run|install|uninstall|status]` — the resident background daemon
+# (routines + app-driven headless task spawns). Handled HERE, before the Pi TUI exec
+# and before the moat-shim install (the daemon doesn't need the interactive extension
+# set), so it boots straight into src/daemon via bin/privateer-daemon.mjs.
+if [ "${1:-}" = "daemon" ]; then
+  shift
+  DAEMON_NODE="$(pick_node)"
+  DAEMON_ENV_ARGS=""
+  [ -f "$REPO/.env" ] && DAEMON_ENV_ARGS="--env-file=$REPO/.env"
+  exec "$DAEMON_NODE" ${DAEMON_ENV_ARGS:+"$DAEMON_ENV_ARGS"} "$REPO/bin/privateer-daemon.mjs" "$@"
+fi
+
 AGENT_DIR="${PRIVATEER_HOME:-$HOME/.privateer}/agent"
 EXT_DIR="$AGENT_DIR/extensions"
 mkdir -p "$EXT_DIR"
@@ -70,6 +82,13 @@ shim pi-subagents      "$REPO/node_modules/pi-subagents/src/extension/index.ts"
 
 CLI="$REPO/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 export PI_CODING_AGENT_DIR="$AGENT_DIR"
+# The binary pi-subagents spawns for each subagent child. Without this it falls back
+# to `pi` on PATH (getPiSpawnCommand) — which a Privateer install does NOT provide, so
+# every subagent spawn would fail with ENOENT. Point it at OUR bundled cli.js (it's
+# executable, `#!/usr/bin/env node`): the child then reads this same PI_CODING_AGENT_DIR
+# and DISCOVERS the moat shims above — so subagents run gated + private, no -e injection
+# (hence no double-load). Set only when unset so a power user can override it.
+export PI_SUBAGENT_PI_BINARY="${PI_SUBAGENT_PI_BINARY:-$CLI}"
 # Suppress Pi's upstream "Update Available — run `pi update`" banner. It's noise on a
 # Privateer install (our banner is the startup surface), it leaks the "pi" name, and
 # `pi update` would fight our npm-managed install. PI_SKIP_VERSION_CHECK disables ONLY
