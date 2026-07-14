@@ -110,6 +110,7 @@ async function main() {
   type GateController = import("../ext/permissionGate.ts").GateController;
   const { makePiPrivacyExtension } = await import("pi-privacy");
   const { makeAccountProvider } = await import("../providers/account.ts");
+  const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
   const { agentDir, configPath, globalDir } = await import("../config/paths.ts");
   const { redactText, collectSecrets } = await import("../util/redact.ts");
   const { MessagingBridge } = await import("./bridge.ts");
@@ -130,7 +131,7 @@ async function main() {
     process.exit(1);
   }
   const ch = cfg.channels ?? {};
-  const defaultModel: string = ch.model ?? cfg.defaultModel ?? "openrouter/openai/gpt-4o-mini";
+  const defaultModel: string = resolveDefaultModel({ explicit: ch.model ?? cfg.defaultModel });
   const defaultTools: string[] = Array.isArray(ch.tools) && ch.tools.length ? ch.tools : SAFE_TOOLS;
   const defaultPosture: Posture = normalizePosture(ch.posture) ?? "approve";
   const cwd: string = ch.cwd ?? process.cwd();

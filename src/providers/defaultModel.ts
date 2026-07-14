@@ -1,0 +1,119 @@
+// The single source of truth for "which model do we default to?" — shared by every
+// entry point that has to pick a model when the user hasn't named one: the REPL
+// (cli/chat.ts), the daemon (routines), the channels runner, and the login-time hook
+// that seeds Pi's TUI default (ensurePiDefaultModel).
+//
+// The bug this fixes: each of those sites used to hardcode `openrouter/openai/gpt-4o-
+// mini`, which assumes a BYO OpenRouter key. A user who is ONLY signed into their
+// Privateer subscription has no such key, so the runtime resolved to OpenRouter and
+// then failed at request time with "No API key found for openrouter". Being signed in
+// never nominated a model. resolveDefaultModel() makes the account channel the default
+// the moment credentials exist, and keeps the legacy BYO behaviour otherwise.
+
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { hasCredentials } from "../auth/privateer.ts";
+import { agentDir } from "../config/paths.ts";
+
+// The signed-in default: a NEAR confidential-compute (TEE, attestable) model — the
+// strongest privacy tier, and the same id the app shows first. Kept here as the one
+// definition; providers/account.ts imports it so its seed catalog can't drift.
+export const ACCOUNT_DEFAULT_MODEL_ID = "near/zai-org/GLM-5.1-FP8";
+export const ACCOUNT_DEFAULT_SPEC = `privateer/${ACCOUNT_DEFAULT_MODEL_ID}`;
+
+// Last-resort BYO default, preserved from the pre-resolver code so a user who set an
+// OpenRouter key (and isn't signed in) keeps the old behaviour. If they have no key
+// either, this still surfaces the familiar "No API key found for openrouter" — a clear
+// signal to run /login or set a key, which is better than an empty/undefined model.
+export const LEGACY_BYO_FALLBACK = "openrouter/openai/gpt-4o-mini";
+
+// BYO providers we can positively detect from the environment, in preference order.
+// Each model id matches Pi's own defaultModelPerProvider so it actually resolves once
+// the key is present. OpenRouter stays on the legacy cheap default for continuity.
+const BYO_BY_KEY: Array<{ env: string; spec: string }> = [
+  { env: "ANTHROPIC_API_KEY", spec: "anthropic/claude-opus-4-8" },
+  { env: "OPENAI_API_KEY", spec: "openai/gpt-5.5" },
+  { env: "OPENROUTER_API_KEY", spec: LEGACY_BYO_FALLBACK },
+];
+
+export interface ResolveDefaultModelOptions {
+  // An explicit, user-chosen spec (e.g. config.defaultModel, a channel's `model`).
+  // Wins over everything when non-empty — it's a deliberate choice, not a fallback.
+  explicit?: string | null;
+  // Override for testing / non-process callers. Defaults to process.env.
+  env?: NodeJS.ProcessEnv;
+  // Override the signed-in check (testing). Defaults to hasCredentials().
+  signedIn?: boolean;
+}
+
+// Resolve the model spec ("provider/id") to use when no model is named. Pure and
+// synchronous (only reads env + the credentials file), so it's safe to call from any
+// entry point at startup. Precedence:
+//   1. explicit user choice (config/channel)      — deliberate, always wins
+//   2. PRIVATEER_MODEL env                         — dev/global override
+//   3. signed into Privateer → the account default — the fix: subscription users
+//   4. a BYO provider whose key is present         — anthropic, openai, openrouter
+//   5. LEGACY_BYO_FALLBACK                          — familiar "add a key" signal
+export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): string {
+  const env = opts.env ?? process.env;
+
+  const explicit = opts.explicit?.trim();
+  if (explicit) return explicit;
+
+  const fromEnv = env.PRIVATEER_MODEL?.trim();
+  if (fromEnv) return fromEnv;
+
+  const signedIn = opts.signedIn ?? hasCredentials();
+  if (signedIn) return ACCOUNT_DEFAULT_SPEC;
+
+  for (const { env: keyName, spec } of BYO_BY_KEY) {
+    if (env[keyName]?.trim()) return spec;
+  }
+
+  return LEGACY_BYO_FALLBACK;
+}
+
+// Split a "provider/id" spec on its first slash (model ids themselves contain "/", so
+// only the first delimiter separates provider from model). Returns null for a spec
+// with no provider prefix.
+function splitSpec(spec: string): { provider: string; modelId: string } | null {
+  const slash = spec.indexOf("/");
+  if (slash <= 0 || slash === spec.length - 1) return null;
+  return { provider: spec.slice(0, slash), modelId: spec.slice(slash + 1) };
+}
+
+// The TUI consumer. Pi's own model resolution (findInitialModel) checks its saved
+// settings default BEFORE it falls through to a keyless built-in, but nothing ever
+// pointed that default at the account channel — Pi's provider-default table has no
+// `privateer` entry, so a signed-in-only user landed on OpenRouter and errored. On a
+// successful login we seed Pi's global settings.json (agentDir/settings.json — the
+// same file its SettingsManager reads) with the account default, so the NEXT launch
+// resolves cleanly.
+//
+// Guarded: we only write when the user has NOT already chosen a default (no
+// `defaultModel` key), so a deliberate /model choice is never stomped. Best-effort —
+// any read/parse/write failure is swallowed; a missing seed just means the user picks
+// a model once via /model. Returns the spec written, or null if we left it alone.
+export function ensurePiDefaultModel(spec: string = ACCOUNT_DEFAULT_SPEC): string | null {
+  const parts = splitSpec(spec);
+  if (!parts) return null;
+  const settingsPath = join(agentDir(), "settings.json");
+  try {
+    let settings: Record<string, unknown> = {};
+    if (existsSync(settingsPath)) {
+      const raw = readFileSync(settingsPath, "utf8").trim();
+      if (raw) settings = JSON.parse(raw) as Record<string, unknown>;
+    }
+    // Respect an existing choice — presence of the key means the user (or Pi) already
+    // has a default; don't override it.
+    if (typeof settings.defaultModel === "string" && settings.defaultModel.trim()) {
+      return null;
+    }
+    settings.defaultProvider = parts.provider;
+    settings.defaultModel = parts.modelId;
+    writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+    return spec;
+  } catch {
+    return null;
+  }
+}

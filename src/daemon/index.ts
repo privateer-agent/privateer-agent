@@ -15,6 +15,7 @@ import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { makePermissionGate, type GateController } from "../ext/permissionGate.ts";
 import { makePiPrivacyExtension } from "pi-privacy";
 import { makeAccountProvider } from "../providers/account.ts";
+import { resolveDefaultModel } from "../providers/defaultModel.ts";
 import { RelayClient, type TaskSpec } from "../remote/relayClient.ts";
 import { createLiveTaskSession, type LiveTaskHandle } from "../remote/liveTaskSession.ts";
 import { makeRoutinesControl } from "../remote/routinesControl.ts";
@@ -76,12 +77,14 @@ function loadDaemonConfig(): DaemonConfig {
   try {
     const raw = JSON.parse(readFileSync(configPath(), "utf8"));
     return {
-      defaultModel: typeof raw.defaultModel === "string" ? raw.defaultModel : "openrouter/openai/gpt-4o-mini",
+      // config.defaultModel is the explicit choice; absent it, resolve (account default
+      // when signed in, else BYO) rather than assuming a BYO OpenRouter key.
+      defaultModel: resolveDefaultModel({ explicit: typeof raw.defaultModel === "string" ? raw.defaultModel : undefined }),
       webhooks: raw.webhooks,
       providers: raw.providers,
     };
   } catch {
-    return { defaultModel: "openrouter/openai/gpt-4o-mini" };
+    return { defaultModel: resolveDefaultModel() };
   }
 }
 

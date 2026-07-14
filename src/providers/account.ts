@@ -20,6 +20,7 @@ import {
   notifySignedIn,
 } from "../auth/privateer.ts";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
+import { ACCOUNT_DEFAULT_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
 
 // Seed/fallback catalog: registered synchronously so the account provider has real
 // models the instant it loads (before the live /api/models fetch resolves) — in
@@ -28,7 +29,7 @@ import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } fro
 // confidential-compute (TEE, attestable) model — the strongest privacy tier. Also the
 // fallback list if the live listing can't be reached.
 const DEFAULT_MODELS = [
-  "near/zai-org/GLM-5.1-FP8",
+  ACCOUNT_DEFAULT_MODEL_ID,
   "anthropic/claude-sonnet-4.6",
   "openai/gpt-5.5",
   "deepseek/deepseek-v4-flash",
@@ -101,6 +102,11 @@ export const privateerOAuthProvider = {
     }
     if (cb.signal?.aborted) throw new Error("Login cancelled");
     const creds = await spawnAccountCredentials();
+    // Seed Pi's saved model default to the account channel, so the next launch resolves
+    // to a billable subscription model instead of falling through to a keyless built-in
+    // (the "No API key found for openrouter" trap). No-op if the user already has a
+    // chosen default. See providers/defaultModel.ts.
+    ensurePiDefaultModel();
     // The fresh path already fired notifySignedIn (pollForToken); fire here for the
     // already-linked path so the header re-renders to "connected" on this terminal too.
     if (wasLinked) notifySignedIn();

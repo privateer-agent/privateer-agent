@@ -4,7 +4,8 @@
 // the EngineEvent adapter, and Pi's real session.
 //
 // Run:  nvm use && node --env-file=.env --import tsx src/cli/chat.ts
-// Model: PRIVATEER_MODEL=provider/id  (default openrouter/openai/gpt-4o-mini)
+// Model: PRIVATEER_MODEL=provider/id  (else the account default when signed in, or a
+//        BYO-keyed provider — see providers/defaultModel.ts)
 //        e.g. tinfoil/llama3-3-70b to watch TEE posture go green.
 
 import "../boot.ts"; // env + attestation dispatcher, before any Pi import
@@ -33,8 +34,11 @@ async function main() {
   const priv = await import("../auth/privateer.ts");
   const { makeAccountProvider, accountPosture } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
+  const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
 
-  const spec = process.env.PRIVATEER_MODEL ?? "openrouter/openai/gpt-4o-mini";
+  // resolveDefaultModel() already honours PRIVATEER_MODEL first, then the account
+  // default when signed in, then a BYO key — one source of truth (defaultModel.ts).
+  const spec = resolveDefaultModel();
   const slash = spec.indexOf("/");
   const provider = spec.slice(0, slash);
   const modelId = spec.slice(slash + 1);
