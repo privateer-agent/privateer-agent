@@ -50,6 +50,7 @@ import { deliver, type RelayPusher, type CloudPusher } from "../routines/deliver
 import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, type IpcRequest, type IpcResponse } from "./ipc.ts";
+import { isHosted } from "../config/hosted.ts";
 
 // The safe, read-only toolset for unattended runs — Pi builtins with no
 // write/edit/bash, so a routine firing with nobody watching can't mutate the
@@ -59,6 +60,10 @@ import { startIpcServer, type IpcRequest, type IpcResponse } from "./ipc.ts";
 const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 
 const TICK_MS = 60_000; // scan for due routines once a minute
+// Harbor hosted mode (isHosted): suspend after this much idle time with no work,
+// and stay up if a routine is due within the lead window (avoids suspend→wake churn).
+const HOSTED_IDLE_MS = Number(process.env.HARBOR_IDLE_MS) || 5 * 60_000;
+const HOSTED_SUSPEND_MIN_LEAD_MS = Number(process.env.HARBOR_SUSPEND_MIN_LEAD_MS) || 2 * 60_000;
 const MAX_CLOUD_PLAINTEXT = 45_000;
 // How long a workflow `human_gate` (or a script-approval prompt) waits for the app to
 // answer before it fail-closes to "no response" (the runner then defers the run). Bounds
@@ -158,6 +163,11 @@ export class Daemon {
   private relay?: RelayClient;
   private controllerAttached = false;
   private relayTerminated = false;
+  // Harbor hosted mode: last time a controller attached or a routine ran. Drives
+  // idle-suspend (no `controller_detached` frame exists, so we gate on inactivity
+  // + no live work rather than on controllerAttached, which never resets while the
+  // socket stays open).
+  private lastActivityAt = Date.now();
   // Live, app-drivable sessions spawned on demand (task_spawn). Each has its OWN relay
   // terminal (task-<uuid>); the daemon just keeps handles so it can reap them on shutdown.
   private readonly liveTasks = new Map<string, LiveTaskHandle>();
@@ -406,6 +416,8 @@ export class Daemon {
 
   private onControllerAttached(): void {
     this.controllerAttached = true;
+    this.markActivity(); // hosted: a driver is present — reset the idle timer
+
     this.relay?.sendSnapshot([{ kind: "notice", text: "Privateer routines — results will appear here as they run." }]);
     // Version + this terminal's identity public key (so the app can confirm this is
     // the terminal it PINNED at link time before sealing channel tokens to it). No
@@ -506,6 +518,74 @@ export class Daemon {
         await this.runRoutine(r);
       }
     }
+    await this.hostedTick();
+  }
+
+  // ── Harbor hosted mode ──────────────────────────────────────────────────────
+  // A hosted daemon runs on-demand: it reports its earliest upcoming fire time so
+  // the server can wake it while suspended, and idle-suspends when there's no work.
+  // No-op on a user's own machine (isHosted() === false).
+
+  private markActivity(): void { this.lastActivityAt = Date.now(); }
+
+  // Earliest fire time (ms) across enabled, valid routines — mirrors tick()'s fire
+  // filters so we never report/wait on a routine the scheduler won't actually fire.
+  private earliestFireMs(): number | null {
+    let earliest: number | null = null;
+    for (const r of loadRoutines()) {
+      if (!r.enabled || triggerError(r)) continue;
+      const nrStr = r.nextRun ?? computeNextRun(r)?.toISOString();
+      if (!nrStr) continue;
+      const t = Date.parse(nrStr);
+      if (Number.isNaN(t)) continue;
+      if (earliest === null || t < earliest) earliest = t;
+    }
+    return earliest;
+  }
+
+  // Report our next fire time to the server so its scheduler can wake us. When
+  // `suspending`, also flip the server-side status to suspended (we're about to
+  // exit) so the sweeper knows to wake us again. Best-effort: an offline instance
+  // retries next tick; a suspend report failing means we stay up this tick.
+  private async reportSchedule(suspending = false): Promise<boolean> {
+    if (!isHosted() || !hasCredentials()) return true;
+    const earliest = this.earliestFireMs();
+    try {
+      const res = await apiRequest("/api/harbor/agent/schedule", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          termId: routineRelayId(),
+          nextRoutineAt: earliest !== null ? new Date(earliest).toISOString() : null,
+          ...(suspending ? { suspended: true } : {}),
+        }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private shouldSuspend(): boolean {
+    if (this.running.size > 0 || this.liveTasks.size > 0) return false;
+    if (Date.now() - this.lastActivityAt < HOSTED_IDLE_MS) return false;
+    const earliest = this.earliestFireMs();
+    if (earliest !== null && earliest - Date.now() < HOSTED_SUSPEND_MIN_LEAD_MS) return false;
+    return true;
+  }
+
+  private async hostedTick(): Promise<void> {
+    if (!isHosted()) return;
+    if (this.shouldSuspend()) {
+      // Tell the server we're suspending (+ our next fire) BEFORE exiting; only
+      // then tear down. If the report fails, stay up and try again next tick.
+      if (!(await this.reportSchedule(true))) return;
+      log("hosted: idle — suspending (server will wake for the next routine)");
+      this.stop();
+      void revokeLocalSessions().finally(() => process.exit(0));
+      return;
+    }
+    await this.reportSchedule();
   }
 
   // Execute a routine to completion and deliver the result. The one rewired seam:
@@ -514,6 +594,7 @@ export class Daemon {
   async runRoutine(routine: Routine): Promise<IpcResponse> {
     if (this.running.has(routine.id)) return { ok: false, message: "already running" };
     this.running.add(routine.id);
+    this.markActivity(); // hosted: work in progress — don't idle-suspend under it
     log(`running routine "${routine.name}"`);
 
     const config = loadDaemonConfig();

@@ -139,7 +139,7 @@ function shortCwd(): string {
 //  - signed in                              → "connected as <account>"
 //  - signed out AND the current model bills to a Privateer account → it can't run
 //    until they sign in, so say so plainly (warning)
-//  - signed out on their own key            → a quiet tease that /signin adds more
+//  - signed out on their own key            → a quiet tease that /login adds more
 function accountLine(modelProvider?: string): string {
   const u = priv.currentUser();
   if (u) {
@@ -147,9 +147,9 @@ function accountLine(modelProvider?: string): string {
     return `${GREEN}connected${DIM} as ${RESET}${OCEAN_LIGHT}${label}${RESET}`;
   }
   if (modelProvider === "privateer") {
-    return `${YELLOW}not signed in · /signin to use this model${RESET}`;
+    return `${YELLOW}not signed in · /login to use this model${RESET}`;
   }
-  return `${DIM}not signed in · ${OCEAN_LIGHT}/signin${DIM} to connect your account${RESET}`;
+  return `${DIM}not signed in · ${OCEAN_LIGHT}/login${DIM} to connect your account${RESET}`;
 }
 
 // Is dotted version `a` newer than `b`? Plain numeric compare of major.minor.patch —
@@ -430,7 +430,7 @@ export default function privateerBrand(pi: any): void {
     ctx?.ui?.setTitle?.("Privateer");
     refresh(ctx);
     // No startup notify here: the banner's account line already surfaces the
-    // "not signed in · /signin" prompt, so a second line would just be noise.
+    // "not signed in · /login" prompt, so a second line would just be noise.
   });
 
   // Keep the header's account line in sync with the picked model (the "this model
