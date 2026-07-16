@@ -47,20 +47,88 @@ function seedModel(id: string) {
   };
 }
 
-// Fetch the account channel's enabled model catalog. `GET /api/models` is the server's
-// public list of billable models (`{ models: [{ modelId }] }`) — the same set the app
-// shows. (The `/api/agent/v1` base only implements chat/completions, no /models route.)
-// Falls back to DEFAULT_MODELS on any failure.
-export async function fetchAccountModels(): Promise<string[]> {
+// One catalog entry with its server-asserted baseline privacy tier.
+export interface AccountModelInfo {
+  id: string;
+  tier: PrivacyTier;
+}
+
+// The set of tier strings pi-privacy defines (posture/tiers.ts). We only trust a
+// server-supplied tier if it's one of these — anything else falls back to a prefix
+// heuristic, so a server typo or older/newer server can never inject a bogus tier.
+const VALID_TIERS = new Set<PrivacyTier>([
+  "tee-verified",
+  "tee-unverified",
+  "local",
+  "zdr-enforced",
+  "zdr-policy",
+  "standard",
+]);
+
+// Baseline tier when the server doesn't (yet) send one. Honest-labeling rule: a
+// confidential-compute model is only *claimed* here (tee-unverified) — the picker
+// upgrades it to tee-verified live via attestation (accountPosture). Everything
+// else with no server signal is "standard": we don't assert ZDR we can't back.
+function tierFromPrefix(modelId: string): PrivacyTier {
+  return modelId.startsWith("near/") || modelId.startsWith("tinfoil/") ? "tee-unverified" : "standard";
+}
+
+function normalizeTier(tier: string | undefined, modelId: string): PrivacyTier {
+  return tier && VALID_TIERS.has(tier as PrivacyTier) ? (tier as PrivacyTier) : tierFromPrefix(modelId);
+}
+
+// Baseline tiers for the account catalog, keyed by modelId. Populated by
+// fetchAccountCatalog() so the /models picker can shield each row without re-fetching.
+// A live NEAR attestation (accountPosture) can still upgrade a row to tee-verified.
+const accountTierMap = new Map<string, PrivacyTier>();
+
+// The server-asserted baseline tier for an account model, or undefined if we haven't
+// seen it in a catalog fetch. Used by the /models picker (privateer-models.ts).
+export function accountBaselineTier(modelId: string): PrivacyTier | undefined {
+  return accountTierMap.get(modelId);
+}
+
+// Whether a catalog fetch has populated the tier map at least once. The /models
+// picker uses this to decide if it must fetch before opening (first-open race with
+// the provider's background fetch) vs. render immediately from the cached tiers.
+export function accountCatalogLoaded(): boolean {
+  return accountTierMap.size > 0;
+}
+
+// Fetch the account channel's enabled model catalog WITH per-model privacy tiers.
+// `GET /api/models` is the server's public list of billable models
+// (`{ models: [{ modelId, privacy: { tier } }] }`) — the same set the app shows.
+// (The `/api/agent/v1` base only implements chat/completions, no /models route.)
+// Falls back to DEFAULT_MODELS (prefix-derived tiers) on any failure. Side effect:
+// refreshes accountTierMap.
+export async function fetchAccountCatalog(): Promise<AccountModelInfo[]> {
+  const fallback = (): AccountModelInfo[] =>
+    DEFAULT_MODELS.map((id) => ({ id, tier: tierFromPrefix(id) }));
+  let infos: AccountModelInfo[];
   try {
     const res = await fetch(`${serverBaseUrl()}/api/models`);
-    if (!res.ok) return DEFAULT_MODELS;
-    const data = (await res.json()) as { models?: { modelId?: string }[] };
-    const ids = (data.models ?? []).map((m) => m.modelId).filter((x): x is string => !!x);
-    return ids.length ? ids : DEFAULT_MODELS;
+    if (!res.ok) {
+      infos = fallback();
+    } else {
+      const data = (await res.json()) as {
+        models?: { modelId?: string; privacy?: { tier?: string } }[];
+      };
+      const parsed = (data.models ?? [])
+        .map((m) => (m.modelId ? { id: m.modelId, tier: normalizeTier(m.privacy?.tier, m.modelId) } : null))
+        .filter((x): x is AccountModelInfo => !!x);
+      infos = parsed.length ? parsed : fallback();
+    }
   } catch {
-    return DEFAULT_MODELS;
+    infos = fallback();
   }
+  accountTierMap.clear();
+  for (const info of infos) accountTierMap.set(info.id, info.tier);
+  return infos;
+}
+
+// Back-compat id-only view over fetchAccountCatalog (registerProvider only needs ids).
+export async function fetchAccountModels(): Promise<string[]> {
+  return (await fetchAccountCatalog()).map((m) => m.id);
 }
 
 // The Pi OAuth provider (Omit<OAuthProviderInterface, "id"> — Pi supplies the id from
@@ -199,8 +267,10 @@ export function makeAccountProvider() {
         models: ids.map(seedModel),
       });
     register(DEFAULT_MODELS); // immediate: provider exists this tick
-    void fetchAccountModels()
-      .then((ids) => ids.length && register(ids)) // refine to the live catalog
+    // Refine to the live catalog. fetchAccountCatalog also populates accountTierMap
+    // as a side effect, so the /models picker can shield each row without re-fetching.
+    void fetchAccountCatalog()
+      .then((infos) => infos.length && register(infos.map((m) => m.id)))
       .catch(() => {
         /* keep the fallback model */
       });

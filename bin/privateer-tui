@@ -58,7 +58,7 @@ mkdir -p "$EXT_DIR"
 # ABSOLUTE path so the target's own relative imports resolve from the repo (a plain
 # symlink would resolve them relative to the shim's location and break). We remove
 # any shim we previously managed first, so a dropped package can't linger and reload.
-MANAGED="privateer-brand privateer-context privateer-gate privateer-account privateer-posture privateer-tools privateer-privacy pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
+MANAGED="privateer-brand privateer-context privateer-gate privateer-account privateer-models privateer-posture privateer-tools privateer-privacy pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
 for name in $MANAGED; do rm -f "$EXT_DIR/$name.ts"; done
 shim() { printf 'export { default } from "%s";\n' "$2" > "$EXT_DIR/$1.ts"; }
 # Branding + the account sign-in surface (banner, ⚓ badge, /signin /signout).
@@ -67,6 +67,10 @@ shim privateer-brand   "$REPO/extensions/privateer-brand.ts"
 shim privateer-context "$REPO/extensions/privateer-context.ts"
 shim privateer-gate    "$REPO/extensions/privateer-gate.ts"
 shim privateer-account "$REPO/extensions/privateer-account.ts"
+# The /models picker — searchable model selector with per-row privacy shields
+# (TEE / ZDR / standard). Pi's built-in /model is redirected here by the
+# patch-package patch (patches/@earendil-works+pi-coding-agent+*.patch).
+shim privateer-models  "$REPO/extensions/privateer-models.ts"
 shim privateer-posture "$REPO/extensions/privateer-posture.ts"
 shim privateer-tools   "$REPO/extensions/privateer-tools.ts"
 # pi-privacy wrapped with the account-channel tier resolver (privateer/near… = TEE),

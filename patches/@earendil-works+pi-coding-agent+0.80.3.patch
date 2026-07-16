@@ -1,0 +1,23 @@
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
+index 5d65200..a997ad7 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
+@@ -2042,7 +2042,17 @@ export class InteractiveMode {
+             if (text === "/model" || text.startsWith("/model ")) {
+                 const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
+                 this.editor.setText("");
+-                await this.handleModelCommand(searchTerm);
++                // Privateer redirect: when the shielded picker extension is loaded
++                // (registers `/models`), route `/model` to it so users get the
++                // privacy-posture picker via muscle memory. Falls back to Pi's
++                // built-in picker when the extension isn't present.
++                const privateerModels = searchTerm ? `/models ${searchTerm}` : "/models";
++                if (this.isExtensionCommand(privateerModels)) {
++                    await this.session.prompt(privateerModels);
++                }
++                else {
++                    await this.handleModelCommand(searchTerm);
++                }
+                 return;
+             }
+             if (text === "/export" || text.startsWith("/export ")) {
