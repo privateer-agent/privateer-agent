@@ -1,6 +1,6 @@
 {
   "name": "privateer-agent",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Privateer — a provider-agnostic, safe-by-default terminal coding agent with TEE/Tinfoil attestation, rebuilt on the Pi toolkit. Bring your own model across 20 providers.",
   "type": "module",
   "license": "MIT",
@@ -48,14 +48,14 @@
     "dev": "tsx watch src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package --error-on-fail"
   },
   "engines": {
     "node": ">=22.19.0"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.80.3",
-    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "0.80.3",
     "@earendil-works/pi-tui": "^0.80.3",
     "@hypabolic/pi-hypa": "^0.1.6",
     "@juicesharp/rpiv-web-tools": "^1.20.0",
