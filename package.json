@@ -1,6 +1,6 @@
 {
   "name": "privateer-agent",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Privateer — a provider-agnostic, safe-by-default terminal coding agent with TEE/Tinfoil attestation, rebuilt on the Pi toolkit. Bring your own model across 20 providers.",
   "type": "module",
   "license": "MIT",
