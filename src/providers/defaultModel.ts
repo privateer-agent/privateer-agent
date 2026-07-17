@@ -16,10 +16,18 @@ import { hasCredentials } from "../auth/privateer.ts";
 import { agentDir } from "../config/paths.ts";
 
 // The signed-in default: a NEAR confidential-compute (TEE, attestable) model — the
-// strongest privacy tier, and the same id the app shows first. Kept here as the one
-// definition; providers/account.ts imports it so its seed catalog can't drift.
+// strongest privacy tier the account channel offers, and the same id the app shows
+// first. Kept here as the one definition; providers/account.ts imports it so its seed
+// catalog can't drift.
 export const ACCOUNT_DEFAULT_MODEL_ID = "near/zai-org/GLM-5.1-FP8";
 export const ACCOUNT_DEFAULT_SPEC = `privateer/${ACCOUNT_DEFAULT_MODEL_ID}`;
+
+// Tinfoil's GLM 5.2 — CLIENT-side-attested TEE inference (the live TLS key is bound to
+// the enclave's quote), the strongest privacy tier we offer, stronger than the account's
+// server-proxied NEAR channel. Preferred whenever a Tinfoil key is present. Kept as the
+// one definition so bin/privateer-tui and this resolver agree. See extensions/privateer-
+// privacy.ts, which registers `tinfoil/glm-5-2` (and friends) on the tinfoil provider.
+export const TINFOIL_DEFAULT_SPEC = "tinfoil/glm-5-2";
 
 // Last-resort BYO default, preserved from the pre-resolver code so a user who set an
 // OpenRouter key (and isn't signed in) keeps the old behaviour. If they have no key
@@ -48,12 +56,14 @@ export interface ResolveDefaultModelOptions {
 
 // Resolve the model spec ("provider/id") to use when no model is named. Pure and
 // synchronous (only reads env + the credentials file), so it's safe to call from any
-// entry point at startup. Precedence:
+// entry point at startup. Precedence (mirrors bin/privateer-tui's launch logic, so the
+// launcher, the REPL, and the next-launch seed all agree):
 //   1. explicit user choice (config/channel)      — deliberate, always wins
 //   2. PRIVATEER_MODEL env                         — dev/global override
-//   3. signed into Privateer → the account default — the fix: subscription users
-//   4. a BYO provider whose key is present         — anthropic, openai, openrouter
-//   5. LEGACY_BYO_FALLBACK                          — familiar "add a key" signal
+//   3. Tinfoil key present → Tinfoil GLM 5.2       — strongest (client-attested) privacy
+//   4. signed into Privateer → the account default — subscription users, no BYO key
+//   5. a BYO provider whose key is present         — anthropic, openai, openrouter
+//   6. LEGACY_BYO_FALLBACK                          — familiar "add a key" signal
 export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): string {
   const env = opts.env ?? process.env;
 
@@ -63,6 +73,10 @@ export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): stri
   const fromEnv = env.PRIVATEER_MODEL?.trim();
   if (fromEnv) return fromEnv;
 
+  // Privacy-first: a Tinfoil key means we can run verifiable TEE inference right now,
+  // which we prefer even over the account's NEAR channel — same order the launcher uses.
+  if (env.TINFOIL_API_KEY?.trim()) return TINFOIL_DEFAULT_SPEC;
+
   const signedIn = opts.signedIn ?? hasCredentials();
   if (signedIn) return ACCOUNT_DEFAULT_SPEC;
 
@@ -71,6 +85,17 @@ export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): stri
   }
 
   return LEGACY_BYO_FALLBACK;
+}
+
+// The confidential model to switch the LIVE session onto the moment a user signs in.
+// A terminal launched with no credentials is pinned by `--model` to the keyless
+// OpenRouter fallback; without an in-session switch it stays there and the first prompt
+// after /login dead-ends on "No API key found for openrouter". This resolves the model
+// sign-in should activate RIGHT AWAY: Tinfoil GLM 5.2 when a key is present, otherwise
+// the account's NEAR confidential channel (billable to the subscription, no BYO key).
+// PRIVATEER_MODEL still wins — a deliberate override is never stomped.
+export function resolveSignedInModel(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveDefaultModel({ env, signedIn: true });
 }
 
 // Split a "provider/id" spec on its first slash (model ids themselves contain "/", so

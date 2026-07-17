@@ -22,3 +22,6 @@ work/
 
 # pi-subagents runtime artifacts (transcripts/outputs from subagent runs)
 .pi-subagents/
+
+# Self-contained release bundles (built by scripts/build-bundle.mjs)
+dist-bundle/

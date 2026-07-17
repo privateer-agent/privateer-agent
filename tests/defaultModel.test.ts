@@ -9,8 +9,10 @@ import { join } from "node:path";
 import {
   ACCOUNT_DEFAULT_SPEC,
   LEGACY_BYO_FALLBACK,
+  TINFOIL_DEFAULT_SPEC,
   ensurePiDefaultModel,
   resolveDefaultModel,
+  resolveSignedInModel,
 } from "../src/providers/defaultModel.ts";
 import { agentDir } from "../src/config/paths.ts";
 
@@ -48,6 +50,27 @@ test("resolveDefaultModel: signed out prefers a BYO key, in order", () => {
 
 test("resolveDefaultModel: signed out with no key falls back to the legacy default", () => {
   assert.equal(resolveDefaultModel({ env: {}, signedIn: false }), LEGACY_BYO_FALLBACK);
+});
+
+test("resolveDefaultModel: a Tinfoil key wins over the account channel (privacy-first)", () => {
+  // Even signed in, Tinfoil's client-attested TEE beats the server-proxied NEAR channel.
+  assert.equal(resolveDefaultModel({ env: { TINFOIL_API_KEY: "tk" }, signedIn: true }), TINFOIL_DEFAULT_SPEC);
+  // And signed out it beats the OpenRouter fallback / other BYO keys.
+  assert.equal(resolveDefaultModel({ env: { TINFOIL_API_KEY: "tk" }, signedIn: false }), TINFOIL_DEFAULT_SPEC);
+  assert.equal(
+    resolveDefaultModel({ env: { TINFOIL_API_KEY: "tk", OPENROUTER_API_KEY: "or" }, signedIn: false }),
+    TINFOIL_DEFAULT_SPEC,
+  );
+  // PRIVATEER_MODEL still outranks it.
+  assert.equal(
+    resolveDefaultModel({ env: { TINFOIL_API_KEY: "tk", PRIVATEER_MODEL: "openai/gpt-5.5" }, signedIn: false }),
+    "openai/gpt-5.5",
+  );
+});
+
+test("resolveSignedInModel: Tinfoil when keyed, else the account channel", () => {
+  assert.equal(resolveSignedInModel({ TINFOIL_API_KEY: "tk" }), TINFOIL_DEFAULT_SPEC);
+  assert.equal(resolveSignedInModel({}), ACCOUNT_DEFAULT_SPEC);
 });
 
 test("ensurePiDefaultModel: seeds provider+model when settings.json has no default", () => {

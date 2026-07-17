@@ -10,9 +10,14 @@
 
 import "../boot.ts"; // env + attestation dispatcher, before any Pi import
 import { fileURLToPath } from "node:url"; // builtin, safe pre-boot
+import { cliPalette } from "../ui/palette.ts"; // no Pi deps → safe pre-boot
 import type { GateController } from "../ext/permissionGate.ts"; // type-only → erased, safe pre-boot
 
-const RESET = "\x1b[0m", DIM = "\x1b[2m", CYAN = "\x1b[36m", YELLOW = "\x1b[33m", RED = "\x1b[31m", GREEN = "\x1b[32m";
+// This lean REPL has no Pi TUI (and so no Theme), so it detects the terminal background
+// itself (COLORFGBG) and picks a palette — on a light terminal the standard "\x1b[33m"
+// yellow / "\x1b[36m" cyan and faint "\x1b[2m" dim wash out, so cliPalette swaps in dark
+// 256-colour indices there. On a dark terminal it's the same named colours as before.
+const { RESET, DIM, CYAN, YELLOW, RED, GREEN } = cliPalette();
 
 async function main() {
   const readline = await import("node:readline");
@@ -34,7 +39,7 @@ async function main() {
   const priv = await import("../auth/privateer.ts");
   const { makeAccountProvider, accountPosture } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
-  const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
+  const { resolveDefaultModel, resolveSignedInModel } = await import("../providers/defaultModel.ts");
 
   // resolveDefaultModel() already honours PRIVATEER_MODEL first, then the account
   // default when signed in, then a BYO key — one source of truth (defaultModel.ts).
@@ -470,6 +475,14 @@ async function main() {
         },
       });
       console.log(`${GREEN}Signed in as ${user.email ?? user.id}.${RESET}`);
+      // Move the live session onto a confidential model right away, so the next prompt
+      // doesn't dead-end on the keyless launch model ("No API key found for openrouter").
+      // resolveSignedInModel prefers Tinfoil GLM 5.2, else the account's NEAR channel;
+      // PRIVATEER_MODEL (a deliberate override) is respected and left alone.
+      if (!process.env.PRIVATEER_MODEL?.trim()) {
+        const target = resolveSignedInModel();
+        if (target !== currentSpec) await switchModel(target, false);
+      }
     } catch (e) {
       console.log(`${RED}${(e as Error).message}${RESET}`);
     }

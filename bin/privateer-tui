@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# Launch Pi's full interactive TUI with the Privateer moat + tool packs. The moat is
-# installed as re-export SHIMS in the agent dir's extensions/, so BOTH this TUI and
-# any subagents it spawns (which run as child `pi` processes reading the agent dir)
-# load the identical set — including our permission gate. So subagent tool calls are
-# gated too (the gate runs bypass-within-restricted-tools headlessly; danger.ts still
-# blocks destructive shell). One source of truth via discovery — no -e (which would
-# double-load vs discovery).
-#
-# Runs in the current directory. Model via PRIVATEER_MODEL=provider/id.
+# Thin unix shim: pick a Node, then hand off to the cross-platform launcher
+# (bin/privateer-launch.mjs), which is the single source of launch logic shared with
+# the Windows privateer.cmd. All the real work — moat-shim install, model pick,
+# update/daemon dispatch, exec into Pi's TUI — lives in the launcher.
 set -euo pipefail
-# Resolve through symlinks so REPO points at the real repo, not the symlink dir.
+# Resolve through symlinks so REPO points at the real bundle/repo dir.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -18,16 +13,9 @@ while [ -h "$SOURCE" ]; do
 done
 REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
-# `privateer update` — pull the latest release from npm and exit. Handled here in the
-# launcher (not the TUI) so it works even when a broken install won't boot. npm rewrites
-# the global bin in place; replacing it while this process runs is safe on unix.
-if [ "${1:-}" = "update" ]; then
-  echo "Updating privateer-agent to the latest release…"
-  npm install -g privateer-agent@latest
-  exit $?
-fi
-
+# Bundled runtime wins; else a system node >=22; else an nvm node; else PATH `node`.
 pick_node() {
+  if [ -x "$REPO/node" ] && [ -f "$REPO/BUNDLE_INFO.json" ]; then echo "$REPO/node"; return; fi
   if command -v node >/dev/null 2>&1 \
      && node -e 'process.exit((+process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
     command -v node; return
@@ -38,127 +26,4 @@ pick_node() {
   echo "node"
 }
 
-# `privateer daemon [run|install|uninstall|status]` — the resident background daemon
-# (routines + app-driven headless task spawns). Handled HERE, before the Pi TUI exec
-# and before the moat-shim install (the daemon doesn't need the interactive extension
-# set), so it boots straight into src/daemon via bin/privateer-daemon.mjs.
-if [ "${1:-}" = "daemon" ]; then
-  shift
-  DAEMON_NODE="$(pick_node)"
-  DAEMON_ENV_ARGS=""
-  [ -f "$REPO/.env" ] && DAEMON_ENV_ARGS="--env-file=$REPO/.env"
-  exec "$DAEMON_NODE" ${DAEMON_ENV_ARGS:+"$DAEMON_ENV_ARGS"} "$REPO/bin/privateer-daemon.mjs" "$@"
-fi
-
-AGENT_DIR="${PRIVATEER_HOME:-$HOME/.privateer}/agent"
-EXT_DIR="$AGENT_DIR/extensions"
-mkdir -p "$EXT_DIR"
-
-# Install/refresh the moat + tool-pack shims. Each shim re-exports its target by
-# ABSOLUTE path so the target's own relative imports resolve from the repo (a plain
-# symlink would resolve them relative to the shim's location and break). We remove
-# any shim we previously managed first, so a dropped package can't linger and reload.
-MANAGED="privateer-brand privateer-context privateer-gate privateer-account privateer-models privateer-posture privateer-tools privateer-privacy pi-privacy pi-web-access rpiv-web-tools pi-mcp-adapter pi-hypa pi-subagents"
-for name in $MANAGED; do rm -f "$EXT_DIR/$name.ts"; done
-shim() { printf 'export { default } from "%s";\n' "$2" > "$EXT_DIR/$1.ts"; }
-# Branding + the account sign-in surface (banner, ⚓ badge, /signin /signout).
-shim privateer-brand   "$REPO/extensions/privateer-brand.ts"
-# PRIVATEER.md project-context loading (like AGENTS.md/CLAUDE.md) + the /init command.
-shim privateer-context "$REPO/extensions/privateer-context.ts"
-shim privateer-gate    "$REPO/extensions/privateer-gate.ts"
-shim privateer-account "$REPO/extensions/privateer-account.ts"
-# The /models picker — searchable model selector with per-row privacy shields
-# (TEE / ZDR / standard). Pi's built-in /model is redirected here by the
-# patch-package patch (patches/@earendil-works+pi-coding-agent+*.patch).
-shim privateer-models  "$REPO/extensions/privateer-models.ts"
-shim privateer-posture "$REPO/extensions/privateer-posture.ts"
-shim privateer-tools   "$REPO/extensions/privateer-tools.ts"
-# pi-privacy wrapped with the account-channel tier resolver (privateer/near… = TEE),
-# so it replaces loading pi-privacy's default entry.
-shim privateer-privacy "$REPO/extensions/privateer-privacy.ts"
-# Privacy-aligned web tools: pluggable backends (SearXNG self-hosted = private; no
-# WebView). Pick the backend with /web-tools, or set SEARXNG_URL. Replaces
-# pi-web-access (opened a WebView + defaulted to Exa, a 3rd-party search).
-shim rpiv-web-tools    "$REPO/node_modules/@juicesharp/rpiv-web-tools/index.ts"
-shim pi-mcp-adapter    "$REPO/node_modules/pi-mcp-adapter/index.ts"
-shim pi-hypa           "$REPO/node_modules/@hypabolic/pi-hypa/extensions/index.ts"
-shim pi-subagents      "$REPO/node_modules/pi-subagents/src/extension/index.ts"
-
-CLI="$REPO/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
-export PI_CODING_AGENT_DIR="$AGENT_DIR"
-# The binary pi-subagents spawns for each subagent child. Without this it falls back
-# to `pi` on PATH (getPiSpawnCommand) — which a Privateer install does NOT provide, so
-# every subagent spawn would fail with ENOENT. Point it at OUR bundled cli.js (it's
-# executable, `#!/usr/bin/env node`): the child then reads this same PI_CODING_AGENT_DIR
-# and DISCOVERS the moat shims above — so subagents run gated + private, no -e injection
-# (hence no double-load). Set only when unset so a power user can override it.
-export PI_SUBAGENT_PI_BINARY="${PI_SUBAGENT_PI_BINARY:-$CLI}"
-# Suppress Pi's upstream "Update Available — run `pi update`" banner. It's noise on a
-# Privateer install (our banner is the startup surface), it leaks the "pi" name, and
-# `pi update` would fight our npm-managed install. PI_SKIP_VERSION_CHECK disables ONLY
-# the version fetch — unlike PI_OFFLINE it still lets fd/rg download on first run.
-export PI_SKIP_VERSION_CHECK=1
-NODE_BIN="$(pick_node)"
-
-# Quiet Pi's built-in startup chatter so our banner is the only greeting. Each key is
-# set only when unset, so a user's own settings.json toggle (or --verbose) still wins:
-#   quietStartup       — hide the [Extensions]/[Context]/[Skills]/… resource listing
-#   collapseChangelog  — never dump Pi's "What's New" changelog wall into the chat
-#   lastChangelogVersion — sentinel so Pi finds no "new" entries to show on upgrade;
-#                          release notes live in the npm README / GitHub releases instead
-"$NODE_BIN" -e '
-const fs = require("fs"), p = process.argv[1];
-let s = {}; try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
-let m = false;
-if (s.quietStartup === undefined) { s.quietStartup = true; m = true; }
-if (s.collapseChangelog === undefined) { s.collapseChangelog = true; m = true; }
-if (s.lastChangelogVersion === undefined) { s.lastChangelogVersion = "9999.0.0"; m = true; }
-if (m) fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
-' "$AGENT_DIR/settings.json" 2>/dev/null || true
-
-# Passive update check: refresh the cached "latest npm version" at most ~daily, in the
-# BACKGROUND so it never blocks or breaks launch (offline-safe — a failed fetch just
-# leaves the stale cache in place). The banner (privateer-brand) reads this cache and
-# shows a one-line "↑ vX available · run privateer update" notice when we're behind. We
-# never auto-install — the user stays in control of when new code lands (the whole point
-# of an attestable tool). Detached with </dev/null &, so it outlives our exec into node.
-UPDATE_CACHE="${PRIVATEER_HOME:-$HOME/.privateer}/update-check.json"
-if [ -z "$(find "$UPDATE_CACHE" -mtime -1 2>/dev/null)" ]; then
-  (
-    latest="$(npm view privateer-agent version 2>/dev/null || true)"
-    case "$latest" in
-      [0-9]*) printf '{"latest":"%s"}\n' "$latest" > "$UPDATE_CACHE.tmp" 2>/dev/null \
-                && mv -f "$UPDATE_CACHE.tmp" "$UPDATE_CACHE" 2>/dev/null ;;
-    esac
-  ) </dev/null >/dev/null 2>&1 &
-fi
-
-# Default model. An explicit PRIVATEER_MODEL always wins. Otherwise prefer Tinfoil's
-# GLM 5.2 when a Tinfoil key is available: verifiable TEE inference with CLIENT-side
-# attestation (the live TLS key is bound to the enclave's quote), the strongest privacy
-# tier we offer — stronger than the account's server-proxied NEAR channel. Failing that,
-# use the signed-in Privateer account's NEAR confidential-compute channel; with neither,
-# fall back to a cheap OpenRouter model. The Tinfoil key may sit in the ambient env or in
-# the dev .env the launcher loads below, so check both.
-CRED="${PRIVATEER_HOME:-$HOME/.privateer}/credentials.json"
-have_tinfoil_key() {
-  [ -n "${TINFOIL_API_KEY:-}" ] && return 0
-  [ -f "$REPO/.env" ] && grep -qE '^TINFOIL_API_KEY=.+' "$REPO/.env"
-}
-if [ -n "${PRIVATEER_MODEL:-}" ]; then
-  MODEL="$PRIVATEER_MODEL"
-elif have_tinfoil_key; then
-  MODEL="tinfoil/glm-5-2"
-elif [ -f "$CRED" ]; then
-  MODEL="privateer/near/zai-org/GLM-5.1-FP8"
-else
-  MODEL="openrouter/openai/gpt-4o-mini"
-fi
-
-# Dev convenience: load provider keys from the repo's .env if present. A real install
-# has none — so only pass the flag when the file exists (using --env-file-if-exists
-# unconditionally would print "…/.env not found. Continuing without it." on every
-# launch, muddying the startup banner). No .env → rely on the ambient environment.
-ENV_ARGS=""
-[ -f "$REPO/.env" ] && ENV_ARGS="--env-file=$REPO/.env"
-exec "$NODE_BIN" ${ENV_ARGS:+"$ENV_ARGS"} "$CLI" --model "$MODEL" "$@"
+exec "$(pick_node)" "$REPO/bin/privateer-launch.mjs" "$@"

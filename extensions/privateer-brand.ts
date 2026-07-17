@@ -24,7 +24,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import * as priv from "../src/auth/privateer.ts";
 import { makeAccountProvider } from "../src/providers/account.ts";
+import { resolveSignedInModel } from "../src/providers/defaultModel.ts";
 import { discoverContextFiles, onContextChanged } from "../src/context.ts";
+import { type Palette, paletteFor } from "../src/ui/palette.ts";
 
 const VERSION: string = (() => {
   try {
@@ -34,37 +36,26 @@ const VERSION: string = (() => {
   }
 })();
 
-// ── palette (Privateer brand) ────────────────────────────────────────────────
-// 256-color (8-bit), NOT 24-bit truecolor: macOS Terminal.app doesn't support
-// truecolor and mangles it (the old indigo/cyan came out green). These indices are
-// universally supported. Navy (the logo mark) is too dark to read on a dark terminal, so
-// the whole banner — silhouette, wordmark, frame, and accents — is painted white: a clean
-// single-color mark, like the logo but legible on dark.
-const ESC = "\x1b[";
-const RESET = `${ESC}0m`;
-const BOLD = `${ESC}1m`;
-const c = (n: number): string => `${ESC}38;5;${n}m`;
-const OCEAN = c(231); // white (#ffffff) — anchor / wordmark "P"
-const OCEAN_LIGHT = c(231); // white (#ffffff) — wordmark, version, path
-const BORDER = c(231); // white (#ffffff) — the frame
-const DIM = `${ESC}90m`;
-const GREEN = `${ESC}32m`;
-const YELLOW = `${ESC}33m`;
+// The banner paints from Pi's ACTIVE theme (paletteFor, in src/ui/palette.ts) rather
+// than a fixed colour. It used to hardcode everything to white (256-color 231) "because
+// navy is too dark on a dark terminal" — which inverts the problem on a LIGHT terminal
+// (white-on-white → the whole mark, wordmark, and frame vanish). Pi auto-detects the
+// terminal background and picks a light or dark theme; ctx.ui.setHeader hands our factory
+// that live Theme (and ctx.ui.theme exposes it to the sign-in widget), so the banner's
+// colours resolve to dark ink on a light bg and light ink on a dark bg.
 
 // The Privateer mark: our symbol — a padlock (with a keyhole) fused into an anchor,
 // "bring your own model" meets lock-and-key privacy — drawn from the app's logo. It's
-// rendered with terminal HALF-BLOCKS, so each text row packs TWO pixel rows: a "▀"
-// whose FOREGROUND paints the top pixel and BACKGROUND the bottom (one pixel → "▀"/"▄"
-// on the default bg; none → a plain space). 256-color indices only, same reason as the
-// palette above. Every built line is MARK_W visible cells wide (SGR escapes don't
-// count), so the text column beside it stays aligned. To redraw: edit PIXELS (each char
-// is a PX palette key), keeping every row MARK_W long and the row COUNT even — the
-// builder derives the escapes from that.
+// rendered with terminal HALF-BLOCKS, so each text row packs TWO pixel rows. The mark is
+// a SINGLE colour (every set pixel is the accent), so a cell never needs two different
+// colours: both pixels set → a full block "█", top only → "▀", bottom only → "▄", none →
+// a space — all painted with the accent as FOREGROUND, no background cells at all. That
+// makes the mark inherit the theme's ink (dark on light, light on dark) with one colour,
+// and sidesteps the old bg-bleed hazard entirely. Every built line is MARK_W visible
+// cells wide (SGR escapes don't count), so the text column beside it stays aligned. To
+// redraw: edit PIXELS (each char is "O" ink or "." transparent), keeping every row MARK_W
+// long and the row COUNT even — the builder pairs rows into half-block cells.
 const MARK_W = 12;
-const PX: Record<string, number | null> = {
-  ".": null, // transparent — the frame (and the knocked-out keyhole) shows through
-  O: 231, // white (#ffffff, top of the 256-color cube) — the silhouette, a clean single-color mark
-};
 // 12 wide; an EVEN number of rows so they pair cleanly into half-block cells. Two blank
 // leading rows give the lock a little headroom without dropping the whole mark too low.
 // A small padlock rides on top as the anchor's ring: a narrow rounded shackle over an
@@ -83,26 +74,27 @@ const PIXELS = [
   ".OO..OO..OO.", "..OO.OO.OO..",
   "..OOOOOOOO..", "...OOOOOO...", "....OOOO....", ".....OO.....",
 ];
-// Build the mark once at load. Each cell resets SGR so a background color can never
-// bleed into the row padding the framer adds after it.
-const MARK: string[] = (() => {
+// Build the mark for a given palette (the accent is the ink). Cheap — called once per
+// header factory invocation, i.e. once per theme, not per frame. Each cell resets SGR so
+// the accent can never bleed into the row padding the framer adds after it.
+function buildMark(p: Palette): string[] {
   const rows: string[] = [];
   for (let r = 0; r < PIXELS.length; r += 2) {
     const top = PIXELS[r];
     const bot = PIXELS[r + 1] ?? ".".repeat(MARK_W);
     let line = "";
     for (let x = 0; x < MARK_W; x++) {
-      const t = PX[top[x]];
-      const bcol = PX[bot[x]];
-      if (t == null && bcol == null) line += " ";
-      else if (t != null && bcol != null) line += `${ESC}38;5;${t}m${ESC}48;5;${bcol}m▀${RESET}`;
-      else if (t != null) line += `${ESC}38;5;${t}m▀${RESET}`;
-      else line += `${ESC}38;5;${bcol}m▄${RESET}`;
+      const t = top[x] === "O";
+      const b = bot[x] === "O";
+      if (t && b) line += `${p.ACCENT}█${p.RESET}`;
+      else if (t) line += `${p.ACCENT}▀${p.RESET}`;
+      else if (b) line += `${p.ACCENT}▄${p.RESET}`;
+      else line += " ";
     }
     rows.push(line);
   }
   return rows;
-})();
+}
 
 // Visible width = characters after stripping SGR escapes. Everything we render inside
 // the box is ASCII or a BMP width-1 symbol, so a plain length is exact here.
@@ -140,16 +132,16 @@ function shortCwd(): string {
 //  - signed out AND the current model bills to a Privateer account → it can't run
 //    until they sign in, so say so plainly (warning)
 //  - signed out on their own key            → a quiet tease that /login adds more
-function accountLine(modelProvider?: string): string {
+function accountLine(p: Palette, modelProvider?: string): string {
   const u = priv.currentUser();
   if (u) {
     const label = clean(u.email ?? (u.solanaPublicKey ? u.solanaPublicKey.slice(0, 6) + "…" : u.id));
-    return `${GREEN}connected${DIM} as ${RESET}${OCEAN_LIGHT}${label}${RESET}`;
+    return `${p.GREEN}connected${p.DIM} as ${p.RESET}${p.INK}${label}${p.RESET}`;
   }
   if (modelProvider === "privateer") {
-    return `${YELLOW}not signed in · /login to use this model${RESET}`;
+    return `${p.YELLOW}not signed in · /login to use this model${p.RESET}`;
   }
-  return `${DIM}not signed in · ${OCEAN_LIGHT}/login${DIM} to connect your account${RESET}`;
+  return `${p.DIM}not signed in · ${p.INK}/login${p.DIM} to connect your account${p.RESET}`;
 }
 
 // Is dotted version `a` newer than `b`? Plain numeric compare of major.minor.patch —
@@ -167,12 +159,12 @@ function isNewer(a: string, b: string): boolean {
 // The "update available" banner line, or "" when we're current / offline / unchecked.
 // Reads the cache the launcher refreshes in the background (see bin/privateer-tui) —
 // never fetches here, so the banner stays synchronous and never blocks on the network.
-function updateNotice(): string {
+function updateNotice(p: Palette): string {
   try {
     const home = process.env.PRIVATEER_HOME || join(homedir(), ".privateer");
     const { latest } = JSON.parse(readFileSync(join(home, "update-check.json"), "utf8"));
     if (typeof latest === "string" && isNewer(latest, VERSION)) {
-      return `${YELLOW}↑ v${latest} available${DIM} · run ${RESET}${OCEAN_LIGHT}privateer update${RESET}`;
+      return `${p.YELLOW}↑ v${latest} available${p.DIM} · run ${p.RESET}${p.INK}privateer update${p.RESET}`;
     }
   } catch {
     // no cache yet, unreadable, or malformed — show nothing.
@@ -184,16 +176,16 @@ function updateNotice(): string {
 // loaded (so the moat's "the agent knows this project" state is visible), otherwise a
 // quiet tease that /init scaffolds one. Reads the filesystem at render time, so it
 // reflects the current cwd and updates after /init (via onContextChanged → refresh).
-function contextLine(): string {
+function contextLine(p: Palette): string {
   const files = discoverContextFiles();
   if (files.length === 0) {
-    return `${DIM}no PRIVATEER.md · ${OCEAN_LIGHT}/init${DIM} to add project context${RESET}`;
+    return `${p.DIM}no PRIVATEER.md · ${p.INK}/init${p.DIM} to add project context${p.RESET}`;
   }
   // Show the nearest (deepest, wins-last) file's path; note any additional ancestors
   // with a "+N" so the header stays one line but the count isn't hidden.
   const nearest = shortPath(files[files.length - 1].path);
-  const more = files.length > 1 ? `${DIM} +${files.length - 1}${RESET}` : "";
-  return `${GREEN}⚓${DIM} ${RESET}${OCEAN_LIGHT}${nearest}${RESET}${more}`;
+  const more = files.length > 1 ? `${p.DIM} +${files.length - 1}${p.RESET}` : "";
+  return `${p.GREEN}⚓${p.DIM} ${p.RESET}${p.INK}${nearest}${p.RESET}${more}`;
 }
 
 // ── "What's New" — a tiny in-banner changelog ────────────────────────────────
@@ -206,11 +198,11 @@ const WHATS_NEW: Array<{ text: string; cmd?: string }> = [
   { text: "Self-update built in —", cmd: "privateer update" },
 ];
 
-function whatsNewRows(): string[] {
-  const head = `${BOLD}${OCEAN_LIGHT}✦ What's new${RESET}`;
+function whatsNewRows(p: Palette): string[] {
+  const head = `${p.BOLD}${p.INK}✦ What's new${p.RESET}`;
   const items = WHATS_NEW.map(
     ({ text, cmd }) =>
-      `${OCEAN}·${RESET} ${DIM}${text}${RESET}${cmd ? ` ${OCEAN_LIGHT}${cmd}${RESET}` : ""}`,
+      `${p.ACCENT}·${p.RESET} ${p.DIM}${text}${p.RESET}${cmd ? ` ${p.INK}${cmd}${p.RESET}` : ""}`,
   );
   return [head, ...items];
 }
@@ -220,51 +212,55 @@ function whatsNewRows(): string[] {
 // mark), so we zip by row index and pad the short side — every text-only row lands in
 // the same column as the rows beside the mark. One place owns the left gutter, so
 // spacing can't drift between the mark rows and the trailing rows.
-function renderBanner(width: number, modelProvider?: string): string[] {
+function renderBanner(width: number, p: Palette, mark: string[], modelProvider?: string): string[] {
   // Right column, top to bottom. The two leading blanks drop the wordmark down so it
   // sits beside the lock body (not the shackle); the rest follows in reading order.
   const text: string[] = [
     "",
-    `${BOLD}${OCEAN_LIGHT}✻ ${OCEAN}P${OCEAN_LIGHT}RIVATEER${RESET}${DIM}   privateer-agent ${OCEAN_LIGHT}v${VERSION}${RESET}`,
-    `${DIM}Chart your own course privately.${RESET}`,
+    `${p.BOLD}${p.ACCENT}✻ ${p.ACCENT}P${p.INK}RIVATEER${p.RESET}${p.DIM}   privateer-agent ${p.INK}v${VERSION}${p.RESET}`,
+    `${p.DIM}Chart your own course privately.${p.RESET}`,
     "",
-    accountLine(modelProvider),
-    `${OCEAN_LIGHT}${shortCwd()}${RESET}`,
-    contextLine(),
+    accountLine(p, modelProvider),
+    `${p.INK}${shortCwd()}${p.RESET}`,
+    contextLine(p),
   ];
-  const notice = updateNotice();
+  const notice = updateNotice(p);
   if (notice) text.push(notice);
   // A blank spacer, then the What's New block — set off below the identity lines.
-  text.push("", ...whatsNewRows());
+  text.push("", ...whatsNewRows(p));
 
   // Zip the mark and the text column by row. Rows past the mark's height get a blank
   // gutter of the mark's width, so the text stays in one column throughout.
   const gap = "  ";
-  const height = Math.max(MARK.length, text.length);
+  const height = Math.max(mark.length, text.length);
   const rows: string[] = [];
   for (let i = 0; i < height; i++) {
     // The mark lines already carry their own per-pixel colors, so we don't wrap them.
-    const left = i < MARK.length ? MARK[i] : " ".repeat(MARK_W);
+    const left = i < mark.length ? mark[i] : " ".repeat(MARK_W);
     rows.push(`${left}${gap}${text[i] ?? ""}`.trimEnd());
   }
 
   const cap = Math.max(20, width - 4); // 2 border cells + 2 padding
   const inner = Math.min(cap, Math.max(...rows.map(vlen)));
   const bar = "─".repeat(inner + 2);
-  const out = [`${BORDER}╭${bar}╮${RESET}`];
+  const out = [`${p.BORDER}╭${bar}╮${p.RESET}`];
   for (const row of rows) {
     const pad = Math.max(0, inner - vlen(row));
-    out.push(`${BORDER}│${RESET} ${row}${" ".repeat(pad)} ${BORDER}│${RESET}`);
+    out.push(`${p.BORDER}│${p.RESET} ${row}${" ".repeat(pad)} ${p.BORDER}│${p.RESET}`);
   }
-  out.push(`${BORDER}╰${bar}╯${RESET}`);
+  out.push(`${p.BORDER}╰${bar}╯${p.RESET}`);
   return out;
 }
 
 // A Pi header Component (setHeader factory return). Static banner; captures the model
-// provider so the account line reflects the picked model.
-function headerComponent(modelProvider?: string) {
+// provider so the account line reflects the picked model, and the live theme so every
+// colour tracks the terminal background (dark ink on light, light ink on dark). The
+// palette and mark are resolved once here (per theme), not per frame.
+function headerComponent(theme: any, modelProvider?: string) {
+  const p = paletteFor(theme);
+  const mark = buildMark(p);
   return {
-    render: (width: number): string[] => renderBanner(width, modelProvider),
+    render: (width: number): string[] => renderBanner(width, p, mark, modelProvider),
     invalidate() {},
   };
 }
@@ -293,8 +289,12 @@ export default function privateerBrand(pi: any): void {
     }
   };
 
+  // Pi calls the factory with (tui, theme) — pass the live theme through so the banner
+  // paints from it. Falls back to ctx.ui.theme when a Pi build hands the factory no theme.
   const setHeader = (ctx: any) =>
-    ctx?.ui?.setHeader?.(() => headerComponent(currentModelProvider));
+    ctx?.ui?.setHeader?.((_tui: any, theme: any) =>
+      headerComponent(theme ?? ctx?.ui?.theme, currentModelProvider),
+    );
 
   const refresh = (ctx: any) => {
     dbg(`refresh: hasUI=${!!ctx?.hasUI} hasSetHeader=${typeof ctx?.ui?.setHeader} user=${priv.currentUser()?.email ?? null}`);
@@ -355,6 +355,7 @@ export default function privateerBrand(pi: any): void {
     }
     ctx?.ui?.notify?.("Connecting to Privateer — requesting a device code…", "info");
     try {
+      const p = paletteFor(ctx?.ui?.theme);
       const user = await priv.runDeviceLogin({
         onCode: (code: any) => {
           const uri = clean(code.verification_uri_complete ?? code.verification_uri ?? "");
@@ -362,11 +363,11 @@ export default function privateerBrand(pi: any): void {
           ctx?.ui?.setWidget?.(
             "privateer-signin",
             [
-              `${OCEAN_LIGHT}⚓ Sign in to Privateer${RESET}`,
-              `${DIM}Approve this terminal in the Privateer app:${RESET}`,
-              `   code   ${BOLD}${OCEAN}${userCode}${RESET}`,
-              uri ? `${DIM}   or open ${RESET}${OCEAN_LIGHT}${uri}${RESET}` : "",
-              `${DIM}   waiting for approval…${RESET}`,
+              `${p.INK}⚓ Sign in to Privateer${p.RESET}`,
+              `${p.DIM}Approve this terminal in the Privateer app:${p.RESET}`,
+              `   code   ${p.BOLD}${p.ACCENT}${userCode}${p.RESET}`,
+              uri ? `${p.DIM}   or open ${p.RESET}${p.INK}${uri}${p.RESET}` : "",
+              `${p.DIM}   waiting for approval…${p.RESET}`,
             ].filter(Boolean),
             { placement: "aboveEditor" },
           );
@@ -404,6 +405,47 @@ export default function privateerBrand(pi: any): void {
         : "Not signed in. Run /signin to connect your Privateer account.",
       "info",
     );
+  }
+
+  // Move the LIVE session onto a confidential model the instant the user signs in. A
+  // terminal launched with no credentials is pinned by `--model` to the keyless
+  // OpenRouter fallback; without this switch it stays there and the first prompt after
+  // sign-in dead-ends on "No API key found for openrouter". resolveSignedInModel picks
+  // Tinfoil GLM 5.2 (client-attested TEE) when a key is present, else the account's NEAR
+  // channel — private inference that works out of the box. We only override an auto-picked
+  // launch model, never a deliberate PRIVATEER_MODEL, and never re-switch if we're already
+  // on the target. The account (NEAR) credential is spawned moments AFTER sign-in fires,
+  // so setModel can briefly return false ("no key yet"); retry a few times so the switch
+  // lands as soon as the credential is ready (Tinfoil, key already in env, succeeds first
+  // try). Best-effort throughout — a failure just leaves the launch model in place.
+  async function activateSignedInModel(ctx: any): Promise<void> {
+    if (process.env.PRIVATEER_MODEL?.trim()) return; // deliberate override — respect it
+    const reg = ctx?.modelRegistry;
+    if (!reg?.find || typeof pi.setModel !== "function") return;
+    const spec = resolveSignedInModel();
+    const slash = spec.indexOf("/");
+    if (slash <= 0) return;
+    const provider = spec.slice(0, slash), id = spec.slice(slash + 1);
+    const currentSpec = ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+    if (currentSpec === spec) return; // already there — nothing to do
+    const model = reg.find(provider, id);
+    if (!model) { dbg(`activateSignedInModel: ${spec} not in registry`); return; }
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const ok = await pi.setModel(model);
+        if (ok !== false) {
+          currentModelProvider = provider;
+          refresh(ctx);
+          ctx?.ui?.notify?.(`Now using ${spec} for private inference.`, "info");
+          dbg(`activateSignedInModel: switched to ${spec}`);
+          return;
+        }
+      } catch (e) {
+        dbg(`activateSignedInModel: setModel threw ${(e as Error).message}`);
+      }
+      await new Promise((r) => setTimeout(r, 400)); // credential still spawning — retry
+    }
+    dbg(`activateSignedInModel: gave up switching to ${spec}`);
   }
 
   dbg("extension loaded, onSignedIn listener registering");
@@ -451,6 +493,9 @@ export default function privateerBrand(pi: any): void {
   priv.onSignedIn(() => {
     dbg(`onSignedIn fired; ctxRef=${ctxRef ? "set" : "null"}`);
     refresh(ctxRef);
+    // Activate a confidential model in the live session so the user can prompt right
+    // away instead of dead-ending on the keyless launch model. See activateSignedInModel.
+    void activateSignedInModel(ctxRef);
   });
 
   // /init (in privateer-context) just created or changed a PRIVATEER.md — re-render the

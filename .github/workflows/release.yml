@@ -1,0 +1,116 @@
+name: release
+
+# Build the self-contained per-platform bundles and attach them to the GitHub
+# Release. The installers (privateer.pro/install.sh, install.ps1) download these,
+# so a user needs neither Node nor npm.
+#
+# Cross-building: `npm ci --os/--cpu` fetches each target's os/cpu-gated optional
+# deps, and koffi/pi-tui ship all platforms in one package — so every target builds
+# correctly on one Ubuntu runner. We still smoke-test on the real OS (Linux inline,
+# Windows in a dedicated job) before publishing.
+#
+# Trigger: push a tag like v0.5.2 (or run by hand for a build-only dry run).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build only, do not publish a release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: "22.19.0"
+
+jobs:
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create (or reuse) the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+
+  build:
+    needs: [create-release]
+    if: always() # still runs on dry-run (create-release skipped)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [darwin-arm64, darwin-x64, linux-x64, win32-x64]
+        # linux-arm64 / win32-arm64 pending. See docs/shipping.md.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install archive tools
+        run: sudo apt-get update && sudo apt-get install -y zip unzip xz-utils
+
+      - name: Build bundle (${{ matrix.target }})
+        run: node scripts/build-bundle.mjs --target ${{ matrix.target }} --node "${NODE_VERSION}"
+
+      - name: Smoke test (Linux only — the only target this runner can execute)
+        if: matrix.target == 'linux-x64'
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          tar -xzf "dist-bundle/privateer-${{ matrix.target }}.tar.gz" -C "$work"
+          app="$work/privateer-${{ matrix.target }}"
+          home="$work/home"; mkdir -p "$home"
+          out="$(env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$home" \
+                 PRIVATEER_HOME="$home/.privateer" TERM=xterm \
+                 bash "$app/bin/privateer-tui" --version 2>&1)"
+          echo "boot output: $out"; test -n "$out"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: privateer-${{ matrix.target }}
+          path: dist-bundle/privateer-${{ matrix.target }}.*
+
+  # Real Windows verification: download the win bundle artifact, unzip, boot it.
+  smoke-windows:
+    needs: [build]
+    if: always()
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: privateer-win32-x64
+          path: dl
+      - name: Boot the Windows bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive -Path (Get-ChildItem dl\*.zip)[0].FullName -DestinationPath extract -Force
+          $app = "extract\privateer-win32-x64"
+          $env:PRIVATEER_HOME = "$PWD\pvhome"
+          $out = & "$app\bin\privateer.cmd" --version 2>&1 | Out-String
+          Write-Host "boot output: $out"
+          if (-not $out.Trim()) { throw "empty output — bundle failed to boot" }
+
+  publish:
+    needs: [build, smoke-windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - name: Attach all bundles to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dl/*/privateer-*.* --clobber

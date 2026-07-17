@@ -29,6 +29,7 @@ import { agentDir } from "../src/config/paths.ts";
 import { agentVersion } from "../src/config/version.ts";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import * as priv from "../src/auth/privateer.ts";
+import { paletteFor } from "../src/ui/palette.ts";
 import type { PermissionMode } from "../src/config/permissionMode.ts";
 
 const MODES: PermissionMode[] = ["default", "acceptEdits", "bypass", "plan"];
@@ -221,7 +222,6 @@ function advertiseCommands(): { name: string; description?: string }[] {
 // driven from the phone — with a reminder that `/remote-access off` stops it. We
 // keep a UI handle (captured from session_start / the command ctx) so the relay's
 // own connect/disconnect callbacks can refresh the indicator, not just the command.
-const GREEN = "\x1b[32m", YELLOW = "\x1b[33m", DIM = "\x1b[2m", RESET = "\x1b[0m";
 const REMOTE_STATUS_KEY = "privateer:remote-access";
 let uiRef: any = null;
 // "off" → no indicator; "connecting" → relay starting or reconnecting (yellow);
@@ -235,10 +235,13 @@ function refreshRemoteStatus(): void {
     ui.setStatus(REMOTE_STATUS_KEY, undefined);
     return;
   }
+  // Paint from the active theme so the footer reads on a light terminal too (a bare
+  // green/yellow escape can wash out on white) — falls back to white on no theme.
+  const p = paletteFor(ui.theme);
   const text =
     remoteState === "connected"
-      ? `${GREEN}⟿ remote access${RESET} ${DIM}· /remote-access off to stop${RESET}`
-      : `${YELLOW}⟿ remote access · connecting…${RESET} ${DIM}· /remote-access off to stop${RESET}`;
+      ? `${p.GREEN}⟿ remote access${p.RESET} ${p.DIM}· /remote-access off to stop${p.RESET}`
+      : `${p.YELLOW}⟿ remote access · connecting…${p.RESET} ${p.DIM}· /remote-access off to stop${p.RESET}`;
   ui.setStatus(REMOTE_STATUS_KEY, text);
 }
 
