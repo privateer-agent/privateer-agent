@@ -41,6 +41,29 @@ const NODE_BIN = BUNDLED ? bundledNode : process.execPath;
 process.env.PATH = path.dirname(NODE_BIN) + path.delimiter + (process.env.PATH || "");
 
 const args = process.argv.slice(2);
+
+// `--no-quarter` — total permission bypass ("take no prisoners"). Strip it from the
+// args BEFORE anything else so it never reaches Pi's cli.js (which doesn't know it)
+// and so `sub`/`args.slice(1)` see only real subcommands. When present we export
+// PRIVATEER_NO_QUARTER=1; the permission gate (extensions/privateer-gate.ts, and any
+// subagent child that inherits this env) then auto-approves EVERY action with no
+// prompt — dangerous shell, destructive tools, out-of-cwd, protected files, all of
+// it. This is the moat fully lowered; only pass it when you trust the whole session.
+const NO_QUARTER = args.some((a) => a === "--no-quarter");
+if (NO_QUARTER) {
+  for (let i = args.length - 1; i >= 0; i--) if (args[i] === "--no-quarter") args.splice(i, 1);
+  process.env.PRIVATEER_NO_QUARTER = "1";
+  process.stderr.write(
+    [
+      "",
+      "  ⚓ \x1b[1;31mNo quarter\x1b[0m — permission gate DISABLED for this session.",
+      "     Every action (shell, edits, destructive tools, out-of-cwd) runs WITHOUT a prompt.",
+      "     Only use this in a directory and with a task you fully trust.",
+      "",
+    ].join("\n") + "\n",
+  );
+}
+
 const sub = args[0];
 
 // `privateer --version` — report OUR version, not Pi's. Left to Pi's cli.js it would
@@ -169,17 +192,41 @@ else {
   // TEE, strongest tier) when a Tinfoil key is present; else the signed-in account's
   // NEAR channel; else a cheap OpenRouter fallback.
   const CRED = path.join(PRIVATEER_HOME, "credentials.json");
+  const signedIn = fs.existsSync(CRED);
   const MODEL = process.env.PRIVATEER_MODEL
     ? process.env.PRIVATEER_MODEL
     : haveTinfoilKey()
       ? "tinfoil/glm-5-2"
-      : fs.existsSync(CRED)
+      : signedIn
         ? "privateer/near/zai-org/GLM-5.1-FP8"
         : "openrouter/openai/gpt-4o-mini";
 
+  // Guard the keyless dead-end. We land on the OpenRouter fallback ONLY when the user
+  // named no model, has no Tinfoil key, AND isn't signed in (no credentials.json). If
+  // they also have no OpenRouter/other BYO key, the very first prompt errors with a bare
+  // "No API key found for openrouter" and nothing explains why. Worse, if this machine
+  // was signed in before (other ~/.privateer state exists but the login file is gone),
+  // that bare error hides a vanished session. Surface a clear, branded notice BEFORE the
+  // TUI loads — but still boot it, so `/login` inside works (and activateSignedInModel
+  // switches the live session onto the account channel the moment they sign back in).
+  if (MODEL === "openrouter/openai/gpt-4o-mini" && !haveByoKey()) {
+    warnKeylessLaunch();
+  }
+
+  // Privateer's own bundled skills. Loaded by explicit path (Pi's `--skill`, which
+  // takes a file or directory) rather than seeded into the agent dir, so they load
+  // read-only from the shipped release — always matching this version, never
+  // clobbering or resurrecting anything in the user's own editable skills dir. Each
+  // is a directory holding a SKILL.md. Skip any that aren't present (e.g. a partial
+  // dev checkout) so a missing dir can't wedge launch.
+  const SKILL_DIRS = ["resolve-dependencies"]
+    .map((name) => path.join(REPO, "skills", name))
+    .filter((dir) => fs.existsSync(dir));
+  const skillArgs = SKILL_DIRS.flatMap((dir) => ["--skill", dir]);
+
   // Dev convenience: load provider keys from the repo's .env if present.
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
-  runToCompletion(NODE_BIN, [...nodeArgs, CLI, "--model", MODEL, ...args]);
+  runToCompletion(NODE_BIN, [...nodeArgs, CLI, "--model", MODEL, ...skillArgs, ...args]);
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -240,9 +287,60 @@ function findWindowsBash() {
 }
 
 function haveTinfoilKey() {
-  if (process.env.TINFOIL_API_KEY) return true;
-  try { return /^TINFOIL_API_KEY=.+/m.test(fs.readFileSync(ENV_FILE, "utf8")); }
+  return haveKey("TINFOIL_API_KEY");
+}
+
+// True if `name` is set in the environment or (dev convenience) present and non-empty in
+// the repo .env — the same two sources the child inherits, so this matches what Pi will
+// actually see for the provider key at request time.
+function haveKey(name) {
+  if (process.env[name]) return true;
+  try { return new RegExp(`^${name}=.+`, "m").test(fs.readFileSync(ENV_FILE, "utf8")); }
   catch { return false; }
+}
+
+// Any BYO provider key that would make the keyless OpenRouter launch model usable (or at
+// least give the runtime SOME working provider). Mirrors defaultModel.ts's BYO_BY_KEY.
+function haveByoKey() {
+  return ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TINFOIL_API_KEY"]
+    .some(haveKey);
+}
+
+// Explain the keyless launch instead of letting the first prompt dead-end on a bare
+// "No API key found for openrouter". Distinguishes a returning user whose login file is
+// missing (other ~/.privateer state exists → likely signed out unexpectedly) from a
+// genuine first run. Non-fatal: we print and carry on so `/login` inside still works.
+function warnKeylessLaunch() {
+  // Heuristic "was signed in before": the agent dir or our own config.json exists even
+  // though credentials.json doesn't. A true first run has neither yet.
+  let returning = false;
+  try {
+    returning =
+      fs.existsSync(path.join(PRIVATEER_HOME, "agent")) ||
+      fs.existsSync(path.join(PRIVATEER_HOME, "config.json"));
+  } catch { /* best-effort — default to the first-run wording */ }
+
+  const lines = returning
+    ? [
+        "",
+        "  ⚓ Your Privateer login is missing — this terminal isn't signed in.",
+        `     (no ${path.join(PRIVATEER_HOME, "credentials.json")})`,
+        "",
+        "  If you were signed in before, your session was cleared. Run /login to sign",
+        "  back in — you'll return to your subscription models right away. Until then,",
+        "  prompting fails with \"No API key found\" because no model key is set.",
+        "",
+      ]
+    : [
+        "",
+        "  ⚓ You're not signed in to Privateer and no provider API key is set.",
+        "",
+        "  Run /login to use your subscription, or set a provider key (e.g.",
+        "  ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY). Until then,",
+        "  prompting fails with \"No API key found\".",
+        "",
+      ];
+  process.stderr.write(lines.join("\n") + "\n");
 }
 
 function refreshUpdateCache() {

@@ -353,6 +353,10 @@ const gate = makePermissionGate({
   localAsk,
   getRemote: bridge.getRemote,
   getNoQuarter: bridge.getNoQuarter,
+  // `--no-quarter` at launch (see bin/privateer-launch.mjs) sets PRIVATEER_NO_QUARTER
+  // and opts this whole session — TUI and any subagent children that inherit the env —
+  // out of the gate entirely: every action auto-approves, no prompt.
+  getSkipAllPermissions: () => process.env.PRIVATEER_NO_QUARTER === "1",
   remoteAsk: bridge.remoteAsk,
 });
 

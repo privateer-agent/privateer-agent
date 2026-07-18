@@ -281,6 +281,8 @@ async function main() {
     },
     getRemote: bridge.getRemote,
     getNoQuarter: bridge.getNoQuarter,
+    // `--no-quarter` at launch (env PRIVATEER_NO_QUARTER) → total gate bypass, no prompts.
+    getSkipAllPermissions: () => process.env.PRIVATEER_NO_QUARTER === "1",
     remoteAsk: bridge.remoteAsk,
     // Subagents (and their child-only intercom tools) can't be driven from the app
     // yet — pi-subagents runs each in a child session whose gate/UI bypass the relay,

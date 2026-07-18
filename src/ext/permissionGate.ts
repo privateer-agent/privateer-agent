@@ -44,6 +44,10 @@ export interface GateController {
   confineToCwd?: boolean;
   getRemote?(): boolean;
   getNoQuarter?(): boolean;
+  // Total bypass — see ModeGate.getSkipAllPermissions. Set by the `--no-quarter`
+  // launch flag (env PRIVATEER_NO_QUARTER); when true the gate auto-allows every
+  // action with no prompt.
+  getSkipAllPermissions?(): boolean;
   // Block a tool outright while the turn is remote-driven (only consulted when
   // getRemote() is true). For tools whose own prompts render on the host terminal
   // rather than the relay — e.g. pi-subagents — so a driven turn can't wedge on an
@@ -132,20 +136,26 @@ export async function decideToolCall(
     ask,
     getRemote: ctrl.getRemote,
     getNoQuarter: ctrl.getNoQuarter,
+    getSkipAllPermissions: ctrl.getSkipAllPermissions,
   });
 
   let decision: "allow" | "deny";
   try {
     decision = await withTimeout(gate.request(req), ctrl.approvalTimeoutMs, ctx.signal);
   } catch (err) {
-    // Fail closed: a thrown/aborted/timed-out approval blocks the tool.
+    // Fail closed: a thrown/aborted/timed-out approval blocks the tool. Phrase it
+    // as terminal — re-issuing the identical call will hit the same closed gate, so
+    // tell the model to stop retrying and take a different path (or ask the user).
     return {
       block: true,
-      reason: `Approval unavailable (${(err as Error)?.message ?? "error"}) — blocked by default`,
+      reason: `Approval unavailable (${(err as Error)?.message ?? "error"}) — blocked by default. Do not retry the same command; it will be blocked again. Try a different approach or ask the user to run it.`,
     };
   }
   if (decision === "deny") {
-    return { block: true, reason: `${req.title} denied by permission gate` };
+    return {
+      block: true,
+      reason: `${req.title} was denied by the permission gate. Do not retry the same command; it will be denied again. Take a different approach or ask the user to run it themselves.`,
+    };
   }
   return undefined;
 }

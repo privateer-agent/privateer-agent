@@ -1,3 +1,23 @@
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
+index e223ce1..2bdab10 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
+@@ -711,6 +711,15 @@ export class AgentSession {
+                 finalError: msg.errorMessage,
+             });
+             this._retryAttempt = 0;
++            // Privateer patch: a transient error that survived the full retry budget
++            // is terminal. Ending the turn here (instead of falling through to
++            // compaction / queued-message continuation) prevents the agent loop from
++            // re-entering agent.continue(), hitting the identical error, and — because
++            // the retry counter was just reset to 0 — starting a fresh burst of 3.
++            // That re-entry is what produced the endless "retrying 1/3…2/3…3/3" loop
++            // on a persistently-failing provider/tool. Context-overflow errors never
++            // reach this branch (_isRetryableError → false), so compaction is untouched.
++            return false;
+         }
+         if (await this._checkCompaction(msg)) {
+             return true;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 index 5d65200..a997ad7 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js

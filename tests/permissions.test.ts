@@ -52,7 +52,7 @@ test("outside-cwd access always prompts, except under bypass", () => {
   assert.equal(decideAuto(outsideReq, "bypass", []), "allow"); // bypass means no prompts
 });
 
-function makeGate(initialMode: PermissionMode, answer: AskOutcome, remote = false, noQuarter = false, denylist: string[] = []) {
+function makeGate(initialMode: PermissionMode, answer: AskOutcome, remote = false, noQuarter = false, denylist: string[] = [], skipAll = false) {
   let mode = initialMode;
   const allowlist: string[] = [];
   const allowedOutsideRoots: string[] = [];
@@ -69,6 +69,7 @@ function makeGate(initialMode: PermissionMode, answer: AskOutcome, remote = fals
     },
     getRemote: () => remote,
     getNoQuarter: () => noQuarter,
+    getSkipAllPermissions: () => skipAll,
   });
   return { gate, allowlist, allowedOutsideRoots, asks: () => asks, mode: () => mode };
 }
@@ -176,6 +177,30 @@ test("no-quarter has no effect on local turns", async () => {
   const g = makeGate("default", "deny", false, true);
   assert.equal(await g.gate.request(edit), "deny");
   assert.equal(g.asks(), 1); // local prompt still runs as usual
+});
+
+// ── --no-quarter (getSkipAllPermissions): session-wide TOTAL bypass ──
+// The strongest override: set by the `--no-quarter` launch flag. Auto-allows every
+// request, above mode/allowlist/denylist AND the remote/plan branches — no prompt.
+
+test("no-quarter total bypass auto-allows everything locally, no prompt", async () => {
+  const g = makeGate("default", "deny", false, false, DEFAULT_DENYLIST, true);
+  assert.equal(await g.gate.request(edit), "allow");
+  assert.equal(await g.gate.request(bash("npm test")), "allow");
+  assert.equal(await g.gate.request(bash("rm -rf /")), "allow"); // even dangerous shell
+  const destructive: PermissionRequest = { ...bash("drop"), alwaysAsk: true };
+  assert.equal(await g.gate.request(destructive), "allow"); // even alwaysAsk-destructive
+  const guarded: PermissionRequest = { ...edit, detail: ".env", protected: true };
+  assert.equal(await g.gate.request(guarded), "allow"); // even protected files
+  assert.equal(g.asks(), 0); // the whole point: the gate never prompts
+});
+
+test("no-quarter total bypass overrides even a plan-mode / remote deny", async () => {
+  const plan = makeGate("plan", "deny", false, false, DEFAULT_DENYLIST, true);
+  assert.equal(await plan.gate.request(edit), "allow"); // plan would deny; bypass wins
+  const remote = makeGate("default", "deny", true, false, DEFAULT_DENYLIST, true);
+  assert.equal(await remote.gate.request(bash("rm -rf /")), "allow"); // remote branch skipped
+  assert.equal(remote.asks(), 0);
 });
 
 test("'always' on outside access remembers the directory, not the edit mode", async () => {

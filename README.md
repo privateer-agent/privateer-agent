@@ -248,6 +248,21 @@ redactor before it leaves.
 Switch with **`/mode`**. Even in `bypass`, a danger filter blocks destructive shell commands,
 and protected files (`.env`, shell rc files…) are guarded — the gate is never fully off.
 
+### `--no-quarter` — lower the moat entirely
+
+For an unattended run in a directory and on a task you fully trust, launch with:
+
+```bash
+privateer --no-quarter
+```
+
+This is the one exception to "the gate is never fully off." It disables the permission
+gate for the **whole session** — every action auto-approves with no prompt, including
+destructive shell commands, out-of-cwd access, and protected files. Subagents spawned
+by the session inherit it. There is no `/mode` equivalent; it's a deliberate launch-time
+opt-out (env `PRIVATEER_NO_QUARTER=1`) and prints a red warning banner so it's never a
+surprise. Use it sparingly.
+
 ## Extend it
 
 Everything below is a **Pi extension** loaded by discovery (see [Built on Pi](#built-on-pi)) —

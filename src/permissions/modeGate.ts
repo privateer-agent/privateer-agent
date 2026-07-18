@@ -34,6 +34,13 @@ export interface ModeGateDeps {
   // pinging the phone. Dangerous shell and alwaysAsk-destructive actions rank
   // above bypass in decideAuto, so those still relay for an explicit Allow/Deny.
   getNoQuarter?: () => boolean;
+  // True when the operator launched with `--no-quarter` (env PRIVATEER_NO_QUARTER):
+  // a session-wide TOTAL bypass of the gate. Every request auto-approves — including
+  // dangerous shell, destructive tools, out-of-cwd and protected-file access — with
+  // no prompt, local or remote. This sits ABOVE everything else (mode, allowlist,
+  // the remote branch, even the dangerous-command denylist): the operator has
+  // explicitly opted the whole session out of the moat. Off unless the flag is set.
+  getSkipAllPermissions?: () => boolean;
 }
 
 // The permission gate used by the live TUI. It first applies the mode/allowlist
@@ -43,6 +50,13 @@ export class ModeGate implements PermissionGate {
   constructor(private readonly deps: ModeGateDeps) {}
 
   async request(req: PermissionRequest): Promise<PermissionDecision> {
+    // No-quarter: the operator launched with `--no-quarter`, opting the whole
+    // session out of the gate. Total bypass — auto-allow EVERY request (dangerous
+    // shell, destructive tools, outside-cwd, protected files) with no prompt, before
+    // any mode/allowlist/remote/denylist policy is consulted. Deliberately the very
+    // first check so nothing below can force an "ask" back on.
+    if (this.deps.getSkipAllPermissions?.()) return "allow";
+
     const denylist = this.deps.denylist ?? [];
     const auto = decideAuto(req, this.deps.getMode(), this.deps.allowlist, denylist);
 
