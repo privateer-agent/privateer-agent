@@ -28,7 +28,7 @@
     "venice"
   ],
   "bin": {
-    "privateer": "./bin/privateer-tui"
+    "privateer": "./bin/privateer-launch.mjs"
   },
   "publishConfig": {
     "access": "public"

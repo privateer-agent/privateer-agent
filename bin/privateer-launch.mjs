@@ -12,7 +12,7 @@
 //
 // Ported from the original bash launcher; behaviour is intended to match exactly.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -96,6 +96,12 @@ else if (sub === "daemon") {
 
 // --- normal launch: install the moat, then exec Pi's TUI -------------------
 else {
+  // Windows has no bash out of the box, but Privateer's command tool needs one. If a
+  // real bash isn't reachable, stop here with a clear, actionable message — otherwise
+  // the user boots fine and only hits a cryptic `'bash' is not recognized` the first
+  // time the agent tries to run a command. Unix always has a shell, so this is a no-op.
+  ensureShellOrExit();
+
   const AGENT_DIR = path.join(PRIVATEER_HOME, "agent");
   const EXT_DIR = path.join(AGENT_DIR, "extensions");
   fs.mkdirSync(EXT_DIR, { recursive: true });
@@ -176,6 +182,62 @@ else {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// Preflight: on Windows, make sure a bash the command tool can use actually exists.
+// Mirrors pi-coding-agent's resolver (utils/shell.js getShellConfig): an explicit
+// shellPath override wins, then Git Bash in Program Files, then any bash.exe on PATH.
+// If none resolve, print branded install guidance and exit before the TUI loads.
+function ensureShellOrExit() {
+  if (!isWin) return; // macOS/Linux always ship /bin/sh (bash); nothing to check.
+
+  // Respect an explicit shellPath in the agent settings — if the user set one, defer
+  // to Pi's own resolver (it validates the path and reports its own error).
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(PRIVATEER_HOME, "agent", "settings.json"), "utf8"));
+    if (s && typeof s.shellPath === "string" && s.shellPath.trim()) return;
+  } catch { /* no settings file / no override — fall through to detection */ }
+
+  if (findWindowsBash()) return; // a usable bash is reachable — carry on.
+
+  const msg = [
+    "",
+    "  ⚓ Privateer needs a bash shell to run commands, and Windows doesn't ship one.",
+    "",
+    "  Fix it with any ONE of these, then run `privateer` again:",
+    "",
+    "    1. Install Git for Windows (recommended) — bundles Git Bash where Privateer",
+    "       looks first, no config needed:  https://git-scm.com/download/win",
+    "",
+    "    2. Use WSL — run Privateer inside a WSL shell, or install it with",
+    "       `wsl --install` from an admin PowerShell.",
+    "",
+    "    3. Already have Cygwin/MSYS2? Add its bash.exe to PATH, or set \"shellPath\"",
+    "       to your bash.exe in your Privateer settings.json.",
+    "",
+    "  After installing, open a NEW terminal (PATH changes don't reach open windows).",
+    "",
+  ].join("\n");
+  process.stderr.write(msg + "\n");
+  process.exit(1);
+}
+
+// Return the path to a usable bash.exe on Windows, or null. Same search order as
+// pi-coding-agent: Git Bash under %ProgramFiles%[(x86)], then `where bash.exe`.
+function findWindowsBash() {
+  const candidates = [];
+  if (process.env.ProgramFiles) candidates.push(path.join(process.env.ProgramFiles, "Git", "bin", "bash.exe"));
+  if (process.env["ProgramFiles(x86)"]) candidates.push(path.join(process.env["ProgramFiles(x86)"], "Git", "bin", "bash.exe"));
+  for (const c of candidates) if (fs.existsSync(c)) return c;
+  try {
+    const r = spawnSync("where", ["bash.exe"], { encoding: "utf8", timeout: 5000, windowsHide: true });
+    if (r.status === 0 && r.stdout) {
+      const first = r.stdout.trim().split(/\r?\n/)[0];
+      if (first && fs.existsSync(first)) return first;
+    }
+  } catch { /* `where` unavailable — treat as not found */ }
+  return null;
+}
+
 function haveTinfoilKey() {
   if (process.env.TINFOIL_API_KEY) return true;
   try { return /^TINFOIL_API_KEY=.+/m.test(fs.readFileSync(ENV_FILE, "utf8")); }
