@@ -80,7 +80,8 @@ if (sub === "update") {
     }
   } else {
     console.log("Updating privateer-agent to the latest release…");
-    runToCompletion(isWin ? "npm.cmd" : "npm", ["install", "-g", "privateer-agent@latest"]);
+    // npm is npm.cmd on Windows; Node >=18.20 needs a shell to spawn a .cmd (EINVAL otherwise).
+    runToCompletion(isWin ? "npm.cmd" : "npm", ["install", "-g", "privateer-agent@latest"], { shell: isWin });
   }
   // runToCompletion exits via the child's exit handler.
 }
@@ -268,9 +269,17 @@ function refreshUpdateCache() {
       .then((j) => write(String(j?.tag_name || "").replace(/^v/, "")))
       .catch(() => { /* offline — keep stale cache */ });
   } else {
-    const p = spawn(isWin ? "npm.cmd" : "npm", ["view", "privateer-agent", "version"], {
-      stdio: ["ignore", "pipe", "ignore"],
-    });
+    // On Windows `npm` is npm.cmd; Node >=18.20 throws EINVAL synchronously when
+    // spawning a .cmd without a shell, so run through a shell there and guard the
+    // call — this is a fire-and-forget cache refresh and must never break launch.
+    let p;
+    try {
+      p = spawn(isWin ? "npm.cmd" : "npm", ["view", "privateer-agent", "version"], {
+        stdio: ["ignore", "pipe", "ignore"],
+        shell: isWin,
+        windowsHide: true,
+      });
+    } catch { return; /* no npm / spawn refused — keep stale cache */ }
     let out = "";
     p.stdout.on("data", (d) => { out += d; });
     p.on("close", () => write(out.trim()));
