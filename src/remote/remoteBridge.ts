@@ -158,6 +158,13 @@ export class RemoteBridge {
     onChannelsList: () => {},
     onChannelsSave: () => {},
     onChannelsRemove: () => {},
+    // MCP connectors, like channels, are managed on the daemon (the host that runs the
+    // adapter) — the daemon's own relay handles mcp_*. These no-ops just satisfy Required;
+    // an interactive terminal manages MCP over IPC (desktop), never over this relay.
+    onMcpList: () => {},
+    onMcpSave: () => {},
+    onMcpSetEnabled: () => {},
+    onMcpRemove: () => {},
     // Workflows, like routines/channels, are daemon-owned — the daemon's own relay handles
     // workflows_*. These no-ops just satisfy Required; an interactive terminal never
     // surfaces workflows.

@@ -182,6 +182,22 @@ export interface RelayCallbacks {
   // The app asked to delete a platform's channel config, by platform name. Signed
   // (H2) — a forged removal is a DoS (the bot stops until re-added).
   onChannelsRemove?: (platform: string, sig?: string, ts?: number) => void;
+  // The app opened the MCP connectors manager — reply with the current MCP config
+  // (a sendMcp frame). Owned by the daemon (the host that runs the adapter), so these
+  // only fire on its relay. Read-only, so unsigned.
+  onMcpList?: () => void;
+  // The app asked to create/edit an MCP connector. `draft` carries only NON-secret
+  // fields (name/transport/command/args/url/oauth). `sealedSecrets`, when present, is
+  // a base64 sealed-box the app sealed to THIS terminal's pinned pubkey, opening to
+  // `{ termId, env: {NAME: value} }` — the connector's credential env. `sig`+`ts`
+  // authenticate the WHOLE save with the pinned account key (same shape as
+  // channels_save), so a hostile relay can neither forge a token nor inject a command.
+  onMcpSave?: (draft: Record<string, unknown>, sealedSecrets?: string, sig?: string, ts?: number) => void;
+  // The app asked to enable/disable a connector by name. Signed (H2) — a forged toggle
+  // silently arms/disarms a tool surface. Idempotent (non-strict ts).
+  onMcpSetEnabled?: (name: string, enabled: boolean, sig?: string, ts?: number) => void;
+  // The app asked to delete a connector by name. Signed (H2) — a forged removal is a DoS.
+  onMcpRemove?: (name: string, sig?: string, ts?: number) => void;
   // The app opened the workflows manager — reply with the current workflow summaries
   // (a sendWorkflows frame). Owned by the daemon, so these only fire on its relay.
   onWorkflowsList?: () => void;
@@ -518,6 +534,27 @@ export class RelayClient {
         break;
       case "channels_remove":
         if (typeof frame.platform === "string") this.cb.onChannelsRemove?.(frame.platform, sig(frame), tsOf(frame));
+        break;
+      case "mcp_list":
+        this.cb.onMcpList?.();
+        break;
+      case "mcp_save":
+        // The connector rides in `draft` (same slot as channels_save), untyped — the
+        // daemon strict-validates it via mcpControl.save after the signature check.
+        if (frame.draft && typeof frame.draft === "object") {
+          this.cb.onMcpSave?.(
+            frame.draft,
+            typeof frame.sealedSecrets === "string" ? frame.sealedSecrets : undefined,
+            sig(frame),
+            tsOf(frame),
+          );
+        }
+        break;
+      case "mcp_set_enabled":
+        if (typeof frame.name === "string") this.cb.onMcpSetEnabled?.(frame.name, frame.enabled === true, sig(frame), tsOf(frame));
+        break;
+      case "mcp_remove":
+        if (typeof frame.name === "string") this.cb.onMcpRemove?.(frame.name, sig(frame), tsOf(frame));
         break;
       case "workflows_list":
         this.cb.onWorkflowsList?.();
@@ -869,6 +906,47 @@ export class RelayClient {
         tools: (c.tools ?? []).slice(0, 100).map((t) => clip(String(t), 128)),
         model: c.model ? clip(c.model, 200) : undefined,
         secretsSet: (c.secretsSet ?? []).slice(0, 20).map((s) => clip(String(s), 64)),
+      })),
+      busy: !!payload.busy,
+      message: payload.message ? clip(payload.message, 500) : undefined,
+    });
+  }
+
+  // Push the host's MCP connectors to the app's MCP manager. Sent on request and after
+  // each save/set_enabled/remove. Like sendChannels this is the user's OWN config echoed
+  // to their OWN app — but an env VALUE (a token) NEVER crosses this wire: only `envKeys`
+  // (names) and `secretsSet` (which of those are non-empty, by name) are sent, so a relay
+  // / server compromise can't lift a credential from this frame. List bounded like the
+  // other managers.
+  sendMcp(payload: {
+    items: {
+      name: string;
+      transport: string;
+      enabled: boolean;
+      command?: string;
+      argsPreview?: string;
+      url?: string;
+      host?: string;
+      oauth: boolean;
+      envKeys: string[];
+      secretsSet: string[];
+    }[];
+    busy?: boolean;
+    message?: string;
+  }): void {
+    this.rawSend({
+      type: "mcp",
+      items: payload.items.slice(0, 50).map((m) => ({
+        name: clip(String(m.name), 128),
+        transport: m.transport === "http" ? "http" : "stdio",
+        enabled: !!m.enabled,
+        command: m.command ? clip(m.command, 200) : undefined,
+        argsPreview: m.argsPreview ? clip(m.argsPreview, 500) : undefined,
+        url: m.url ? clip(m.url, 500) : undefined,
+        host: m.host ? clip(m.host, 200) : undefined,
+        oauth: !!m.oauth,
+        envKeys: (m.envKeys ?? []).slice(0, 30).map((k) => clip(String(k), 128)),
+        secretsSet: (m.secretsSet ?? []).slice(0, 30).map((k) => clip(String(k), 128)),
       })),
       busy: !!payload.busy,
       message: payload.message ? clip(payload.message, 500) : undefined,

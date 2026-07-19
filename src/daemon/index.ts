@@ -20,6 +20,7 @@ import { RelayClient, type TaskSpec } from "../remote/relayClient.ts";
 import { createLiveTaskSession, type LiveTaskHandle } from "../remote/liveTaskSession.ts";
 import { makeRoutinesControl } from "../remote/routinesControl.ts";
 import { makeChannelsControl } from "../remote/channelsControl.ts";
+import { makeMcpControl } from "../remote/mcpControl.ts";
 import { makeWorkflowsControl } from "../remote/workflowsControl.ts";
 import { runWorkflow as executeWorkflow, type RunnerDeps, type AgentRunSpec, type AgentRunResult, type ScriptRunResult } from "../workflows/runner.ts";
 import type { Workflow, Step } from "../workflows/schema.ts";
@@ -190,6 +191,13 @@ export class Daemon {
     runningPlatforms: () => readRunningPlatforms(),
   });
 
+  // App-facing MCP connector management (list/save/set_enabled/remove) over the
+  // daemon's relay — the daemon is the Node HOST that actually runs the adapter (a
+  // phone/web client can't). Edits the SHARED agent/mcp-desktop.json + mcp.json, so a
+  // machine has one MCP config whether it was set from the desktop (IPC) or the phone
+  // (relay). Tokens ride in a SEALED box (applyMcpSave) — the relay never sees them.
+  private readonly mcp = makeMcpControl();
+
   // App-facing workflow management (list/get/save/remove/run) over the daemon's relay.
   // Run-now is injected here since only the daemon owns the runner + its seams. A
   // workflow can carry a `script` step (RCE if forged), so every mutation is
@@ -287,6 +295,14 @@ export class Daemon {
         onChannelsList: () => this.pushChannels(),
         onChannelsSave: (draft, sealedSecrets, sig, ts) => this.pushChannels(this.applyChannelSave(draft, sealedSecrets, sig, ts)),
         onChannelsRemove: (platform, sig, ts) => this.pushChannels(this.guardControl("channels_remove", { platform }, sig, ts, () => this.channels.remove(platform as any).message)),
+        // MCP connector management from the app. `save` has its own signed verify (it
+        // carries a sealed env box — applyMcpSave); `set_enabled`/`remove` are
+        // account-signed here (H2 — a forged toggle arms/disarms a tool surface; a
+        // forged removal is a DoS). Then mcpControl writes the shared config + re-pushes.
+        onMcpList: () => this.pushMcp(),
+        onMcpSave: (draft, sealedSecrets, sig, ts) => this.pushMcp(this.applyMcpSave(draft, sealedSecrets, sig, ts)),
+        onMcpSetEnabled: (name, enabled, sig, ts) => this.pushMcp(this.guardControl("mcp_set_enabled", { name, enabled }, sig, ts, () => this.mcp.setEnabled(name, enabled).message)),
+        onMcpRemove: (name, sig, ts) => this.pushMcp(this.guardControl("mcp_remove", { name }, sig, ts, () => this.mcp.remove(name).message)),
         // Workflow management from the app. Each MUTATION is account-signed (H2) — a forged
         // workflows_save plants a `script` step that bypasses the permission gate (RCE),
         // and workflows_run executes the graph — so all three are verified (guardControl,
@@ -338,6 +354,42 @@ export class Daemon {
   // manager). `message` is a one-line result from the last mutation, if any.
   private pushChannels(message?: string): void {
     this.relay?.sendChannels({ items: this.channels.list(), message });
+  }
+
+  private pushMcp(message?: string): void {
+    this.relay?.sendMcp({ items: this.mcp.list(), message });
+  }
+
+  // Verify an account-signed MCP save (H2) that also carries a SEALED env box, then
+  // apply it. Same shape as applyChannelSave but routed through the generic signed
+  // envelope (action "mcp_save", args {draft, sealedSecrets}) — the action tag stops a
+  // signature made for any other frame from being replayed as an MCP save. Fail-closed:
+  // an unsigned/forged/stale frame returns the refusal message and NOTHING is written.
+  // The sealed box opens to { termId, env } — a token the relay never sees in the clear.
+  private applyMcpSave(draft: Record<string, unknown>, sealedSecrets?: string, sig?: string, ts?: number): string | undefined {
+    const auth = authorizeControl(
+      routineRelayId(),
+      "mcp_save",
+      { draft, sealedSecrets: sealedSecrets ?? null },
+      sig,
+      ts,
+    );
+    if (!auth.ok) return auth.message;
+
+    let withEnv = draft;
+    if (sealedSecrets) {
+      let opened: { termId?: string; env?: Record<string, string> };
+      try {
+        opened = openJsonFromApp(sealedSecrets);
+      } catch {
+        return "Couldn't decrypt the connector credentials — they may have been sealed to a different terminal.";
+      }
+      if (opened.termId !== routineRelayId()) {
+        return "These credentials were addressed to a different terminal.";
+      }
+      withEnv = { ...draft, env: opened.env ?? {} };
+    }
+    return this.mcp.save(withEnv as any).message;
   }
 
   // Push the current workflow summaries to an attached controller (its workflows
@@ -600,9 +652,14 @@ export class Daemon {
     const config = loadDaemonConfig();
     const modelSpec = routine.model ?? config.defaultModel;
     const split = splitRoutineTools(routine.tools);
-    const allowedTools = split.builtin.length > 0 ? split.builtin : SAFE_TOOLS;
-    if (split.mcp.length > 0 || routine.delivery.includes("email")) {
-      log("  note: MCP tools + email delivery are not wired yet (Phase 5) — skipping those");
+    // MCP tools (server__tool) join the allow-list: the mcpAdapter loaded in runSession
+    // registers them from the shared mcp.json, and the routine's SIGNED tool list is the
+    // authorization boundary under the bypass gate (same as builtin tools). An http/OAuth
+    // connector that never completed its browser flow simply errors at call time.
+    const builtinAllow = split.builtin.length > 0 ? split.builtin : SAFE_TOOLS;
+    const allowedTools = [...builtinAllow, ...split.mcp];
+    if (routine.delivery.includes("email")) {
+      log("  note: email delivery is not wired yet (Phase 5) — skipping it");
     }
 
     const { out, status, error } = await this.runSession({
@@ -655,11 +712,19 @@ export class Daemon {
           return "deny";
         },
       };
+      // MCP adapter (Phase 5): registers the tools from the shared agent/mcp.json — the
+      // same projection the app's MCP manager (mcpControl) writes over the relay. No
+      // servers configured → a no-op. Dynamically imported so it loads only when a
+      // session actually runs (Pi is already booted by here). The specifier is a
+      // variable so tsc treats it as Promise<any> and doesn't pull the third-party
+      // adapter's own .ts into our typecheck — same intent as the desktop's agentImport.
+      const mcpAdapterSpec = "pi-mcp-adapter";
+      const { default: mcpAdapter } = await import(mcpAdapterSpec);
       const services = await createAgentSessionServices({
         cwd: spec.cwd,
         agentDir: agentDir(),
         resourceLoaderOptions: {
-          extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider()] as any,
+          extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider(), mcpAdapter] as any,
         },
       });
       servicesRef = services as any;
@@ -724,7 +789,7 @@ export class Daemon {
     const cwd = spec.cwd && spec.cwd.trim() ? spec.cwd : process.cwd();
     const modelSpec = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
     const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
-    const allowedTools = split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS;
+    const allowedTools = [...(split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS), ...(split?.mcp ?? [])];
     const title = deriveTaskTitle(spec);
     const key = `task:${title}`;
     if (this.running.has(key)) {
@@ -904,7 +969,7 @@ export class Daemon {
     const config = loadDaemonConfig();
     const model = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
     const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
-    const tools = split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS;
+    const tools = [...(split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS), ...(split?.mcp ?? [])];
     const { out, status, error } = await this.runSession({ prompt: spec.prompt, cwd: spec.cwd, model, tools });
     let output: Record<string, unknown> = {};
     try { const p = JSON.parse(out.trim()); if (p && typeof p === "object" && !Array.isArray(p)) output = p as Record<string, unknown>; } catch { /* non-JSON → raw text only */ }
