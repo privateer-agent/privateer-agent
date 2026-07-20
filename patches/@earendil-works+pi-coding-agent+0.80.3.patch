@@ -19,7 +19,7 @@ index e223ce1..2bdab10 100644
          if (await this._checkCompaction(msg)) {
              return true;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index 5d65200..a997ad7 100644
+index 5d65200..6bacdfc 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 @@ -2042,7 +2042,17 @@ export class InteractiveMode {
@@ -41,3 +41,28 @@ index 5d65200..a997ad7 100644
                  return;
              }
              if (text === "/export" || text.startsWith("/export ")) {
+@@ -2111,8 +2121,23 @@ export class InteractiveMode {
+                 return;
+             }
+             if (text === "/logout") {
+-                this.showOAuthSelector("logout");
+                 this.editor.setText("");
++                // Privateer redirect: /logout must actually log you out. Pi's built-in
++                // only clears Pi's authStorage, which leaves the Privateer machine
++                // login in ~/.privateer/credentials.json untouched — so on a signed-in
++                // machine it reported "No stored credentials to remove" and changed
++                // nothing. Route to the account logout instead, which revokes this
++                // machine's whole token family (login + every terminal spawned from it)
++                // and wipes local state. Target is `/privateer logout` rather than the
++                // extension's own `/logout` so this can never re-enter the branch it
++                // was dispatched from. Falls back to Pi's selector when the extension
++                // isn't loaded.
++                if (this.isExtensionCommand("/privateer")) {
++                    await this.session.prompt("/privateer logout");
++                }
++                else {
++                    this.showOAuthSelector("logout");
++                }
+                 return;
+             }
+             if (text === "/new") {

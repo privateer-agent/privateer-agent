@@ -5,19 +5,24 @@
 //   1. A branded startup header — the anchor mark + "✻ PRIVATEER" wordmark + the
 //      "Chart your own course privately." tagline (ported from tree-cli's Banner).
 //   2. A live status-bar badge (⚓ account) showing the sign-in state at a glance.
-//   3. Sign-in UX — /signin, /signout, and a /privateer hub — which drive the
+//   3. Auth UX — /login, /logout, and a /privateer hub — which drive the
 //      device-code flow the account channel needs.
 //
-// Pi already owns /login and /logout for PROVIDER auth (and /whoami), so we do NOT
-// shadow them. The account provider now registers unconditionally (see
-// makeAccountProvider), so Privateer appears under Pi's /login "Use a subscription"
-// list and a first-time user CAN sign in through provider auth. /signin remains as a
-// friendlier, dedicated shortcut that drives the same account device-code flow
-// directly — one obvious command instead of /login → pick a provider.
+// ONE vocabulary, deliberately: log in / log out. This file used to avoid shadowing
+// Pi's built-in /login and /logout and shipped /signin and /signout alongside them,
+// which left the user with two auth vocabularies and — worse — a /logout that did
+// not log you out. Pi's /logout only clears Pi's own authStorage; the Privateer
+// machine login lives in ~/.privateer/credentials.json and survived it, so /logout
+// on a signed-in machine reported "No stored credentials to remove" and changed
+// nothing. We now own both verbs: /logout here is canonical and Pi's built-in is
+// redirected to it (patches/, same mechanism as the /model → /models redirect).
+// /signin and /signout stay as undocumented aliases for muscle memory.
 //
-// On a successful /signin we hot-register the account provider so privateer/* models
-// appear immediately (the account catalog refreshes to the live listing without a
-// restart).
+// The account provider also registers unconditionally (see makeAccountProvider), so
+// Privateer appears under Pi's "Use a subscription" list and a first-time user can
+// log in that way too. On a successful login we hot-register the account provider so
+// privateer/* models appear immediately (the account catalog refreshes to the live
+// listing without a restart).
 
 import { readFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -349,7 +354,7 @@ export default function privateerBrand(pi: any): void {
     if (priv.hasCredentials()) {
       const u = priv.currentUser();
       return ctx?.ui?.notify?.(
-        `Already signed in as ${u?.email ?? u?.id}. Run /signout to switch accounts.`,
+        `Already signed in as ${u?.email ?? u?.id}. Run /logout to switch accounts.`,
         "info",
       );
     }
@@ -388,13 +393,20 @@ export default function privateerBrand(pi: any): void {
     }
   }
 
+  // Log out of this MACHINE — the login and every terminal spawned from it (see
+  // priv.logout). Unlike the old terminal-scoped sign-out this makes a blocking
+  // network call, so say what's happening before the round trip rather than after.
   async function doSignOut(ctx: any): Promise<void> {
     if (!priv.hasCredentials()) return ctx?.ui?.notify?.("Not signed in.", "info");
     const u = priv.currentUser();
-    await priv.logout();
+    ctx?.ui?.notify?.("Signing out of Privateer…", "info");
+    await priv.logout(); // never throws: local state is wiped whatever the network did
     dropPersistedAccount(ctx);
     refresh(ctx);
-    ctx?.ui?.notify?.(`Signed out${u?.email ? ` (${u.email})` : ""}. Drop anchor for now.`, "info");
+    ctx?.ui?.notify?.(
+      `Signed out${u?.email ? ` (${u.email})` : ""} — this machine and its terminals. Drop anchor for now.`,
+      "info",
+    );
   }
 
   function showStatus(ctx: any): void {
@@ -402,7 +414,7 @@ export default function privateerBrand(pi: any): void {
     ctx?.ui?.notify?.(
       u
         ? `Signed in to Privateer as ${u.email ?? u.id}.`
-        : "Not signed in. Run /signin to connect your Privateer account.",
+        : "Not logged in. Run /login to connect your Privateer account.",
       "info",
     );
   }
@@ -529,27 +541,38 @@ export default function privateerBrand(pi: any): void {
     // that's now dead server-side (see dropPersistedAccount).
     dropPersistedAccount(ctxRef);
     refresh(ctxRef);
-    ctxRef?.ui?.notify?.("Your Privateer session expired. Run /signin to sign back in.", "warning");
+    ctxRef?.ui?.notify?.("Your Privateer session expired. Run /login to sign back in.", "warning");
   });
 
   pi.registerCommand?.("update", {
     description: "Update Privateer to the latest release (npm i -g privateer-agent@latest)",
     handler: (_args: string, ctx: any) => doUpdate(ctx),
   });
-  pi.registerCommand?.("signin", {
-    description: "Sign in to your Privateer account (device-code flow)",
+  // ONE vocabulary: log in / log out. Pi's own built-ins are /login and /logout, so
+  // matching them is what makes the pair feel like a single concept instead of two
+  // half-overlapping ones (Pi's /logout used to clear only Pi's authStorage while the
+  // machine login lived on, which read as "logout doesn't work"). /logout here is the
+  // canonical command; the Pi built-in is redirected to it by patches/, the same
+  // mechanism as the /model → /models redirect.
+  //
+  // signin/signout stay registered as undocumented aliases — they were the shipped
+  // names, they're in muscle memory and in older docs, and an alias costs nothing.
+  pi.registerCommand?.("login", {
+    description: "Log in to your Privateer account (device-code flow)",
     handler: (_args: string, ctx: any) => doSignIn(ctx),
   });
-  pi.registerCommand?.("signout", {
-    description: "Sign out of your Privateer account on this terminal",
+  pi.registerCommand?.("logout", {
+    description: "Log out of Privateer on this machine (revokes all its terminals)",
     handler: (_args: string, ctx: any) => doSignOut(ctx),
   });
+  pi.registerCommand?.("signin", { description: "", handler: (_a: string, ctx: any) => doSignIn(ctx) });
+  pi.registerCommand?.("signout", { description: "", handler: (_a: string, ctx: any) => doSignOut(ctx) });
   pi.registerCommand?.("privateer", {
-    description: "Privateer account: /privateer [status | signin | signout]",
+    description: "Privateer account: /privateer [status | login | logout]",
     handler: (args: string, ctx: any) => {
       const sub = String(args ?? "").trim().toLowerCase().split(/\s+/)[0];
-      if (sub === "signin" || sub === "login") return doSignIn(ctx);
-      if (sub === "signout" || sub === "logout") return doSignOut(ctx);
+      if (sub === "login" || sub === "signin") return doSignIn(ctx);
+      if (sub === "logout" || sub === "signout") return doSignOut(ctx);
       return showStatus(ctx);
     },
   });

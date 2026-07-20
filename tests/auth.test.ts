@@ -19,6 +19,7 @@ import {
   warmSession,
   revokeLocalSessions,
   revokeAccountSession,
+  logout,
   type Credentials,
 } from "../src/auth/privateer.ts";
 
@@ -133,6 +134,107 @@ test("revokeLocalSessions revokes both the child and the account session on quit
     await revokeLocalSessions();
     await revokeAccountSession();
     assert.equal(calls.length, 0, "second quit-revoke + sign-out are no-ops (sessions already gone)");
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedEnv === undefined) delete process.env.PRIVATEER_SERVER_URL;
+    else process.env.PRIVATEER_SERVER_URL = savedEnv;
+    clearCredentials();
+  }
+});
+
+// ── Machine logout ───────────────────────────────────────────────────────────
+// logout() revokes THIS MACHINE — the login plus every terminal spawned from it —
+// and nothing beyond it. Three properties are load-bearing enough to pin down here,
+// because each one was a real defect:
+//
+//   1. It must NOT call POST /auth/logout. That endpoint is revokeAllUserSessions:
+//      the whole account, every device, including the user's phone. Logging out of
+//      one laptop must never sign you out of the app.
+//   2. It must NOT authenticate through authedFetch/apiRequest. Those spawn a CHILD
+//      session, which the server refuses with 429 at the per-machine child cap — so
+//      the logout never reached the server exactly when it was needed most (a capped
+//      machine is the one you most want to log out of). It authenticates with the
+//      PARENT, which is not capped.
+//   3. It must wipe local state even when the network fails outright.
+
+test("logout revokes the machine's family via the parent, not the account or a child", async () => {
+  const savedFetch = globalThis.fetch;
+  const savedEnv = process.env.PRIVATEER_SERVER_URL;
+  const calls: { url: string; method: string; auth?: string; body?: string }[] = [];
+  globalThis.fetch = (async (input: any, init: any = {}) => {
+    const url = String(input);
+    const headers = new Headers(init.headers);
+    calls.push({
+      url,
+      method: init.method ?? "GET",
+      auth: headers.get("Authorization") ?? undefined,
+      body: typeof init.body === "string" ? init.body : undefined,
+    });
+    if (url.endsWith("/auth/refresh")) {
+      // The parent's stored access token is expired by design; logout rotates for a
+      // live one before it can authenticate the DELETE.
+      return new Response(JSON.stringify({ accessToken: "fresh-parent-at", refreshToken: "rotated-parent-rt" }), { status: 200 });
+    }
+    if (url.endsWith("/auth/session/spawn")) {
+      // At the cap this is what the server says. Reaching here at all is the bug.
+      return new Response(JSON.stringify({ message: "Too many active terminals", code: "CHILD_SESSION_CAP" }), { status: 429 });
+    }
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  try {
+    process.env.PRIVATEER_SERVER_URL = "https://acct.example.com";
+    saveCredentials({
+      accessToken: "expired-parent-at",
+      refreshToken: "parent-rt",
+      user: { id: "u1", email: "a@b.co", solanaPublicKey: null, kekSource: null },
+      serverBaseUrl: "https://acct.example.com",
+    });
+
+    await logout();
+
+    assert.equal(calls.filter((c) => c.url.endsWith("/auth/logout")).length, 0,
+      "must not call the account-wide logout — that would sign out the user's phone too");
+    assert.equal(calls.filter((c) => c.url.endsWith("/auth/session/spawn")).length, 0,
+      "must not spawn a child to authenticate — that deadlocks at the child-session cap");
+
+    const refresh = calls.filter((c) => c.url.endsWith("/auth/refresh"));
+    assert.equal(refresh.length, 1, "rotates the PARENT once for a live access token");
+    assert.match(refresh[0].body ?? "", /parent-rt/, "rotates the parent refresh token, not a child's");
+
+    const deletes = calls.filter((c) => c.method === "DELETE");
+    assert.equal(deletes.length, 1);
+    assert.ok(deletes[0].url.endsWith("/auth/session/current"),
+      "self-scoped revoke — the server cascades it to every child of this machine's family");
+    assert.equal(deletes[0].auth, "Bearer fresh-parent-at", "authenticates as the parent, which the cap never blocks");
+
+    assert.equal(hasCredentials(), false, "local credentials wiped");
+    assert.equal(currentUser(), null);
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedEnv === undefined) delete process.env.PRIVATEER_SERVER_URL;
+    else process.env.PRIVATEER_SERVER_URL = savedEnv;
+    clearCredentials();
+  }
+});
+
+test("logout wipes local state even when the server is unreachable", async () => {
+  const savedFetch = globalThis.fetch;
+  const savedEnv = process.env.PRIVATEER_SERVER_URL;
+  globalThis.fetch = (async () => {
+    throw new Error("network down");
+  }) as typeof fetch;
+  try {
+    process.env.PRIVATEER_SERVER_URL = "https://acct.example.com";
+    saveCredentials({
+      accessToken: "at",
+      refreshToken: "rt",
+      user: { id: "u1", email: "a@b.co", solanaPublicKey: null, kekSource: null },
+      serverBaseUrl: "https://acct.example.com",
+    });
+
+    await logout(); // must not throw — an offline logout still logs you out locally
+
+    assert.equal(hasCredentials(), false);
   } finally {
     globalThis.fetch = savedFetch;
     if (savedEnv === undefined) delete process.env.PRIVATEER_SERVER_URL;

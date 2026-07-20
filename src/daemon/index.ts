@@ -326,7 +326,7 @@ export class Daemon {
         // The account signed this daemon out server-side (revoked from the app's Linked
         // Devices). Beyond ending remote access (onTerminate), this wipes the machine
         // login: drop the relay and clear credentials, so routines/tasks stop cleanly
-        // instead of dead-ending on a 401 each run. Stays idle until you /signin on this
+        // instead of dead-ending on a 401 each run. Stays idle until you /login on this
         // machine and restart the daemon (the relayTerminated guard, as with onTerminate).
         onRevoked: () => {
           this.relayTerminated = true;
@@ -334,7 +334,7 @@ export class Daemon {
           this.relay?.stop();
           this.relay = undefined;
           handleServerRevoke();
-          log("account signed out from the app (session revoked) — cleared credentials; idle until you run /signin on this machine and restart the daemon");
+          log("account signed out from the app (session revoked) — cleared credentials; idle until you run /login on this machine and restart the daemon");
         },
         onStatus: (text) => log(`relay: ${text}`),
         onDisconnected: () => {

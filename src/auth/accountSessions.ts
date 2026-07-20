@@ -144,7 +144,10 @@ export function dropOwnedSession(pid: number): void {
   writeRegistry(reg);
 }
 
-// Test seam: wipe the registry file.
+// Wipe the registry. Used by logout(), where the server has just revoked this
+// machine's whole token family: every entry now names a dead session, and leaving
+// them behind would offer the next login a list of orphans to "reclaim" that can
+// only fail. Also a test seam.
 export function clearOwnedSessions(): void {
   try {
     rmSync(accountSessionsPath(), { force: true });

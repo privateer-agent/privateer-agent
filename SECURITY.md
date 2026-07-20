@@ -30,7 +30,11 @@ npm audit signatures                          # verifies registry signatures + p
 ```
 
 If a version lacks provenance, it did not come from this workflow. Treat that as
-suspicious and report it.
+suspicious and report it — with one documented exception: **0.6.7 is the first release
+published this way.** Trusted publishing was misconfigured until then, so every earlier
+version (through 0.6.6) was published by hand from a maintainer's machine and carries no
+attestation. Those are not forgeries, but they are not independently verifiable either.
+If that distinction matters to you, use 0.6.7 or later.
 
 ## The permission gate
 

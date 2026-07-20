@@ -21,6 +21,7 @@ import {
   forgetOwnedSession,
   orphanedSessions,
   dropOwnedSession,
+  clearOwnedSessions,
 } from "./accountSessions.ts";
 import { isAccountCapCode } from "../engine/errors.ts";
 import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
@@ -602,15 +603,55 @@ export async function revokeLocalSessions(timeoutMs = 1500): Promise<void> {
 // ── Logout ───────────────────────────────────────────────────────────────────
 
 /**
- * Log out this terminal: revoke its session server-side (best effort) and wipe
- * local credentials. Other devices/sessions are untouched.
+ * Log out this MACHINE: revoke the machine login and every terminal session
+ * spawned from it, then wipe all local auth state. Other devices (the phone app,
+ * another laptop) keep their own logins — each has its own token family.
+ *
+ * Two things this deliberately does NOT do, both of which it used to:
+ *
+ * 1. It does not POST /auth/logout. That endpoint calls revokeAllUserSessions —
+ *    the entire ACCOUNT, every device including the app — while this function's
+ *    contract (and its old doc comment) promised the opposite. Signing out of one
+ *    terminal must not sign you out of your phone.
+ *
+ * 2. It does not go through apiRequest/authedFetch. Those authenticate with a CHILD
+ *    session and spawn one if absent — so at the per-machine child cap the spawn
+ *    throws 429 and the logout never reaches the server AT ALL. That was a deadlock:
+ *    the cap blocked the one call that clears the cap. We authenticate with the
+ *    PARENT instead, which is never subject to the cap.
+ *
+ * The parent's stored access token is usually expired (it is minted once at /login
+ * and never rotated — the refresh token is the liveness proof), so we rotate for a
+ * fresh one first. Rotation is free here precisely because we are destroying the
+ * credential either way: nothing downstream needs the token we burn. rotateSession
+ * is the no-ownership-side-effects variant, so this cannot clobber the registry
+ * entry of a session we are about to revoke wholesale anyway.
+ *
+ * DELETE /auth/session/current then revokes the parent's family, which the server
+ * cascades to every row with `parentFamilyId === familyId` — i.e. all this machine's
+ * terminals, including the orphans left by terminals that died without their
+ * shutdown hook. That cascade is what makes an accumulated cap self-clearing:
+ * logout, log back in, and the machine starts from zero live children.
+ *
+ * Local state is wiped unconditionally at the end, whatever the network did. A
+ * logout that can't reach the server must still leave you logged out locally —
+ * the rows it failed to revoke age out on their TTL.
  */
 export async function logout(): Promise<void> {
-  try {
-    await apiRequest("/auth/logout", { method: "POST" });
-  } catch {
-    /* best effort — clear locally regardless */
+  const parent = loadCredentials();
+  if (parent) {
+    try {
+      const fresh = await rotateSession(parent.refreshToken);
+      await deleteSession(fresh.access, 5000);
+    } catch {
+      /* offline, or the login was already dead server-side — wipe locally anyway */
+    }
   }
+  // In-memory sessions are gone with the family above; drop the handles so nothing
+  // tries to revoke them individually on the way out.
+  _child = null;
+  _account = null;
+  clearOwnedSessions(); // every entry named a session the cascade just killed
   clearCredentials();
 }
 
