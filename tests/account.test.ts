@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { makeAccountProvider, privateerOAuthProvider } from "../src/providers/account.ts";
-import { clearCredentials } from "../src/auth/privateer.ts";
+import { clearCredentials, saveCredentials } from "../src/auth/privateer.ts";
 
 // Regression: Pi's /login builds its "Use a subscription" list from the OAuth
 // providers registered via registerProvider({ oauth }). The account provider used to
@@ -71,6 +71,65 @@ test("login() aborts the device poll when the dialog signal fires", async () => 
     assert.equal(err!.message, "Login cancelled", "cancel message must match Pi's suppressed string exactly");
   } finally {
     globalThis.fetch = realFetch;
+    if (prevUrl === undefined) delete process.env.PRIVATEER_SERVER_URL;
+    else process.env.PRIVATEER_SERVER_URL = prevUrl;
+  }
+});
+
+// Regression: the TUI had NO startup seed for the account credential. Pi only obtains
+// one via /login, and our shutdown hook revokes the account session AND deletes its
+// persisted auth.json entry — so a signed-in user who quit and relaunched landed on
+// privateer/* with no key and hit "No API key found for privateer." on the first
+// prompt, while the banner still read "connected". session_start must spawn a fresh
+// session and store it as the provider's OAuth credential.
+test("session_start seeds Pi's auth storage with a spawned account credential", async () => {
+  const prevUrl = process.env.PRIVATEER_SERVER_URL;
+  process.env.PRIVATEER_SERVER_URL = "https://stub.privateer.test";
+  const realFetch = globalThis.fetch;
+  saveCredentials({
+    accessToken: "parent-access",
+    refreshToken: "parent-refresh",
+    user: { id: "u1" },
+    serverBaseUrl: "https://stub.privateer.test",
+  } as any);
+
+  globalThis.fetch = (async (input: any) => {
+    const url = String(input);
+    if (url.endsWith("/auth/session/spawn")) {
+      return new Response(JSON.stringify({ accessToken: "child-access", refreshToken: "child-refresh" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  const handlers: Record<string, (e: unknown, ctx: unknown) => void> = {};
+  const stored: { provider: string; cred: any }[] = [];
+  const ctx = { modelRegistry: { authStorage: { set: (p: string, c: any) => stored.push({ provider: p, cred: c }) } } };
+
+  try {
+    makeAccountProvider()({
+      registerProvider: () => {},
+      on: (event: string, handler: (e: unknown, ctx: unknown) => void) => { handlers[event] = handler; },
+    });
+    assert.ok(handlers.session_start, "provider must subscribe to session_start");
+    handlers.session_start!(undefined, ctx);
+    // The handler is fire-and-forget; let the spawn settle.
+    for (let i = 0; i < 20 && stored.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(stored.length, 1, "exactly one credential must be seeded");
+    assert.equal(stored[0].provider, "privateer");
+    assert.equal(stored[0].cred.type, "oauth", "Pi resolves the key through the registered oauth provider");
+    assert.equal(stored[0].cred.access, "child-access");
+
+    // A second session_start (resume/fork/reload) must NOT spawn another device row.
+    handlers.session_start!(undefined, ctx);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(stored.length, 1, "seeding is once per process, not once per session_start");
+  } finally {
+    globalThis.fetch = realFetch;
+    clearCredentials();
     if (prevUrl === undefined) delete process.env.PRIVATEER_SERVER_URL;
     else process.env.PRIVATEER_SERVER_URL = prevUrl;
   }

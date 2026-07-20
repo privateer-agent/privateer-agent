@@ -23,7 +23,8 @@
 </p>
 
 ```bash
-curl -fsSL https://privateer.pro/install.sh | sh    # installs the `privateer` command
+curl -fsSL https://privateer.pro/install.sh | sh    # macOS / Linux — installs the `privateer` command
+irm https://privateer.pro/install.ps1 | iex         # Windows (PowerShell)
 npx privateer-agent                                 # or run it instantly, nothing installed
 ```
 
@@ -33,9 +34,13 @@ Point it at a frontier model today and a local Ollama model tomorrow — **OpenR
 inference), **Venice** / **Fireworks** (no-retention inference), and any **custom
 OpenAI-compatible endpoint** (LM Studio, vLLM, llama.cpp…) are interchangeable at
 `/model` time, including mid-session. No model lock-in, no separate code paths. MCP
-servers, sub-agents, scheduled routines, and one-tap approval from your phone are
-included — and every one of the agent's actions runs through a **safe-by-default
-permission gate**.
+servers, sub-agents, scheduled routines, multi-step workflows, chat-app bridges, and
+one-tap approval from your phone are included — and every one of the agent's actions runs
+through a **safe-by-default permission gate**.
+
+Privateer runs in three places, over one account and one config: the **terminal**, a
+**background daemon** for unattended work, and the **Privateer app** on
+[phone, web](https://privateer.pro), and [desktop](#the-privateer-app).
 
 ## Why Privateer?
 
@@ -95,12 +100,21 @@ silently. The moat is swappable; the floor under it holds.
 - **Honest privacy posture, graded.** A verified TEE and a "we promise not to retain"
   policy are **never rendered the same** — the badge tells you exactly how strong the
   guarantee is (cryptographically verified → observable → policy → none).
-- **Approve it from your phone.** Link the terminal to the Privateer app with
-  `/remote-access` (off by default) and Allow/Deny every action remotely while execution
-  stays on your machine — supervise long agent runs from anywhere.
+- **Drive it from your phone.** Link the terminal with `/remote-access` (off by default) and
+  the Privateer app can send prompts, stream output, and Allow/Deny every action — while
+  execution stays on your machine. Sub-agent actions surface for approval the same way.
+- **Manage it from the app.** Extensions, skills, routines, workflows, MCP connectors, and
+  chat-app channels are all configurable from your phone or the web app, against any linked
+  terminal. See [The Privateer app](#the-privateer-app).
+- **A desktop app.** The same agent hosted inside a local Electron shell — no relay hop, works
+  offline, multi-window with per-window MCP connectors. Shares your CLI login and config.
 - **Scheduled routines.** A background daemon runs approved tasks unattended — cron or
   one-off — and the agent can schedule its own follow-up work. Results deliver to a file,
   the next session, your phone, email, or a webhook.
+- **Declarative workflows.** Multi-step agent pipelines as YAML — typed steps, conditional
+  routing between them, and `human_gate` steps that pause for your approval and resume.
+- **Chat-app channels.** Bridge the agent into Telegram, Slack, Discord, or WhatsApp with
+  role-based approval — admins can approve actions, members are read-only.
 - **MCP servers, sub-agents & skills.** Connect Model Context Protocol servers (local stdio
   or remote HTTP with OAuth), delegate work to bounded parallel sub-agents, and drop in
   skills — all gated like everything else.
@@ -124,14 +138,27 @@ No install at all: `npx privateer-agent`.
 ## Install
 
 ```bash
-npm install -g privateer-agent          # installs the `privateer` command
-# or run it without installing:
-npx privateer-agent
-# or the one-liner installer (verifies Node, then installs globally):
-curl -fsSL https://privateer.pro/install.sh | sh
+# the one-liner installer — downloads a self-contained bundle, no Node needed:
+curl -fsSL https://privateer.pro/install.sh | sh    # macOS / Linux
+irm https://privateer.pro/install.ps1 | iex        # Windows (PowerShell)
+
+# or via npm, if you'd rather manage it yourself (needs Node ≥ 22.19):
+npm install -g privateer-agent
+npx privateer-agent                                 # run without installing
 ```
 
-**Requirements:** macOS or Linux, Node.js ≥ 22.19.0.
+**Requirements:** macOS (arm64/x64), Linux (x64), or Windows (x64). The installers ship a
+**pinned Node runtime inside the bundle**, so you don't need Node or npm on your machine at
+all — Node ≥ 22.19.0 is only required for the `npm` / `npx` path.
+
+Update in place with **`privateer update`** (bundle-aware: it re-runs the right installer
+for how you installed) or check your version with `privateer --version`.
+
+> **Windows:** the agent's command tool needs a bash, which Windows doesn't ship. Install
+> Git for Windows (or WSL) and Privateer will find it; the launcher checks at startup and
+> tells you how to fix it if not. Override the choice with `shellPath` in
+> `~/.privateer/agent/settings.json`. Linux arm64 and Windows arm64 bundles aren't built
+> yet — arm64 Windows runs the x64 bundle under emulation.
 
 ### Verifying what you're about to run
 
@@ -248,13 +275,106 @@ with `/signout`; manage linked terminals from the app.
 > to spend on your account. If someone sends you a code and asks you to approve it, don't —
 > that hands *them* a billed session on *your* account.
 
-## Approve from your phone
+## The Privateer app
 
-Turn on **`/remote-access`** (off by default) to link this terminal to the Privateer app. The
-app can then drive the terminal — prompts come down, and each proposed action goes up for
-**Allow/Deny** — while execution stays on your machine. The relay is live-only (nothing is
-archived), carries no keys, and output is size-truncated and run through a best-effort secret
-redactor before it leaves.
+The same account drives Privateer from **iOS, Android, [the web app](https://privateer.pro),
+and a desktop app**. The terminal stays where the work happens — the app is a remote control
+and a management surface for it.
+
+### Linking a terminal
+
+1. Run **`privateer`** and **`/signin`**. It prints a short device code.
+2. Open the app → **Link a terminal**, enter the code (or tap the deep link). No password or
+   wallet key ever touches the terminal, and the app pins the terminal's public key on first
+   link.
+3. In the terminal, turn on **`/remote-access`** (off by default). The terminal now shows
+   **Online** in the app.
+
+> **Only approve a code you generated yourself.** Approving someone else's code hands *them*
+> a billed session on *your* account.
+
+### What you can do from the app
+
+| | |
+|---|---|
+| **Drive a session** | Send prompts, watch streamed output, and **Allow/Deny** each proposed action — including actions from sub-agents the session spawned |
+| **Spawn an agent** | Start a one-shot task on the daemon: *background* (headless, read-only toolset, result sealed to your outbox) or *live* (a fresh drivable session) |
+| **Routines** | Create, edit, pause, run, and delete scheduled unattended tasks |
+| **Workflows** | List, run, and monitor multi-step workflows; answer `human_gate` steps to resume a paused run |
+| **MCP connectors** | Add, edit, and enable MCP servers; credentials are sealed to the terminal and write-only |
+| **Channels** | Configure the Telegram / Slack / Discord / WhatsApp bridges — admins, members, posture, tool ceiling, model |
+| **Extensions & skills** | Install Pi extensions from the catalog; create, edit, and run `SKILL.md` skills |
+
+Config changes that carry secrets or executable content (MCP credentials, channel bot
+tokens, workflows with `script` steps) are **sealed to the terminal's pinned key and signed
+by your account** — the relay forwards them blind and can neither read nor forge them.
+
+The relay itself is live-only (nothing is archived), carries no API keys, and output is
+size-truncated and run through a best-effort secret redactor before it leaves your machine.
+
+### Desktop app
+
+The desktop app hosts the agent **in-process** and talks to it over loopback IPC — no relay,
+no network hop, and it works offline. It reads the same `~/.privateer` home, so it shares
+your CLI login, model config, and MCP catalog. Multi-window, with a per-window subset of
+your MCP connectors and a native folder picker.
+
+Download for [macOS](https://privateer.pro/download/mac) (Apple silicon),
+[macOS Intel](https://privateer.pro/download/mac-intel), or
+[Windows](https://privateer.pro/download/windows).
+
+It's an early release and **not yet code-signed or notarized** — macOS will warn on first
+open. Routines and channels deliberately aren't hosted here: those belong to the always-on
+daemon, so background work still wants `privateer daemon install`.
+
+## Run it unattended — the daemon
+
+A resident background daemon runs scheduled routines, executes workflows, and accepts task
+spawns from the app — with no terminal open.
+
+```bash
+privateer daemon install      # install as a login service (auto-starts, reachable from the app)
+privateer daemon status       # service installed? daemon answering?
+privateer daemon run          # or just run it in the foreground
+privateer daemon uninstall
+```
+
+Installs as a **launchd user agent** on macOS or a **`systemd --user` unit** on Linux — no
+root, no sudo. (There's no Windows service path yet; use `privateer daemon run`.)
+
+Everything the daemon does still runs through the permission gate. Actions needing approval
+surface in the app; routines you approved once run on their own schedule.
+
+## Workflows
+
+A workflow is a **YAML file describing a multi-step agent pipeline** — a flat graph of typed
+steps (`agent`, `script`, `human_gate`) with conditional routes between them and `{{ }}`
+templating to pass values along. A `human_gate` step pauses the run for your approval and
+resumes when you answer it, including from your phone.
+
+The engine ships in the standalone
+[`privateer-workflow`](https://www.npmjs.com/package/privateer-workflow) package. Today the
+user-facing surface is the **app** (save, run, monitor, share) and the **daemon** that
+executes them — there's no `/workflow` command in the terminal yet. Schedule one by pointing
+a routine at it.
+
+Because a workflow can carry `script` steps, saving one from the app requires your **account
+signature** — the server can't inject a workflow onto your daemon.
+
+## Chat-app channels
+
+Bridge the agent into **Telegram, Slack, Discord, or WhatsApp** so you can hand it work from
+a group chat. Each channel has:
+
+- **Roles** — `admins` can approve actions; `members` are always read-only, no exceptions.
+- **A posture** — `readonly`, `approve` (default), or `auto`.
+- **A hard tool ceiling** — a per-channel allowlist the agent can't exceed even in `auto`.
+
+Configure a channel from the app, or by hand in the `channels` block of
+`~/.privateer/config.json`. Changes take effect on restart, by design. Bot tokens set from
+the app are write-only — the app can name them but never read them back. Note that tokens
+live in plaintext in `config.json` on your machine, and every channel action is appended to
+`~/.privateer/channels-audit.log`.
 
 ## Permission modes
 
@@ -289,13 +409,34 @@ Everything below is a **Pi extension** loaded by discovery (see [Built on Pi](#b
 drop your own into `~/.privateer/agent/extensions/` and it loads the same way, gated like the rest.
 
 - **MCP servers** (`pi-mcp-adapter`) — declare them and their tools become first-class, gated
-  like the rest (local stdio, or remote HTTP with interactive OAuth).
-- **Sub-agents** (`pi-subagents`) — delegate investigations to bounded parallel agents that run
-  under the same permission gate.
+  like the rest (local stdio, or remote HTTP with interactive OAuth). One catalog at
+  `~/.privateer/agent/mcp-desktop.json` is shared by the CLI, the daemon, and the desktop
+  app, so a machine has one coherent connector config.
+- **Sub-agents** (`pi-subagents`) — delegate investigations to bounded parallel agents. Children
+  run as headless child processes that **inherit the moat**, so their actions hit the same
+  permission gate and their approvals surface on your phone.
 - **Routines** — saved tasks the daemon runs unattended; ask the agent to schedule work and
   approve it once.
+- **Workflows** — declarative multi-step pipelines the daemon executes; see
+  [Workflows](#workflows).
 - **Web tools** (`rpiv-web-tools`) — private-by-default web search/fetch with pluggable backends
   (self-hosted SearXNG for fully private search).
+
+## Command reference
+
+| Command | What it does |
+|---|---|
+| `/model` · `/models` | switch model; `/models` is a searchable picker with TEE/ZDR privacy shields |
+| `/mode` | switch permission mode |
+| `/verify` | fetch and check the TEE attestation for the current model |
+| `/signin` · `/signout` | sign in to a Privateer account (device flow) / sign out |
+| `/remote-access` | link this terminal to the app and allow it to drive (off by default) |
+| `/extensions` | list loaded Pi extensions |
+| `/init` | scaffold a starter `PRIVATEER.md` in this directory |
+| `/update` · `/privateer` | update to the latest release / Privateer status and posture |
+
+Shell subcommands: `privateer` (interactive), `privateer update`, `privateer daemon …`,
+`privateer --no-quarter`, `privateer --version`.
 
 ## Develop
 

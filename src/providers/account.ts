@@ -15,7 +15,7 @@ import {
   hasCredentials,
   runDeviceLogin,
   authedFetch,
-  spawnAccountCredentials,
+  acquireAccountCredential,
   refreshAccountCredentials,
   notifySignedIn,
 } from "../auth/privateer.ts";
@@ -169,7 +169,7 @@ export const privateerOAuthProvider = {
       }
     }
     if (cb.signal?.aborted) throw new Error("Login cancelled");
-    const creds = await spawnAccountCredentials();
+    const creds = await acquireAccountCredential();
     // Seed Pi's saved model default to the account channel, so the next launch resolves
     // to a billable subscription model instead of falling through to a keyless built-in
     // (the "No API key found for openrouter" trap). No-op if the user already has a
@@ -184,8 +184,10 @@ export const privateerOAuthProvider = {
     try {
       return await refreshAccountCredentials(creds.refresh);
     } catch {
-      // child token expired/reused → spawn a fresh one from the parent login.
-      return spawnAccountCredentials();
+      // Child token expired/reused → get another. acquire (not spawn) so a terminal
+      // that already holds the device's last session slot can reclaim an orphan
+      // instead of being refused a fresh one mid-session.
+      return acquireAccountCredential();
     }
   },
   getApiKey(creds: { access: string }): string {
@@ -256,6 +258,7 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
 export function makeAccountProvider() {
   return (pi: {
     registerProvider?: (name: string, config: unknown) => void;
+    on?: (event: string, handler: (e: unknown, ctx: unknown) => void) => void;
   }): void => {
     if (typeof pi.registerProvider !== "function") return;
     const register = (ids: string[]): void =>
@@ -274,5 +277,57 @@ export function makeAccountProvider() {
       .catch(() => {
         /* keep the fallback model */
       });
+
+    // Seed the account channel's credential at launch. Nothing else does this in the
+    // TUI: Pi only obtains an OAuth credential by running /login, and our shutdown
+    // hook deliberately REVOKES the account session and deletes its persisted
+    // auth.json entry (see the LIFECYCLE HAZARD note in src/auth/privateer.ts). So a
+    // signed-in user who quits and relaunches lands on privateer/* with no key at
+    // all, and the first prompt dead-ends on "No API key found for privateer." — even
+    // though the banner says "connected". The REPL (cli/chat.ts) and the daemon
+    // already spawn one at startup; this gives the TUI the same seed.
+    pi.on?.("session_start", (_e, ctx) => void ensureAccountCredential(ctx));
   };
+}
+
+// One spawn per PROCESS. session_start also fires for new/resume/fork/reload — all of
+// which keep this process (and its account session) alive — so re-spawning there would
+// leak a device row per event. A fresh process always spawns: a run that crashed
+// without its shutdown hook can leave a REVOKED credential persisted in auth.json with
+// a still-valid-looking `expires`, which Pi would happily reuse and 401 on.
+//
+// The flag lives on globalThis, not in module scope, because jiti gives each extension
+// that imports this file its OWN module instance (see the note in auth/privateer.ts):
+// privateer-account and privateer-brand — which hot-registers the provider on /signin —
+// would otherwise hold separate flags and each spawn a session.
+const SEEDED = Symbol.for("privateer.accountCredentialSeeded");
+type SeedFlag = { [SEEDED]?: boolean };
+
+// `ctx` is Pi's ExtensionContext; the auth store hangs off its model registry (the same
+// path privateer-brand uses to DROP the credential on sign-out).
+type SeedContext = {
+  modelRegistry?: { authStorage?: { set?: (provider: string, cred: unknown) => void } };
+  hasUI?: boolean;
+  ui?: { notify?: (message: string, level: string) => void };
+};
+
+async function ensureAccountCredential(ctx: unknown): Promise<void> {
+  const flag = globalThis as SeedFlag;
+  if (flag[SEEDED] || !hasCredentials()) return;
+  flag[SEEDED] = true;
+  const store = (ctx as SeedContext)?.modelRegistry?.authStorage;
+  if (typeof store?.set !== "function") return;
+  try {
+    const creds = await acquireAccountCredential();
+    store.set("privateer", { type: "oauth", ...creds });
+  } catch (e) {
+    // The account channel is NOT armed: a dead machine login (401 → credentials cleared
+    // + onSessionExpired), the terminal cap (429), or a network blip. Say so now — the
+    // banner still reads "connected" (it only knows about the local credentials file),
+    // so staying silent leaves the user to discover it as a bare "No API key found for
+    // privateer" on their first prompt. Cleared so a later attempt can retry.
+    flag[SEEDED] = false;
+    const c = ctx as SeedContext;
+    if (c?.hasUI) c.ui?.notify?.(`Privateer account channel unavailable — ${(e as Error).message}`, "error");
+  }
 }

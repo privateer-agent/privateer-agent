@@ -15,6 +15,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { globalDir, credentialsPath } from "../config/paths.ts";
+import {
+  type OwnedSession,
+  recordOwnedSession,
+  forgetOwnedSession,
+  orphanedSessions,
+  dropOwnedSession,
+} from "./accountSessions.ts";
 import { isAccountCapCode } from "../engine/errors.ts";
 import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
 import { pinAccountSignKey, clearAccountSignKey } from "../crypto/accountTrust.ts";
@@ -117,6 +124,15 @@ let _refreshInFlight: Promise<ChildSession> | null = null;
 // right after revokeLocalSessions() so the next launch spawns a fresh session instead
 // of reusing the revoked one. Doing both is safe; doing only one is not. See
 // revokeLocalSessions and its callers (cli/chat.ts, daemon/index.ts).
+//
+// That pairing only covers a CLEAN exit, though. A terminal killed without running its
+// shutdown hook leaves its row alive server-side for the full TTL, and the next launch
+// used to spawn another on top of it — enough repeats and the spawn is refused with
+// `429 CHILD_SESSION_CAP`. So every session is also recorded in a pid-keyed registry
+// (auth/accountSessions.ts) and acquireAccountCredential reclaims one whose owning
+// terminal is gone instead of spawning. Keep the registry in step with reality:
+// recordOwnedSession wherever a credential is minted or rotated, forgetOwnedSession
+// wherever one is revoked.
 let _account: { accessToken: string } | null = null;
 
 export function loadCredentials(): Credentials | null {
@@ -375,6 +391,29 @@ export async function runDeviceLogin(opts: {
  * isolation, so two terminals never fight over one rotating token (which would
  * trip the server's reuse-detection and revoke every session).
  */
+// Turn a failed /auth/session/spawn into an accurate error.
+//
+// A 401 means the parent refresh token is gone — the machine login itself is dead, so
+// clear it and announce (the UI flips to signed-out). EVERY OTHER status used to be
+// reported as an expiry too, which actively misled: the common one is 429
+// `CHILD_SESSION_CAP` ("Too many active terminals for this device. Sign one out and
+// try again"), where /login is not the fix and the credentials are perfectly valid.
+// Pass the server's own message through so the user learns what to actually do.
+async function spawnFailure(res: Response): Promise<Error> {
+  if (res.status === 401) {
+    clearCredentials();
+    notifySessionExpired();
+    return new Error("Your Privateer session expired. Run /login to sign in again.");
+  }
+  let message: string | undefined;
+  try {
+    message = ((await res.json()) as { message?: string }).message;
+  } catch {
+    /* non-JSON body — fall back to the status line below */
+  }
+  return new Error(message?.trim() || `Couldn't start a Privateer session (HTTP ${res.status}).`);
+}
+
 async function spawnChildSession(): Promise<ChildSession> {
   const parent = loadCredentials();
   if (!parent) throw new Error("Not logged in to Privateer. Run /login.");
@@ -389,14 +428,7 @@ async function spawnChildSession(): Promise<ChildSession> {
   }, {
     headers: { Authorization: `Bearer ${parent.accessToken}` },
   });
-  if (!res.ok) {
-    // Parent refresh token invalid/expired → the machine login is gone.
-    if (res.status === 401) {
-      clearCredentials();
-      notifySessionExpired();
-    }
-    throw new Error("Your Privateer session expired. Run /login to sign in again.");
-  }
+  if (!res.ok) throw await spawnFailure(res);
   const { accessToken, refreshToken } = (await res.json()) as ChildSession;
   _child = { accessToken, refreshToken };
   return _child;
@@ -543,6 +575,10 @@ export async function revokeAccountSession(timeoutMs = 1500): Promise<void> {
   const account = _account;
   if (!account) return;
   _account = null;
+  // Stop advertising this session as reclaimable BEFORE killing it: an entry left
+  // behind would offer the next launch a dead row to adopt (it would fail over to a
+  // spawn, but only after a wasted round trip).
+  forgetOwnedSession();
   await deleteSession(account.accessToken, timeoutMs);
 }
 
@@ -615,26 +651,102 @@ export async function spawnAccountCredentials(): Promise<AccountCredential> {
     { refreshToken: parent.refreshToken, deviceLabel: defaultDeviceLabel() },
     { headers: { Authorization: `Bearer ${parent.accessToken}` } },
   );
-  if (!res.ok) {
-    if (res.status === 401) {
-      clearCredentials();
-      notifySessionExpired();
-    }
-    throw new Error("Your Privateer session expired. Run /login to sign in again.");
-  }
+  if (!res.ok) throw await spawnFailure(res);
   const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
   _account = { accessToken }; // track for explicit sign-out revoke (revokeAccountSession)
+  const cred = { access: accessToken, refresh: refreshToken, expires: jwtExpMs(accessToken) };
+  recordOwnedSession(cred); // claim the row, so a crash leaves it reclaimable
+  return cred;
+}
+
+// An /auth/refresh the server actively REFUSED, as opposed to one that never got an
+// answer. Only the former proves the session is gone; a network failure says nothing,
+// and treating it as death would leak the row (see dropOwnedSession).
+export interface RefreshRejection extends Error {
+  status: number;
+}
+
+export function isRefreshRejection(e: unknown): e is RefreshRejection {
+  return e instanceof Error && typeof (e as RefreshRejection).status === "number";
+}
+
+// Rotate a session's refresh token, with NO ownership side effects. Split out from
+// refreshAccountCredentials so orphan cleanup can rotate a session purely to obtain a
+// token it can revoke with, without claiming that session as this terminal's own.
+async function rotateSession(refresh: string): Promise<AccountCredential> {
+  const res = await postJson(serverBaseUrl(), "/auth/refresh", { refreshToken: refresh });
+  if (!res.ok) {
+    const err = new Error(`account refresh failed (${res.status})`) as RefreshRejection;
+    err.status = res.status;
+    throw err;
+  }
+  const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
   return { access: accessToken, refresh: refreshToken, expires: jwtExpMs(accessToken) };
 }
 
 // Rotate this account credential's own refresh token; caller falls back to a fresh
 // spawn if this throws (expired/reused child token).
 export async function refreshAccountCredentials(refresh: string): Promise<AccountCredential> {
-  const res = await postJson(serverBaseUrl(), "/auth/refresh", { refreshToken: refresh });
-  if (!res.ok) throw new Error(`account refresh failed (${res.status})`);
-  const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
-  _account = { accessToken }; // the rotated session is the one an explicit sign-out revokes
-  return { access: accessToken, refresh: refreshToken, expires: jwtExpMs(accessToken) };
+  const cred = await rotateSession(refresh);
+  _account = { accessToken: cred.access }; // the rotated session is the one an explicit sign-out revokes
+  // Re-claim on every rotation — including the ones Pi drives on expiry — so the
+  // registry always holds a token that would actually work if we crashed right now.
+  recordOwnedSession(cred);
+  return cred;
+}
+
+// Get an account credential for THIS terminal, reusing a session orphaned by a
+// terminal that died without revoking rather than stacking another row on top of it.
+//
+// Reclaiming is what keeps a crash from costing a permanent session slot: each orphan
+// otherwise sits on the server for its full TTL, and enough of them earn a
+// `429 CHILD_SESSION_CAP` on the next spawn. A successful /auth/refresh doubles as the
+// liveness probe — it proves the row is real and hands back a usable access token —
+// so an orphan that turns out to be dead just falls through to the next candidate.
+//
+// Orphans we don't adopt are revoked in the background: their terminal is gone, so the
+// row is pure waste, and freeing it is what actually unwinds an account already at the
+// cap. Never touches a session whose owner is still running (see accountSessions.ts).
+export async function acquireAccountCredential(): Promise<AccountCredential> {
+  const orphans = orphanedSessions();
+  let adopted: AccountCredential | null = null;
+  let attempted = 0;
+
+  while (attempted < orphans.length && !adopted) {
+    const orphan = orphans[attempted++];
+    try {
+      adopted = await refreshAccountCredentials(orphan.refresh);
+      dropOwnedSession(orphan.pid); // the rotation above re-recorded it under OUR pid
+    } catch (e) {
+      // Refused → the session is gone; stop tracking it. Unreachable → keep it, so a
+      // network blip doesn't strand a live row we could have reclaimed next launch.
+      if (isRefreshRejection(e)) dropOwnedSession(orphan.pid);
+    }
+  }
+
+  // Best-effort cleanup of the ones we didn't need. Detached: freeing slots must never
+  // delay startup, and a failure here costs nothing the next launch can't retry.
+  const leftovers = orphans.slice(attempted);
+  if (leftovers.length) void revokeOrphanedSessions(leftovers);
+
+  return adopted ?? (await spawnAccountCredentials());
+}
+
+// Revoke sessions whose terminal is gone. Revoking needs a LIVE access token
+// (DELETE /auth/session/current is Bearer-authenticated) and an orphan's stored one is
+// usually stale, so rotate first — via rotateSession, which deliberately does NOT claim
+// ownership: these sessions are being destroyed, not adopted, and recording them would
+// overwrite the entry for the credential this terminal is actually using.
+async function revokeOrphanedSessions(orphans: OwnedSession[], timeoutMs = 1500): Promise<void> {
+  for (const orphan of orphans) {
+    try {
+      const cred = await rotateSession(orphan.refresh);
+      await deleteSession(cred.access, timeoutMs);
+      dropOwnedSession(orphan.pid);
+    } catch (e) {
+      if (isRefreshRejection(e)) dropOwnedSession(orphan.pid);
+    }
+  }
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

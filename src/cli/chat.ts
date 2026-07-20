@@ -341,7 +341,7 @@ async function main() {
   // resolves it; Pi then manages refresh on expiry via the registered oauth provider.
   if (provider === "privateer") {
     try {
-      const creds = await priv.spawnAccountCredentials();
+      const creds = await priv.acquireAccountCredential();
       (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
     } catch (e) {
       console.log(`${RED}Account channel unavailable: ${(e as Error).message}${RESET}`);

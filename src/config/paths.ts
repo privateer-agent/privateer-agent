@@ -39,3 +39,12 @@ export function credentialsPath(): string {
 export function configPath(): string {
   return join(globalDir(), "config.json");
 }
+
+// Account-provider inference sessions this MACHINE has spawned, keyed by the pid of
+// the terminal that owns each one (see auth/accountSessions.ts). Lets a launch tell a
+// session belonging to a STILL-RUNNING terminal from one orphaned by a crash, so it
+// can reclaim the orphan instead of spawning another and walking into the server's
+// per-device terminal cap. Holds refresh tokens — written 0600, like credentials.json.
+export function accountSessionsPath(): string {
+  return join(globalDir(), "account-sessions.json");
+}

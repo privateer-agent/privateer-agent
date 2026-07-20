@@ -30,7 +30,7 @@ import { openJsonFromApp } from "../crypto/terminalUnseal.ts";
 import { verifyChannelSave, verifyOutboxKey } from "../crypto/accountVerify.ts";
 import { loadAccountSignKey, loadLastControlTs, saveLastControlTs } from "../crypto/accountTrust.ts";
 import { authorizeControl } from "../remote/controlAuth.ts";
-import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, spawnAccountCredentials, handleServerRevoke } from "../auth/privateer.ts";
+import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, acquireAccountCredential, handleServerRevoke } from "../auth/privateer.ts";
 import {
   loadRoutines,
   upsertRoutine,
@@ -735,7 +735,7 @@ export class Daemon {
       const { provider, modelId } = parseSpec(spec.model);
       if (provider === "privateer") {
         try {
-          const creds = await spawnAccountCredentials();
+          const creds = await acquireAccountCredential();
           (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
           spawnedAccount = true;
         } catch (e) {
