@@ -76,6 +76,14 @@ inline and the **Windows bundle is boot smoke-tested on a `windows-latest` job**
 `publish` attaches every archive + checksum to the GitHub Release. Installers pull from
 `releases/latest/download/`. A manual `workflow_dispatch` builds without publishing.
 
+The `publish` job sets **`GH_REPO`** because it downloads artifacts without checking out
+the repo, so `gh` has no git remote to infer from. Without it every `gh release upload`
+died with `fatal: not a git repository` — which is exactly what happened from v0.6.2
+through v0.6.5: the releases were created, the bundles built, and **every release ended
+up with zero assets**, so `curl https://privateer.pro/install.sh | sh` 404'd for months
+while the failure sat unnoticed in a red CI job. A follow-up step now asserts all four
+bundles are attached, so an empty release fails the run instead of shipping quietly.
+
 `publish-npm` then publishes to npm with **`--provenance`**, authenticated by **npm
 trusted publishing (OIDC)** — there is no npm token in this repo and none should be
 added. npmjs.com is configured to trust this repo + **this workflow filename**, so

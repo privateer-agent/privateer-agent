@@ -111,10 +111,33 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dl
+      # GH_REPO is load-bearing: this job downloads artifacts but never checks out the
+      # repo, so `gh` has no git remote to infer the target from and dies with
+      # "fatal: not a git repository". That is why every release from v0.6.2 on ended
+      # up with ZERO assets and `releases/latest/download/...` 404'd — the installers
+      # at privateer.pro were broken the whole time. Naming the repo explicitly is
+      # cheaper than adding a checkout we otherwise don't need.
       - name: Attach all bundles to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh release upload "${GITHUB_REF_NAME}" dl/*/privateer-*.* --clobber
+
+      # Never let a release be published empty again. The upload above failing is loud,
+      # but nothing was watching; this turns "the installers are broken" into a failed
+      # release instead of a silent one.
+      - name: Verify every bundle is attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for t in darwin-arm64 darwin-x64 linux-x64 win32-x64; do
+            gh release view "${GITHUB_REF_NAME}" --json assets \
+              --jq '.assets[].name' | grep -q "privateer-${t}\." \
+              || { echo "missing bundle for ${t}"; exit 1; }
+          done
+          echo "all bundles attached"
 
   # Publish to npm WITH PROVENANCE. This is the load-bearing trust signal: npm
   # records a signed Sigstore attestation binding the published tarball to this
@@ -148,10 +171,14 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
-      # Trusted publishing landed in npm 11.5.1; the Node we pin predates it.
+      # Trusted publishing landed in npm 11.5.1, and Node 22.19.0 ships npm 10.9.x —
+      # hence the upgrade. Pin to the 11.x line rather than `npm@latest`: npm 12
+      # requires node ^22.22.2 || ^24.15.0 || >=26, which our pinned runtime does not
+      # satisfy, so `@latest` fails EBADENGINE. NODE_VERSION is the runtime we SHIP in
+      # bundles, so it must not be bumped just to satisfy a publish-time tool.
       - name: Upgrade npm for trusted publishing
         run: |
-          npm install -g npm@latest
+          npm install -g "npm@^11.5.1"
           npm --version
 
       # Dev deps are needed to typecheck; the published tarball is `files`-scoped
