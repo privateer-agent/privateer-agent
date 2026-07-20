@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 
 // Where a routine's result is delivered after it runs. `file`/`relay`/`notice` stay
@@ -79,6 +80,13 @@ export const RoutineFile = z.object({
 export type RoutineFile = z.infer<typeof RoutineFile>;
 
 // A time-ordered routine id minted once at creation.
+//
+// The random suffix is load-bearing, not decoration. This was `r-${Date.now()}` alone,
+// so two routines created in the SAME MILLISECOND got the same id — and upsertRoutine
+// keys on id, so the second silently overwrote the first. Creating routines in quick
+// succession (an import, a scripted setup, a fast tap-tap in the app) could therefore
+// lose one with no error anywhere. The timestamp prefix still sorts by creation order;
+// the suffix just makes collisions vanishingly unlikely.
 export function newRoutineId(): string {
-  return `r-${Date.now()}`;
+  return `r-${Date.now()}-${randomBytes(4).toString("hex")}`;
 }

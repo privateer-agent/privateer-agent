@@ -136,10 +136,17 @@ test("routinesControl: run invokes runNow with the resolved routine", () => {
   });
 });
 
+// The ordering here must not depend on what time it is. "later" used to be the cron
+// `0 23 * * *`, which ties with `*/5 * * * *` between 22:55 and 23:00 — both resolve to
+// 23:00 — so this test failed for anyone running the suite in that five-minute window.
+// A one-off `at` far in the future is strictly later than the next */5 boundary at every
+// wall-clock instant, so the comparison is now decided by construction rather than by
+// when you happened to run it. (routinesControl computes nextRun off `new Date()`
+// internally, so the input trigger is the only place a test can pin this down.)
 test("routinesControl: list is ordered by soonest nextRun, paused last", () => {
   withHome((home) => {
     const ctrl = makeRoutinesControl({ defaultCwd: () => home });
-    ctrl.save({ name: "later", cron: "0 23 * * *", prompt: "p" });
+    ctrl.save({ name: "later", at: "2099-01-01T00:00:00.000Z", prompt: "p" });
     ctrl.save({ name: "sooner", cron: "*/5 * * * *", prompt: "p" });
     ctrl.save({ name: "paused", cron: "0 8 * * *", prompt: "p" });
     ctrl.setEnabled("paused", false);

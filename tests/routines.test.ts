@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, statSync, existsSync, readFileSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nextRun, cronError, parseCron } from "../src/routines/cron.ts";
-import { Routine } from "../src/routines/schema.ts";
+import { Routine, newRoutineId } from "../src/routines/schema.ts";
 import { triggerError, computeNextRun, advanceAfterRun, describeTrigger } from "../src/routines/trigger.ts";
 import {
   loadRoutines,
@@ -215,4 +215,40 @@ test("store: notices queue add + drain (drain clears)", () => {
     else process.env.PRIVATEER_HOME = prev;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// Regression: newRoutineId() was `r-${Date.now()}` with no entropy. Ids minted inside
+// the same millisecond were identical, and since upsertRoutine keys on id, the second
+// routine silently REPLACED the first — a user could create two routines in quick
+// succession (an import, a scripted setup) and lose one with no error anywhere. It also
+// made tests/routinesControl.test.ts fail at random, which is how it was found.
+//
+// Grouping by the embedded timestamp rather than timing the loop keeps this
+// deterministic: however fast the machine is, some ids land in the same millisecond,
+// and the assertion is about those ids specifically. (Timing the loop instead would
+// make the test itself flaky on a slow or busy runner.)
+test("newRoutineId: ids minted in the same millisecond are unique", () => {
+  const ids = Array.from({ length: 5000 }, () => newRoutineId());
+
+  // "r-<epochMs>-<random>" → group by the epoch segment.
+  const byMillisecond = new Map<string, string[]>();
+  for (const id of ids) {
+    const ms = id.split("-")[1];
+    byMillisecond.set(ms, [...(byMillisecond.get(ms) ?? []), id]);
+  }
+
+  const contended = [...byMillisecond.values()].filter((g) => g.length > 1);
+  assert.ok(contended.length > 0, "sanity: the loop must mint several ids in one millisecond");
+  for (const group of contended) {
+    assert.equal(new Set(group).size, group.length, "ids sharing a millisecond must differ");
+  }
+});
+
+test("newRoutineId: ids still sort by creation time", () => {
+  // The timestamp prefix is what orders routines; the suffix must not disturb it.
+  const first = newRoutineId();
+  const clock = Date.now();
+  while (Date.now() === clock) { /* spin into the next millisecond */ }
+  const second = newRoutineId();
+  assert.ok(first < second, `${first} should sort before ${second}`);
 });
