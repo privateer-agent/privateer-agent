@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
 const REPO = path.resolve(HERE, "..");
@@ -72,7 +73,8 @@ const sub = args[0];
 if (sub === "--version" || sub === "-V") {
   const ver = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).version; } catch { return null; } };
   const pv = ver(path.join(REPO, "package.json")) || "unknown";
-  const pi = ver(path.join(REPO, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"));
+  const piPkg = resolveDep(REPO, "@earendil-works/pi-coding-agent", "package.json");
+  const pi = piPkg ? ver(piPkg) : null;
   console.log(`privateer ${pv}${pi ? ` (pi ${pi})` : ""}`);
   process.exit(0);
 }
@@ -126,6 +128,13 @@ else {
   // time the agent tries to run a command. Unix always has a shell, so this is a no-op.
   ensureShellOrExit();
 
+  // Apply our pi-coding-agent patches. This happens HERE, on a launch the user asked
+  // for, rather than in a postinstall — so installing the package runs no code at all.
+  // Stamped, so it's a single file read on every launch after the first. Best-effort:
+  // both patches are UX fixes, so a root-owned node_modules (sudo npm i -g) just means
+  // stock Pi behaviour, not a broken boot. Bundles ship pre-patched and no-op here.
+  ensurePatches();
+
   const AGENT_DIR = path.join(PRIVATEER_HOME, "agent");
   const EXT_DIR = path.join(AGENT_DIR, "extensions");
   fs.mkdirSync(EXT_DIR, { recursive: true });
@@ -142,9 +151,17 @@ else {
   for (const name of MANAGED) fs.rmSync(path.join(EXT_DIR, `${name}.ts`), { force: true });
 
   const ext = (...p) => path.join(REPO, "extensions", ...p);
-  const dep = (...p) => path.join(REPO, "node_modules", ...p);
-  const shim = (name, target) =>
+  // Resolve dependencies by walking the node_modules chain, NOT as REPO/node_modules.
+  // npm only nests deps under us for a global install; `npx privateer-agent` and
+  // `npm i privateer-agent` HOIST them to a sibling/parent node_modules, where the
+  // hardcoded path resolves to nothing and every shim below points at a missing file.
+  const dep = (name, ...rest) => resolveDep(REPO, name, ...rest);
+  // A missing target means that optional tool pack isn't installed — skip its shim
+  // rather than writing one that points at nothing (which fails at extension load).
+  const shim = (name, target) => {
+    if (!target || !fs.existsSync(target)) return;
     fs.writeFileSync(path.join(EXT_DIR, `${name}.ts`), `export { default } from ${JSON.stringify(pathToFileURL(target).href)};\n`);
+  };
 
   shim("privateer-brand", ext("privateer-brand.ts"));       // banner, ⚓ badge, /signin /signout
   shim("privateer-context", ext("privateer-context.ts"));   // PRIVATEER.md context + /init
@@ -154,12 +171,21 @@ else {
   shim("privateer-posture", ext("privateer-posture.ts"));
   shim("privateer-tools", ext("privateer-tools.ts"));
   shim("privateer-privacy", ext("privateer-privacy.ts"));   // pi-privacy + account tier resolver
-  shim("rpiv-web-tools", dep("@juicesharp", "rpiv-web-tools", "index.ts")); // private web tools
+  shim("rpiv-web-tools", dep("@juicesharp/rpiv-web-tools", "index.ts")); // private web tools
   shim("pi-mcp-adapter", dep("pi-mcp-adapter", "index.ts"));
-  shim("pi-hypa", dep("@hypabolic", "pi-hypa", "extensions", "index.ts"));
+  shim("pi-hypa", dep("@hypabolic/pi-hypa", "extensions", "index.ts"));
   shim("pi-subagents", dep("pi-subagents", "src", "extension", "index.ts"));
 
-  const CLI = dep("@earendil-works", "pi-coding-agent", "dist", "cli.js");
+  // Unlike the tool packs above, Pi's CLI is not optional — it IS the agent. If it
+  // didn't resolve, the install is broken; say so instead of spawning `undefined`.
+  const CLI = dep("@earendil-works/pi-coding-agent", "dist", "cli.js");
+  if (!CLI || !fs.existsSync(CLI)) {
+    console.error(
+      "privateer: couldn't find pi-coding-agent — the install looks incomplete.\n" +
+        "  Try reinstalling: npm install -g privateer-agent@latest",
+    );
+    process.exit(1);
+  }
   process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
   // The binary pi-subagents spawns for each child. Point it at OUR cli.js so the child
   // reads this same PI_CODING_AGENT_DIR and DISCOVERS the moat shims (gated + private,
@@ -284,6 +310,23 @@ function findWindowsBash() {
     }
   } catch { /* `where` unavailable — treat as not found */ }
   return null;
+}
+
+// Run the patch applier and, on the one interesting outcome (we tried and couldn't),
+// tell the user why in a way they can act on. "current"/"applied"/"skipped" are silent.
+function ensurePatches() {
+  if (applyPatchesIfNeeded(REPO, NODE_BIN) !== "failed") return;
+  process.stderr.write(
+    [
+      "",
+      "  ⚓ Couldn't apply Privateer's bundled patches to node_modules — continuing without them.",
+      "     Two upstream fixes (retry-loop guard, /model → /models redirect) stay off.",
+      `     Usually a permissions issue: ${path.join(REPO, "node_modules")} isn't writable`,
+      "     by this user (a `sudo npm install -g` install). Re-run once with sudo, or",
+      "     install without sudo (nvm, or an npm prefix you own) to fix it for good.",
+      "",
+    ].join("\n") + "\n",
+  );
 }
 
 function haveTinfoilKey() {

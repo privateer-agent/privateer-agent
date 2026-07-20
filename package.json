@@ -1,13 +1,17 @@
 {
   "name": "privateer-agent",
   "version": "0.6.4",
-  "description": "Privateer — a provider-agnostic, safe-by-default terminal coding agent with TEE/Tinfoil attestation, rebuilt on the Pi toolkit. Bring your own model across 20 providers.",
+  "description": "Privateer \u2014 a provider-agnostic, safe-by-default terminal coding agent with TEE/Tinfoil attestation, rebuilt on the Pi toolkit. Bring your own model across 20 providers.",
   "type": "module",
   "license": "MIT",
   "author": "Patrick (zahnno)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/privateer-agent/privateer-agent.git"
+  },
+  "homepage": "https://privateer.pro",
+  "bugs": {
+    "url": "https://github.com/privateer-agent/privateer-agent/issues"
   },
   "keywords": [
     "ai",
@@ -39,6 +43,7 @@
     "extensions",
     "skills",
     "patches",
+    "SECURITY.md",
     "README.md",
     "LICENSE"
   ],
@@ -48,8 +53,7 @@
     "channels": "node --env-file=.env --import tsx src/channels/run.ts",
     "dev": "tsx watch src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done",
-    "postinstall": "patch-package --error-on-fail"
+    "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done"
   },
   "engines": {
     "node": ">=22.19.0"

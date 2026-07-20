@@ -23,6 +23,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write # required for npm provenance (Sigstore OIDC) — see publish-npm
 
 env:
   NODE_VERSION: "22.19.0"
@@ -114,3 +115,62 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${GITHUB_REF_NAME}" dl/*/privateer-*.* --clobber
+
+  # Publish to npm WITH PROVENANCE. This is the load-bearing trust signal: npm
+  # records a signed Sigstore attestation binding the published tarball to this
+  # repo, this commit and this workflow run, and the package page then renders a
+  # verified "Built and signed on GitHub Actions" badge linking back to the build.
+  # Anyone (or any agent) evaluating `npx privateer-agent` can check that the code
+  # on npm is the code in the public repo — without trusting a maintainer's laptop.
+  #
+  # Auth is npm TRUSTED PUBLISHING (OIDC) — there is deliberately NO npm token here,
+  # and none should be added. npmjs.com is configured to trust exactly this repo +
+  # this workflow file, and the short-lived OIDC credential is minted per run, so
+  # there is no long-lived publish secret to leak or rotate.
+  #
+  # Requirements, all of which must hold or the publish fails / loses provenance:
+  #   - id-token: write (granted at workflow level above)
+  #   - repository/homepage in package.json resolving to this public repo
+  #   - a Trusted Publisher configured on npmjs.com naming THIS workflow filename
+  #     (rename this file and publishing breaks until npm is updated to match)
+  #   - npm >= 11.5.1 — Node 22.19.0 ships 10.9.x, hence the explicit upgrade below
+  publish-npm:
+    needs: [build, smoke-windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing landed in npm 11.5.1; the Node we pin predates it.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # Dev deps are needed to typecheck; the published tarball is `files`-scoped
+      # regardless. --ignore-scripts proves the package installs without running any
+      # (there is no postinstall by design — see bin/apply-patches.mjs).
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+
+      # The tag must match the version we're about to publish, or a mistagged push
+      # publishes something nobody reviewed under that tag's provenance.
+      - name: Verify tag matches package version
+        run: |
+          set -euo pipefail
+          pkg="$(node -p 'require("./package.json").version')"
+          tag="${GITHUB_REF_NAME#v}"
+          test "$pkg" = "$tag" || { echo "tag v$tag != package.json $pkg"; exit 1; }
+
+      # No NODE_AUTH_TOKEN: the OIDC exchange supplies credentials. Provenance is
+      # implied by trusted publishing; --provenance is kept explicit so a misconfigured
+      # run fails loudly rather than quietly publishing an unattested tarball.
+      - name: Publish
+        run: npm publish --provenance --access public

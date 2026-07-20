@@ -133,6 +133,26 @@ curl -fsSL https://privateer.pro/install.sh | sh
 
 **Requirements:** macOS or Linux, Node.js ≥ 22.19.0.
 
+### Verifying what you're about to run
+
+Privateer is a coding agent — it runs shell commands and edits files, so "should I trust
+this package?" is the right question to ask before `npx`. Two things are checkable
+without taking anyone's word for it:
+
+```bash
+npm view privateer-agent dist.attestations   # published from CI with npm provenance:
+                                             # a signed link from this tarball to the
+                                             # exact commit and build that produced it
+npm audit signatures                         # verify registry signatures + provenance
+```
+
+The package also declares **no install scripts** — no `postinstall`, nothing. Installing
+it writes files and executes nothing; `npm install -g privateer-agent --ignore-scripts`
+gives an identical result. Code runs only when you run `privateer`.
+
+See [SECURITY.md](SECURITY.md) for the threat model, the permission gate, and how to
+report a vulnerability.
+
 **From source:**
 
 ```bash

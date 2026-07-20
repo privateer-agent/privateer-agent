@@ -13,7 +13,7 @@ supported as a power-user path).
 - Pi's `cli.js` is the **host** process; our moat loads via **filesystem discovery**
   of `.ts` shims dropped into `~/.privateer/agent/extensions/` (see `bin/privateer-tui`).
 - Subagents **spawn child `node` processes** pointed back at that on-disk `cli.js`.
-- `patch-package` rewrites files **inside `node_modules`**.
+- `patch-package` rewrites files **inside `node_modules`** (at first launch, not install).
 - 29 native `.node` addons (`koffi`, `pi-tui`) force a per-(os,arch) artifact anyway.
 
 A bundle preserves the exact on-disk layout all of that depends on. Pi's bundled
@@ -57,7 +57,8 @@ node scripts/build-bundle.mjs --target darwin-arm64
 ```
 
 It downloads the pinned Node binary from nodejs.org, runs
-`npm ci --omit=dev --os=<os> --cpu=<arch>` (which applies patches via postinstall),
+`npm ci --omit=dev --os=<os> --cpu=<arch>` then applies patches explicitly (the
+package has no postinstall — see "Install-time execution" below),
 prunes cross-platform natives down to the target, copies app code, and produces
 `dist-bundle/privateer-<target>.tar.gz(+.sha256)` (`.zip` for Windows).
 
@@ -74,6 +75,18 @@ one Ubuntu runner (cross-build via `--os/--cpu`), the Linux bundle is boot smoke
 inline and the **Windows bundle is boot smoke-tested on a `windows-latest` job**, then
 `publish` attaches every archive + checksum to the GitHub Release. Installers pull from
 `releases/latest/download/`. A manual `workflow_dispatch` builds without publishing.
+
+`publish-npm` then publishes to npm with **`--provenance`**, authenticated by **npm
+trusted publishing (OIDC)** — there is no npm token in this repo and none should be
+added. npmjs.com is configured to trust this repo + **this workflow filename**, so
+renaming `release.yml` breaks publishing until the Trusted Publisher entry is updated to
+match. Needs `id-token: write` (granted at the workflow level) and npm ≥ 11.5.1, which is
+why the job upgrades npm over the one Node 22.19.0 ships.
+
+The job refuses to publish when the tag and `package.json` version disagree, so a
+mistagged push can't launder an unreviewed build through this workflow's provenance.
+Publishing by hand from a laptop produces no attestation and should not be done — cut a
+tag instead.
 
 ## Install
 
@@ -114,3 +127,39 @@ on PATH, and support `privateer update` (re-download). Neither needs Node or npm
   intercepts `--version`/`-V` and prints `privateer <ourVersion> (pi <piVersion>)`
   from `package.json`, before ever reaching Pi's `cli.js`. (The startup banner already
   read the correct version from `package.json`, so the update-banner compare was fine.)
+
+## Install-time execution (and why there is none)
+
+The package deliberately declares **no `preinstall`/`install`/`postinstall`/`prepare`
+script**. `npm install privateer-agent` writes files and runs nothing; you can verify
+with `--ignore-scripts` and see identical results. A test in `tests/applyPatches.test.ts`
+fails the build if a hook is ever reintroduced.
+
+This matters for two reasons.
+
+**Trust.** A brand-new package from a single maintainer has no reputation to trade on.
+Install-time code execution is the thing a careful reviewer — increasingly, a *coding
+agent* asked to run `npx privateer-agent` — flags first, and it is the one signal we can
+remove outright rather than argue about. What's left is `npm publish --provenance` from
+the release workflow: npm records a Sigstore attestation binding the published tarball
+to this repo, commit and workflow run, so the code on the registry is checkably the code
+in the public repo. Neither of these asks anyone to trust a maintainer's laptop.
+
+**It was actively broken.** The old `postinstall` ran `patch-package --error-on-fail`
+with cwd = the package directory. npm only *nests* dependencies there for a global
+install; `npx privateer-agent` and `npm i privateer-agent` **hoist** them to a parent
+`node_modules`. patch-package therefore found nothing to patch, exited non-zero, and npm
+aborted the entire install — with no output at all. `npx privateer-agent` (the headline
+command in the README) failed for every user from 0.6.x until this was fixed.
+
+Patching now happens in `bin/apply-patches.mjs`, called from the launcher on a run the
+user actually asked for. It is stamped (`node_modules/.privateer-patches.json`, keyed by
+a hash of the patch set) so it costs one file read per launch after the first, and it is
+**best-effort**: both patches are UX fixes, so a root-owned `node_modules` from a
+`sudo npm i -g` degrades to stock Pi behaviour with a printed explanation instead of a
+failed boot.
+
+The same fix applies to dependency resolution generally. `findDepRoot`/`resolveDep` walk
+the `node_modules` chain rather than assuming `<repo>/node_modules`, because that path
+only exists in the global-install layout — the launcher's shim and `cli.js` paths had the
+identical latent bug, masked by the install failing first.

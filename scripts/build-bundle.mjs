@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { applyPatchesIfNeeded } from "../bin/apply-patches.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = path.join(REPO, "dist-bundle");
@@ -203,8 +204,11 @@ function buildTarget(name) {
   mkdirp(cacheDir);
 
   // 1. Prod-only install with patches, into a clean staging tree. We copy the
-  //    manifest + lockfile + patches so `npm ci` reproduces exactly and the
-  //    postinstall (patch-package) applies our pi-coding-agent patch.
+  //    manifest + lockfile + patches so `npm ci` reproduces exactly, then apply
+  //    the pi-coding-agent patches ourselves. (The package deliberately has NO
+  //    postinstall — see bin/apply-patches.mjs — so this step is explicit here.
+  //    Applying at build time also means the shipped bundle is already patched
+  //    and the launcher's own patch step no-ops on the user's machine.)
   // --os/--cpu make npm fetch the TARGET platform's os/cpu-gated optionalDependencies
   // (e.g. @mariozechner/clipboard-<plat>, fsevents) rather than the build host's — so
   // any host can assemble a correct bundle for any target. (koffi/pi-tui bundle all
@@ -215,6 +219,10 @@ function buildTarget(name) {
   }
   fs.cpSync(path.join(REPO, "patches"), path.join(stage, "patches"), { recursive: true });
   run("npm", ["ci", "--omit=dev", `--os=${t.os}`, `--cpu=${t.arch}`], { cwd: stage });
+
+  log("Applying patches");
+  const patched = applyPatchesIfNeeded(stage);
+  if (patched !== "applied") throw new Error(`patch step returned "${patched}" (expected "applied")`);
 
   // 2. App code.
   for (const dir of ["src", "extensions", "bin"]) {
