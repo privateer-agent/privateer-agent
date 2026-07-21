@@ -615,9 +615,14 @@ export default function privateerBrand(pi: any): void {
   // ONE vocabulary: log in / log out. Pi's own built-ins are /login and /logout, so
   // matching them is what makes the pair feel like a single concept instead of two
   // half-overlapping ones (Pi's /logout used to clear only Pi's authStorage while the
-  // machine login lived on, which read as "logout doesn't work"). /logout here is the
-  // canonical command; the Pi built-in is redirected to it by patches/, the same
-  // mechanism as the /model → /models redirect.
+  // machine login lived on, which read as "logout doesn't work"). doSignIn/doSignOut
+  // are canonical; patches/ redirects Pi's built-ins to `/privateer login|logout`
+  // rather than to these registrations, so the redirect can't re-enter the branch it
+  // was dispatched from — the same mechanism as the /model → /models redirect.
+  //
+  // In interactive mode that redirect means the built-in wins and these two never
+  // dispatch (patches/ also silences the resulting conflict warning). They stay
+  // registered for rpc/print mode, which has no such redirect and reaches them by name.
   //
   // signin/signout stay registered as undocumented aliases — they were the shipped
   // names, they're in muscle memory and in older docs, and an alias costs nothing.

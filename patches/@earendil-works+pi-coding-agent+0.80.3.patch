@@ -78,10 +78,27 @@ index 197bccc..27f6429 100644
 +}
  //# sourceMappingURL=auth-guidance.js.map
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index 5d65200..fef6005 100644
+index 5d65200..0a08971 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-@@ -2042,7 +2042,17 @@ export class InteractiveMode {
+@@ -301,9 +301,15 @@ export class InteractiveMode {
+     }
+     getBuiltInCommandConflictDiagnostics(extensionRunner) {
+         const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
++        // Privateer redirect: these built-ins are patched above to dispatch into the
++        // Privateer extension, so an extension command of the same name is deliberate,
++        // not a mistake — and it stays live in the modes that have no such redirect
++        // (rpc, print). Warning about it just tells the user their own shipped auth
++        // commands are broken when they aren't.
++        const redirectedBuiltins = new Set(["login", "logout"]);
+         return extensionRunner
+             .getRegisteredCommands()
+-            .filter((command) => builtinNames.has(command.name))
++            .filter((command) => builtinNames.has(command.name) && !redirectedBuiltins.has(command.name))
+             .map((command) => ({
+             type: "warning",
+             message: command.invocationName === command.name
+@@ -2042,7 +2048,17 @@ export class InteractiveMode {
              if (text === "/model" || text.startsWith("/model ")) {
                  const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -100,7 +117,7 @@ index 5d65200..fef6005 100644
                  return;
              }
              if (text === "/export" || text.startsWith("/export ")) {
-@@ -2105,14 +2115,44 @@ export class InteractiveMode {
+@@ -2105,14 +2121,44 @@ export class InteractiveMode {
                  this.editor.setText("");
                  return;
              }
