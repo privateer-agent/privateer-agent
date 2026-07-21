@@ -46,6 +46,18 @@ cat ~/.privateer/agent/mcp-desktop.json   # source of truth, incl. `enabled`
 cat ~/.privateer/agent/mcp.json           # projection the adapter reads
 ```
 
+**Isolating the relay from everything else.** Since 0.6.9 the terminal edits those two
+files directly, through `/connect` — the same makeMcpControl() the relay drives, minus
+the relay. So you can set a connector up locally, confirm it *runs* (step 5 is the part
+worth caring about), and only then bring the phone in. If `/connect` can add a working
+GitHub connector but the app can't, the fault is in the frame plumbing or the seal, and
+steps 1–4 below will tell you which. If `/connect` can't either, nothing about the relay
+is involved and step 5 is where to look.
+
+Note that `/connect` deliberately does NOT exercise the sealed-box path — on this
+machine the credential is simply written in plaintext, which is what the adapter needs.
+Step 3 remains the only test of the seal.
+
 ---
 
 ## Step 1 — The screen loads and the list round-trips
