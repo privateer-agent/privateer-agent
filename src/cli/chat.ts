@@ -478,8 +478,8 @@ async function main() {
       });
       console.log(`${GREEN}Signed in as ${user.email ?? user.id}.${RESET}`);
       // Move the live session onto a confidential model right away, so the next prompt
-      // doesn't dead-end on the keyless launch model ("No API key found for openrouter").
-      // resolveSignedInModel prefers Tinfoil GLM 5.2, else the account's NEAR channel;
+      // doesn't dead-end on the launch model's missing key. resolveSignedInModel picks
+      // Tinfoil GLM 5.2 — direct with a Tinfoil key, over the subscription otherwise;
       // PRIVATEER_MODEL (a deliberate override) is respected and left alone.
       if (!process.env.PRIVATEER_MODEL?.trim()) {
         const target = resolveSignedInModel();

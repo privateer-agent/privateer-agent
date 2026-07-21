@@ -15,24 +15,35 @@ import { join } from "node:path";
 import { hasCredentials } from "../auth/privateer.ts";
 import { agentDir } from "../config/paths.ts";
 
-// The signed-in default: a NEAR confidential-compute (TEE, attestable) model — the
-// strongest privacy tier the account channel offers, and the same id the app shows
-// first. Kept here as the one definition; providers/account.ts imports it so its seed
-// catalog can't drift.
-export const ACCOUNT_DEFAULT_MODEL_ID = "near/zai-org/GLM-5.1-FP8";
+// Tinfoil's most capable chat model, and Privateer's default everywhere. Tinfoil runs
+// GLM 5.2 inside an attestable TEE (the serving enclave's quote is published and the
+// live TLS key is bound to it), which is the strongest privacy tier we offer — so the
+// most capable model on that tier is what a privacy-first agent should boot on.
+// One definition, three consumers: this resolver, providers/account.ts's seed catalog,
+// and bin/privateer-launch.mjs (which mirrors the id — keep them in step).
+export const TINFOIL_MODEL_ID = "tinfoil/glm-5-2";
+
+// Same model, reached two ways:
+//   - TINFOIL_DEFAULT_SPEC — direct to inference.tinfoil.sh with the user's own
+//     TINFOIL_API_KEY, where pi-privacy can CLIENT-attest the enclave live.
+//   - ACCOUNT_DEFAULT_SPEC — through the Privateer subscription (the `privateer`
+//     provider proxies it), so a signed-in user needs no BYO key at all.
+// The direct route wins when a key is present; otherwise being signed in is enough.
+export const TINFOIL_DEFAULT_SPEC = TINFOIL_MODEL_ID;
+export const ACCOUNT_DEFAULT_MODEL_ID = TINFOIL_MODEL_ID;
 export const ACCOUNT_DEFAULT_SPEC = `privateer/${ACCOUNT_DEFAULT_MODEL_ID}`;
 
-// Tinfoil's GLM 5.2 — CLIENT-side-attested TEE inference (the live TLS key is bound to
-// the enclave's quote), the strongest privacy tier we offer, stronger than the account's
-// server-proxied NEAR channel. Preferred whenever a Tinfoil key is present. Kept as the
-// one definition so bin/privateer-tui and this resolver agree. See extensions/privateer-
-// privacy.ts, which registers `tinfoil/glm-5-2` (and friends) on the tinfoil provider.
-export const TINFOIL_DEFAULT_SPEC = "tinfoil/glm-5-2";
+// The account channel's NEAR confidential-compute model — no longer the default, but
+// still the one account model we can attest end-to-end through the server proxy, so
+// it stays first in the seed catalog after the default. See providers/account.ts.
+export const ACCOUNT_NEAR_MODEL_ID = "near/zai-org/GLM-5.1-FP8";
 
-// Last-resort BYO default, preserved from the pre-resolver code so a user who set an
-// OpenRouter key (and isn't signed in) keeps the old behaviour. If they have no key
-// either, this still surfaces the familiar "No API key found for openrouter" — a clear
-// signal to run /login or set a key, which is better than an empty/undefined model.
+// The legacy BYO default, kept ONLY for a user who set an OpenRouter key and isn't
+// signed in — it's what their key actually pays for. It is deliberately no longer the
+// keyless fallback: landing a signed-out, keyless terminal on OpenRouter is what
+// produced the "No API key found for openrouter" dead end that /login couldn't
+// explain. With no key and no login we now point at the account channel instead, so
+// the error names Privateer and /login is visibly the fix.
 export const LEGACY_BYO_FALLBACK = "openrouter/openai/gpt-4o-mini";
 
 // BYO providers we can positively detect from the environment, in preference order.
@@ -56,14 +67,15 @@ export interface ResolveDefaultModelOptions {
 
 // Resolve the model spec ("provider/id") to use when no model is named. Pure and
 // synchronous (only reads env + the credentials file), so it's safe to call from any
-// entry point at startup. Precedence (mirrors bin/privateer-tui's launch logic, so the
-// launcher, the REPL, and the next-launch seed all agree):
+// entry point at startup. Precedence (mirrors bin/privateer-launch.mjs's launch logic,
+// so the launcher, the REPL, and the next-launch seed all agree):
 //   1. explicit user choice (config/channel)      — deliberate, always wins
 //   2. PRIVATEER_MODEL env                         — dev/global override
 //   3. Tinfoil key present → Tinfoil GLM 5.2       — strongest (client-attested) privacy
-//   4. signed into Privateer → the account default — subscription users, no BYO key
+//   4. signed into Privateer → the same model over the subscription
 //   5. a BYO provider whose key is present         — anthropic, openai, openrouter
-//   6. LEGACY_BYO_FALLBACK                          — familiar "add a key" signal
+//   6. nothing at all → the account default anyway — so the failure names Privateer
+//      and /login is the visible fix, instead of a keyless OpenRouter dead end
 export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): string {
   const env = opts.env ?? process.env;
 
@@ -84,15 +96,19 @@ export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): stri
     if (env[keyName]?.trim()) return spec;
   }
 
-  return LEGACY_BYO_FALLBACK;
+  // No key, no login. Point at the account channel regardless: it's the model this
+  // terminal will run the moment they /login, so signing in needs no model switch at
+  // all, and until then the error reads "No API key found for privateer" — which our
+  // guidance turns into "you're not signed in · run /login".
+  return ACCOUNT_DEFAULT_SPEC;
 }
 
 // The confidential model to switch the LIVE session onto the moment a user signs in.
-// A terminal launched with no credentials is pinned by `--model` to the keyless
-// OpenRouter fallback; without an in-session switch it stays there and the first prompt
-// after /login dead-ends on "No API key found for openrouter". This resolves the model
-// sign-in should activate RIGHT AWAY: Tinfoil GLM 5.2 when a key is present, otherwise
-// the account's NEAR confidential channel (billable to the subscription, no BYO key).
+// A terminal launched with a BYO key (or an explicit --model) is pinned to whatever it
+// resolved at launch; without an in-session switch a mid-session /login changes nothing
+// visible and the user is left wondering what signing in bought them. This resolves the
+// model sign-in should activate RIGHT AWAY: Tinfoil GLM 5.2, direct when a Tinfoil key
+// is present and over the subscription otherwise — no BYO key needed.
 // PRIVATEER_MODEL still wins — a deliberate override is never stomped.
 export function resolveSignedInModel(env: NodeJS.ProcessEnv = process.env): string {
   return resolveDefaultModel({ env, signedIn: true });

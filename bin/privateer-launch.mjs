@@ -214,28 +214,39 @@ else {
   // auto-install. Fire-and-forget: the event loop stays alive while the TUI child runs.
   refreshUpdateCache();
 
-  // Default model. Explicit PRIVATEER_MODEL wins; else Tinfoil GLM 5.2 (client-attested
-  // TEE, strongest tier) when a Tinfoil key is present; else the signed-in account's
-  // NEAR channel; else a cheap OpenRouter fallback.
+  // Default model. Mirrors src/providers/defaultModel.ts resolveDefaultModel() — keep
+  // the two in step. Tinfoil's GLM 5.2 is the default either way: direct when the user
+  // has a Tinfoil key (pi-privacy can client-attest the enclave), over the Privateer
+  // subscription otherwise.
+  //
+  // The last branch is the important one. A signed-out, keyless terminal used to launch
+  // on `openrouter/openai/gpt-4o-mini`, which it had no key for — so the first prompt
+  // died on "No API key found for openrouter", /login couldn't fix it (nothing switched
+  // the live model), and the error named a provider the user had never heard of. It now
+  // launches on the SAME account model it will use once signed in: nothing to switch,
+  // the status bar shows what they're about to get, and the error until then names
+  // Privateer and points at /login.
   const CRED = path.join(PRIVATEER_HOME, "credentials.json");
   const signedIn = fs.existsSync(CRED);
+  const ACCOUNT_MODEL = "privateer/tinfoil/glm-5-2";
   const MODEL = process.env.PRIVATEER_MODEL
     ? process.env.PRIVATEER_MODEL
     : haveTinfoilKey()
       ? "tinfoil/glm-5-2"
       : signedIn
-        ? "privateer/near/zai-org/GLM-5.1-FP8"
-        : "openrouter/openai/gpt-4o-mini";
+        ? ACCOUNT_MODEL
+        : haveKey("ANTHROPIC_API_KEY")
+          ? "anthropic/claude-opus-4-8"
+          : haveKey("OPENAI_API_KEY")
+            ? "openai/gpt-5.5"
+            : haveKey("OPENROUTER_API_KEY")
+              ? "openrouter/openai/gpt-4o-mini"
+              : ACCOUNT_MODEL;
 
-  // Guard the keyless dead-end. We land on the OpenRouter fallback ONLY when the user
-  // named no model, has no Tinfoil key, AND isn't signed in (no credentials.json). If
-  // they also have no OpenRouter/other BYO key, the very first prompt errors with a bare
-  // "No API key found for openrouter" and nothing explains why. Worse, if this machine
-  // was signed in before (other ~/.privateer state exists but the login file is gone),
-  // that bare error hides a vanished session. Surface a clear, branded notice BEFORE the
-  // TUI loads — but still boot it, so `/login` inside works (and activateSignedInModel
-  // switches the live session onto the account channel the moment they sign back in).
-  if (MODEL === "openrouter/openai/gpt-4o-mini" && !haveByoKey()) {
+  // Nothing to run with: no model named, no BYO key, not signed in. The TUI still boots
+  // (that's where /login lives), but say why up front — a returning user whose login
+  // file vanished otherwise has no way to tell a cleared session from a first run.
+  if (!signedIn && !process.env.PRIVATEER_MODEL && !haveByoKey()) {
     warnKeylessLaunch();
   }
 
@@ -367,20 +378,17 @@ function warnKeylessLaunch() {
     ? [
         "",
         "  ⚓ Your Privateer login is missing — this terminal isn't signed in.",
-        `     (no ${path.join(PRIVATEER_HOME, "credentials.json")})`,
         "",
-        "  If you were signed in before, your session was cleared. Run /login to sign",
-        "  back in — you'll return to your subscription models right away. Until then,",
-        "  prompting fails with \"No API key found\" because no model key is set.",
+        "  Run /login and approve the code in the Privateer app. You'll be back on your",
+        "  subscription models straight away — no API key needed.",
         "",
       ]
     : [
         "",
-        "  ⚓ You're not signed in to Privateer and no provider API key is set.",
+        "  ⚓ Welcome aboard. Run /login to connect your Privateer account.",
         "",
-        "  Run /login to use your subscription, or set a provider key (e.g.",
-        "  ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY). Until then,",
-        "  prompting fails with \"No API key found\".",
+        "  One approval in the Privateer app and you're running Tinfoil GLM 5.2 in a",
+        "  trusted enclave — no API key needed. Prefer your own key? /login keys.",
         "",
       ];
   process.stderr.write(lines.join("\n") + "\n");

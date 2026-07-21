@@ -1,8 +1,23 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index e223ce1..2bdab10 100644
+index e223ce1..3615d74 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -711,6 +711,15 @@ export class AgentSession {
+@@ -163,6 +163,14 @@ export class AgentSession {
+         }
+         const isOAuth = this._modelRegistry.isUsingOAuth(model);
+         if (isOAuth) {
++            // Privateer patch: the account channel has no API key that could expire —
++            // the terminal is simply not signed in yet (a fresh install now boots on
++            // `privateer/*`, which is the model it will run once logged in). Stock Pi's
++            // wording describes a state that user was never in, and its "/login
++            // privateer" bypasses the branded sign-in. auth-guidance owns the words.
++            if (model.provider === "privateer") {
++                throw new Error(formatNoApiKeyFoundMessage(model.provider));
++            }
+             throw new Error(`Authentication failed for "${model.provider}". ` +
+                 `Credentials may have expired or network is unavailable. ` +
+                 `Run '/login ${model.provider}' to re-authenticate.`);
+@@ -711,6 +719,15 @@ export class AgentSession {
                  finalError: msg.errorMessage,
              });
              this._retryAttempt = 0;
@@ -18,8 +33,52 @@ index e223ce1..2bdab10 100644
          }
          if (await this._checkCompaction(msg)) {
              return true;
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
+index 197bccc..27f6429 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
+@@ -1,21 +1,33 @@
+ import { join } from "node:path";
+ import { getDocsPath } from "../config.js";
+ const UNKNOWN_PROVIDER = "unknown";
++// Privateer patch: speak Privateer, and stop printing absolute node_modules doc paths.
++//
++// Stock Pi answered every auth failure with four lines, two of them full paths into
++// node_modules/@earendil-works/pi-coding-agent/docs/. On a terminal that isn't signed
++// in, that wall repeats on every prompt and buries the one sentence that matters. It
++// also told a Privateer user to go find a provider API key when their subscription
++// already covers the model. Same information, one actionable line.
+ export function getProviderLoginHelp() {
+-    return [
+-        "Use /login to log into a provider via OAuth or API key. See:",
+-        `  ${join(getDocsPath(), "providers.md")}`,
+-        `  ${join(getDocsPath(), "models.md")}`,
+-    ].join("\n");
++    return "Run /login to connect your Privateer account, or /login keys to use your own provider API key.";
+ }
+ export function formatNoModelsAvailableMessage() {
+     return `No models available. ${getProviderLoginHelp()}`;
+ }
+ export function formatNoModelSelectedMessage() {
+-    return `No model selected.\n\n${getProviderLoginHelp()}\n\nThen use /model to select a model.`;
++    return `No model selected. ${getProviderLoginHelp()}\n\nThen use /models to select a model.`;
+ }
+ export function formatNoApiKeyFoundMessage(provider) {
++    // The account channel: there is no API key to find — you're just not signed in (or
++    // the session didn't arm). Naming the real problem is the whole fix here.
++    if (provider === "privateer") {
++        return "This terminal isn't signed in to Privateer, so it can't run your subscription models.\n\nRun /login — it takes one approval in the Privateer app, and no API key.";
++    }
+     const providerDisplay = provider === UNKNOWN_PROVIDER ? "the selected model" : provider;
+     return `No API key found for ${providerDisplay}.\n\n${getProviderLoginHelp()}`;
+ }
++// Kept so the module's imports stay meaningful for anything that still wants the docs.
++export function getProviderDocsPaths() {
++    return [join(getDocsPath(), "providers.md"), join(getDocsPath(), "models.md")];
++}
+ //# sourceMappingURL=auth-guidance.js.map
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index 5d65200..6bacdfc 100644
+index 5d65200..fef6005 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 @@ -2042,7 +2042,17 @@ export class InteractiveMode {
@@ -41,7 +100,30 @@ index 5d65200..6bacdfc 100644
                  return;
              }
              if (text === "/export" || text.startsWith("/export ")) {
-@@ -2111,8 +2121,23 @@ export class InteractiveMode {
+@@ -2105,14 +2115,44 @@ export class InteractiveMode {
+                 this.editor.setText("");
+                 return;
+             }
+-            if (text === "/login") {
+-                this.showOAuthSelector("login");
++            if (text === "/login" || text.startsWith("/login ")) {
+                 this.editor.setText("");
++                // Privateer redirect: a bare /login IS the account sign-in. Pi's built-in
++                // opens a two-step menu ("Use a subscription" → a list of 20+ providers)
++                // that buries the one option a Privateer user wants, and — because it
++                // only auto-selects a model when the current one is UNKNOWN — a
++                // successful login through it left the terminal on its launch model and
++                // the next prompt died on "No API key found". The extension's own flow
++                // signs in, arms the account channel, and selects the model.
++                // `/login <anything>` (documented as `/login keys`) still opens Pi's own
++                // selector, so BYO provider keys stay reachable; and if the extension
++                // isn't loaded we fall back to Pi's selector for both.
++                if (text === "/login" && this.isExtensionCommand("/privateer")) {
++                    await this.session.prompt("/privateer login");
++                }
++                else {
++                    this.showOAuthSelector("login");
++                }
                  return;
              }
              if (text === "/logout") {

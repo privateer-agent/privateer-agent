@@ -48,12 +48,22 @@ test("resolveDefaultModel: signed out prefers a BYO key, in order", () => {
   );
 });
 
-test("resolveDefaultModel: signed out with no key falls back to the legacy default", () => {
-  assert.equal(resolveDefaultModel({ env: {}, signedIn: false }), LEGACY_BYO_FALLBACK);
+test("resolveDefaultModel: an OpenRouter key still gets the legacy default", () => {
+  assert.equal(resolveDefaultModel({ env: { OPENROUTER_API_KEY: "or" }, signedIn: false }), LEGACY_BYO_FALLBACK);
 });
 
-test("resolveDefaultModel: a Tinfoil key wins over the account channel (privacy-first)", () => {
-  // Even signed in, Tinfoil's client-attested TEE beats the server-proxied NEAR channel.
+test("resolveDefaultModel: signed out with NO key lands on the account channel, not OpenRouter", () => {
+  // The dead-end fix: pinning a keyless terminal to OpenRouter made the first prompt
+  // fail with "No API key found for openrouter", which /login neither explained nor
+  // fixed. Pointing at the account model instead means signing in needs no model switch
+  // and the error until then names Privateer.
+  assert.equal(resolveDefaultModel({ env: {}, signedIn: false }), ACCOUNT_DEFAULT_SPEC);
+  assert.notEqual(resolveDefaultModel({ env: {}, signedIn: false }), LEGACY_BYO_FALLBACK);
+});
+
+test("resolveDefaultModel: a Tinfoil key means direct (client-attested) Tinfoil", () => {
+  // Signed in or not, a Tinfoil key reaches the same model without the server proxy —
+  // and only that route can be attested client-side, so it wins.
   assert.equal(resolveDefaultModel({ env: { TINFOIL_API_KEY: "tk" }, signedIn: true }), TINFOIL_DEFAULT_SPEC);
   // And signed out it beats the OpenRouter fallback / other BYO keys.
   assert.equal(resolveDefaultModel({ env: { TINFOIL_API_KEY: "tk" }, signedIn: false }), TINFOIL_DEFAULT_SPEC);
@@ -68,6 +78,12 @@ test("resolveDefaultModel: a Tinfoil key wins over the account channel (privacy-
   );
 });
 
+test("the default is Tinfoil's most capable model, however it's reached", () => {
+  // Same model both ways — direct with a key, over the subscription without one.
+  assert.equal(TINFOIL_DEFAULT_SPEC, "tinfoil/glm-5-2");
+  assert.equal(ACCOUNT_DEFAULT_SPEC, "privateer/tinfoil/glm-5-2");
+});
+
 test("resolveSignedInModel: Tinfoil when keyed, else the account channel", () => {
   assert.equal(resolveSignedInModel({ TINFOIL_API_KEY: "tk" }), TINFOIL_DEFAULT_SPEC);
   assert.equal(resolveSignedInModel({}), ACCOUNT_DEFAULT_SPEC);
@@ -79,7 +95,7 @@ test("ensurePiDefaultModel: seeds provider+model when settings.json has no defau
   assert.equal(written, ACCOUNT_DEFAULT_SPEC);
   const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
   assert.equal(settings.defaultProvider, "privateer");
-  assert.equal(settings.defaultModel, "near/zai-org/GLM-5.1-FP8");
+  assert.equal(settings.defaultModel, "tinfoil/glm-5-2");
 });
 
 test("ensurePiDefaultModel: never stomps an existing user default", () => {

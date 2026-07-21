@@ -28,7 +28,7 @@ import { readFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import * as priv from "../src/auth/privateer.ts";
-import { makeAccountProvider } from "../src/providers/account.ts";
+import { armAccountCredential, makeAccountProvider } from "../src/providers/account.ts";
 import { resolveSignedInModel } from "../src/providers/defaultModel.ts";
 import { discoverContextFiles, onContextChanged } from "../src/context.ts";
 import { type Palette, paletteFor } from "../src/ui/palette.ts";
@@ -350,11 +350,18 @@ export default function privateerBrand(pi: any): void {
     }
   }
 
+  // /login. Signing in must leave the terminal ABLE TO PROMPT, not merely "connected" —
+  // so this runs the device flow, hot-registers the account provider, then hands off to
+  // activateSignedInModel to arm the channel and select the model. Every step reports.
   async function doSignIn(ctx: any): Promise<void> {
     if (priv.hasCredentials()) {
       const u = priv.currentUser();
+      // Already linked: still make sure THIS session can use the account (a terminal
+      // launched before the login, or one whose channel never armed, otherwise sits
+      // "signed in" and unusable), then point at the two things they might have meant.
+      await activateSignedInModel(ctx, { switchModel: false });
       return ctx?.ui?.notify?.(
-        `Already signed in as ${u?.email ?? u?.id}. Run /logout to switch accounts.`,
+        `Signed in as ${u?.email ?? u?.id}. Run /logout to switch accounts, or /login keys to add a provider API key.`,
         "info",
       );
     }
@@ -372,7 +379,7 @@ export default function privateerBrand(pi: any): void {
               `${p.DIM}Approve this terminal in the Privateer app:${p.RESET}`,
               `   code   ${p.BOLD}${p.ACCENT}${userCode}${p.RESET}`,
               uri ? `${p.DIM}   or open ${p.RESET}${p.INK}${uri}${p.RESET}` : "",
-              `${p.DIM}   waiting for approval…${p.RESET}`,
+              `${p.DIM}   waiting for approval… ${p.RESET}${p.DIM}(esc to cancel · ${p.RESET}${p.INK}/login keys${p.DIM} to use your own API key instead)${p.RESET}`,
             ].filter(Boolean),
             { placement: "aboveEditor" },
           );
@@ -386,7 +393,11 @@ export default function privateerBrand(pi: any): void {
         /* provider list fetch failed — models appear on next launch */
       }
       refresh(ctx);
-      ctx?.ui?.notify?.(`Signed in as ${user.email ?? user.id}. Your Privateer models are ready.`, "info");
+      ctx?.ui?.notify?.(`Signed in as ${user.email ?? user.id}.`, "info");
+      // Arm the account channel and select the model, IN THIS SESSION. runDeviceLogin
+      // fires onSignedIn too, which does the same work — this await is what makes the
+      // outcome (and any failure) land before we hand the prompt back to the user.
+      await activateSignedInModel(ctx);
     } catch (e) {
       ctx?.ui?.setWidget?.("privateer-signin", undefined);
       ctx?.ui?.notify?.((e as Error).message || "Sign-in failed.", "error");
@@ -419,45 +430,98 @@ export default function privateerBrand(pi: any): void {
     );
   }
 
-  // Move the LIVE session onto a confidential model the instant the user signs in. A
-  // terminal launched with no credentials is pinned by `--model` to the keyless
-  // OpenRouter fallback; without this switch it stays there and the first prompt after
-  // sign-in dead-ends on "No API key found for openrouter". resolveSignedInModel picks
-  // Tinfoil GLM 5.2 (client-attested TEE) when a key is present, else the account's NEAR
-  // channel — private inference that works out of the box. We only override an auto-picked
-  // launch model, never a deliberate PRIVATEER_MODEL, and never re-switch if we're already
-  // on the target. The account (NEAR) credential is spawned moments AFTER sign-in fires,
-  // so setModel can briefly return false ("no key yet"); retry a few times so the switch
-  // lands as soon as the credential is ready (Tinfoil, key already in env, succeeds first
-  // try). Best-effort throughout — a failure just leaves the launch model in place.
-  async function activateSignedInModel(ctx: any): Promise<void> {
-    if (process.env.PRIVATEER_MODEL?.trim()) return; // deliberate override — respect it
-    const reg = ctx?.modelRegistry;
-    if (!reg?.find || typeof pi.setModel !== "function") return;
-    const spec = resolveSignedInModel();
-    const slash = spec.indexOf("/");
-    if (slash <= 0) return;
-    const provider = spec.slice(0, slash), id = spec.slice(slash + 1);
-    const currentSpec = ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-    if (currentSpec === spec) return; // already there — nothing to do
-    const model = reg.find(provider, id);
-    if (!model) { dbg(`activateSignedInModel: ${spec} not in registry`); return; }
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        const ok = await pi.setModel(model);
-        if (ok !== false) {
-          currentModelProvider = provider;
-          refresh(ctx);
-          ctx?.ui?.notify?.(`Now using ${spec} for private inference.`, "info");
-          dbg(`activateSignedInModel: switched to ${spec}`);
+  // Make the terminal USABLE the instant the user signs in — the whole point of
+  // logging in, and the step that used to be missing. Two halves, in this order:
+  //
+  //   1. ARM the account channel. Pi stores an OAuth credential only for a login it
+  //      drove itself, so after our own device-code /login the `privateer` provider has
+  //      no key at all. Arming first also matters for the now-common case where the
+  //      launch model ALREADY is the account model (a signed-out terminal boots on it,
+  //      see providers/defaultModel.ts): there's no switch to make, only a key to fetch,
+  //      and the old early-return skipped it and left the next prompt to fail.
+  //   2. SWITCH the live model, if we aren't already on it. A terminal that launched on
+  //      a BYO key stays on that key otherwise, so signing in appears to do nothing.
+  //
+  // resolveSignedInModel picks Tinfoil GLM 5.2 — direct (client-attested) when a Tinfoil
+  // key is present, over the subscription otherwise. A deliberate PRIVATEER_MODEL is
+  // never overridden. Idempotent: sign-in fires this twice by design (once when
+  // credentials land, once when the channel is ready), and a second run is a no-op.
+  // Best-effort — but a failure is now REPORTED, because silently leaving the user on an
+  // unusable model is exactly the bug this replaces.
+  let activating = false;
+  async function activateSignedInModel(ctx: any, opts: { switchModel?: boolean } = {}): Promise<void> {
+    if (activating || process.env.PRIVATEER_MODEL?.trim()) return; // in-flight, or a deliberate override
+    activating = true;
+    try {
+      const spec = resolveSignedInModel();
+      const slash = spec.indexOf("/");
+      if (slash <= 0) return;
+      const provider = spec.slice(0, slash), id = spec.slice(slash + 1);
+
+      // The account channel needs a live session token before any privateer/* model can
+      // run. Retry briefly: this can be racing the credential the login itself minted.
+      if (provider === "privateer") {
+        let armed = false;
+        for (let attempt = 0; attempt < 3 && !armed; attempt++) {
+          armed = await armAccountCredential(ctx, { notify: false });
+          if (!armed) await new Promise((r) => setTimeout(r, 500));
+        }
+        if (!armed) {
+          dbg("activateSignedInModel: account channel not armed");
+          ctx?.ui?.notify?.(
+            "Signed in, but this terminal couldn't open an account session. Check your connection and run /login again, or sign a terminal out in the app if you're at the device limit.",
+            "error",
+          );
           return;
         }
-      } catch (e) {
-        dbg(`activateSignedInModel: setModel threw ${(e as Error).message}`);
       }
-      await new Promise((r) => setTimeout(r, 400)); // credential still spawning — retry
+
+      // Re-running /login while already signed in arms the channel but must NOT move the
+      // user off a model they picked with /models. Only a genuine sign-in switches.
+      if (opts.switchModel === false) return;
+
+      // Already on the target — the common case now that a signed-out terminal launches
+      // on the account model. Nothing to switch, but SAY so: the channel just went live
+      // under them, and silence after a login is what made the old flow feel broken.
+      const currentSpec = ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+      if (currentSpec === spec) {
+        dbg(`activateSignedInModel: already on ${spec}`);
+        refresh(ctx);
+        ctx?.ui?.notify?.(`${spec} is ready — private inference on your Privateer account.`, "info");
+        return;
+      }
+
+      const reg = ctx?.modelRegistry;
+      if (!reg?.find || typeof pi.setModel !== "function") return;
+      const model = reg.find(provider, id);
+      if (!model) {
+        // The provider's live catalog may still be loading (or this is the first sign-in
+        // of the run, before the account provider was registered). Say something useful
+        // rather than stranding them on a model their account can't bill.
+        dbg(`activateSignedInModel: ${spec} not in registry`);
+        ctx?.ui?.notify?.(`Signed in. Run /models to pick a model — ${spec} isn't loaded yet.`, "warning");
+        return;
+      }
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          const ok = await pi.setModel(model);
+          if (ok !== false) {
+            currentModelProvider = provider;
+            refresh(ctx);
+            ctx?.ui?.notify?.(`Now using ${spec} — private inference on your Privateer account.`, "info");
+            dbg(`activateSignedInModel: switched to ${spec}`);
+            return;
+          }
+        } catch (e) {
+          dbg(`activateSignedInModel: setModel threw ${(e as Error).message}`);
+        }
+        await new Promise((r) => setTimeout(r, 400)); // registry still settling — retry
+      }
+      dbg(`activateSignedInModel: gave up switching to ${spec}`);
+      ctx?.ui?.notify?.(`Signed in, but couldn't switch to ${spec}. Run /models to pick one.`, "warning");
+    } finally {
+      activating = false;
     }
-    dbg(`activateSignedInModel: gave up switching to ${spec}`);
   }
 
   dbg("extension loaded, onSignedIn listener registering");
@@ -558,7 +622,7 @@ export default function privateerBrand(pi: any): void {
   // signin/signout stay registered as undocumented aliases — they were the shipped
   // names, they're in muscle memory and in older docs, and an alias costs nothing.
   pi.registerCommand?.("login", {
-    description: "Log in to your Privateer account (device-code flow)",
+    description: "Log in to your Privateer account · /login keys for a provider API key",
     handler: (_args: string, ctx: any) => doSignIn(ctx),
   });
   pi.registerCommand?.("logout", {

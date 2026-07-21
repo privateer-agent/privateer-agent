@@ -95,9 +95,37 @@ export function defaultDeviceLabel(): string {
   }
 }
 
-// ── Credential storage (0600, like saveGlobalConfig) ─────────────────────────
+// ── Cross-instance state ─────────────────────────────────────────────────────
+//
+// Pi loads every extension with a FRESH jiti instance (`moduleCache: false`, see
+// core/extensions/loader.js), so privateer-brand and privateer-account each get their
+// OWN copy of this module — separate credential cache, separate listener sets.
+//
+// That silently broke /login. The account provider's OAuth login() ran inside the
+// privateer-account copy and called notifySignedIn() there, while the UI's listener
+// (the one that switches the live session onto a model the account can actually
+// serve) was registered on the privateer-brand copy. The signal never crossed, so a
+// successful sign-in left the terminal pinned to its keyless launch model and the
+// very next prompt died with "No API key found for openrouter" — exactly the state
+// the login was supposed to fix. The same split let a /logout in one copy leave a
+// stale `user` memoized in another.
+//
+// So anything that must be observed ACROSS extensions lives on globalThis, keyed by
+// a registered Symbol — one bus, however many module instances jiti creates.
+const SHARED = Symbol.for("privateer.auth.shared");
 
-let _cache: Credentials | null | undefined;
+interface SharedAuthState {
+  cache: Credentials | null;
+  signedIn: Set<SignedInListener>;
+  expired: Set<SessionExpiredListener>;
+}
+
+function shared(): SharedAuthState {
+  const g = globalThis as { [SHARED]?: SharedAuthState };
+  return (g[SHARED] ??= { cache: null, signedIn: new Set(), expired: new Set() });
+}
+
+// ── Credential storage (0600, like saveGlobalConfig) ─────────────────────────
 
 // Per-terminal child session (see spawnChildSession). Held in memory ONLY — it
 // is never written to the shared credentials file, so each running terminal
@@ -145,15 +173,16 @@ export function loadCredentials(): Credentials | null {
   // memoized the pre-login "absent" as null, that instance would report "not signed
   // in" forever (e.g. /remote-access refusing after a successful sign-in). Re-reading
   // disk on each miss lets a later call see what a sign-in just wrote.
-  if (_cache) return _cache;
+  const state = shared();
+  if (state.cache) return state.cache;
   const path = credentialsPath();
   if (!existsSync(path)) return null;
   try {
-    _cache = JSON.parse(readFileSync(path, "utf8")) as Credentials;
+    state.cache = JSON.parse(readFileSync(path, "utf8")) as Credentials;
   } catch {
     return null;
   }
-  return _cache;
+  return state.cache;
 }
 
 export function saveCredentials(creds: Credentials): void {
@@ -163,7 +192,7 @@ export function saveCredentials(creds: Credentials): void {
   const path = credentialsPath();
   writeFileSync(path, JSON.stringify(creds, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
   tryChmod(path, 0o600);
-  _cache = creds;
+  shared().cache = creds;
 }
 
 export function clearCredentials(): void {
@@ -175,7 +204,7 @@ export function clearCredentials(): void {
   // Drop the pinned account signing key too — it belongs to the account that just
   // signed out; a different account must re-pin its own at link.
   clearAccountSignKey();
-  _cache = null;
+  shared().cache = null;
   _child = null;
   _account = null;
 }
@@ -205,15 +234,15 @@ function tryChmod(path: string, mode: number): void {
 // stops working; the UI subscribes to announce the sign-out prominently.
 
 type SessionExpiredListener = () => void;
-const _expiredListeners = new Set<SessionExpiredListener>();
 
 export function onSessionExpired(listener: SessionExpiredListener): () => void {
-  _expiredListeners.add(listener);
-  return () => _expiredListeners.delete(listener);
+  const listeners = shared().expired;
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 function notifySessionExpired(): void {
-  for (const listener of _expiredListeners) {
+  for (const listener of shared().expired) {
     try {
       listener();
     } catch {
@@ -249,17 +278,19 @@ export function handleServerRevoke(): void {
 // A listener here refreshes the UI regardless of which path the user took.
 
 type SignedInListener = () => void;
-const _signedInListeners = new Set<SignedInListener>();
 
 export function onSignedIn(listener: SignedInListener): () => void {
-  _signedInListeners.add(listener);
-  return () => _signedInListeners.delete(listener);
+  const listeners = shared().signedIn;
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 // Emit the sign-in signal. Exported so the account OAuth provider can announce a
 // completed subscription login on the already-linked path (see the note above).
+// Listeners MUST be idempotent: a device-code login fires this once the credentials
+// land and again once the account channel is armed (see privateerOAuthProvider.login).
 export function notifySignedIn(): void {
-  for (const listener of _signedInListeners) {
+  for (const listener of shared().signedIn) {
     try {
       listener();
     } catch {
@@ -663,7 +694,7 @@ export async function logout(): Promise<void> {
 // = the JWT's exp (so Pi refreshes just before the server would reject it). These are
 // independent of authedFetch's in-memory _child (Pi owns this credential's lifecycle).
 
-interface AccountCredential {
+export interface AccountCredential {
   access: string;
   refresh: string;
   expires: number; // ms epoch

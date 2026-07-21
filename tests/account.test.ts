@@ -93,9 +93,11 @@ test("session_start seeds Pi's auth storage with a spawned account credential", 
     serverBaseUrl: "https://stub.privateer.test",
   } as any);
 
+  let spawns = 0;
   globalThis.fetch = (async (input: any) => {
     const url = String(input);
     if (url.endsWith("/auth/session/spawn")) {
+      spawns++;
       return new Response(JSON.stringify({ accessToken: "child-access", refreshToken: "child-refresh" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -118,15 +120,18 @@ test("session_start seeds Pi's auth storage with a spawned account credential", 
     // The handler is fire-and-forget; let the spawn settle.
     for (let i = 0; i < 20 && stored.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
 
-    assert.equal(stored.length, 1, "exactly one credential must be seeded");
+    assert.equal(spawns, 1, "exactly one server-side session must be opened");
     assert.equal(stored[0].provider, "privateer");
     assert.equal(stored[0].cred.type, "oauth", "Pi resolves the key through the registered oauth provider");
     assert.equal(stored[0].cred.access, "child-access");
 
-    // A second session_start (resume/fork/reload) must NOT spawn another device row.
+    // A second session_start (resume/fork/reload) must NOT open another device row.
+    // Re-storing the SAME remembered credential is fine and deliberate — arming is
+    // idempotent so a mid-session /login can call it too — but minting is not.
     handlers.session_start!(undefined, ctx);
     await new Promise((r) => setTimeout(r, 50));
-    assert.equal(stored.length, 1, "seeding is once per process, not once per session_start");
+    assert.equal(spawns, 1, "the session is minted once per process, not once per session_start");
+    assert.ok(stored.every((s) => s.cred.access === "child-access"), "every arm uses the same session");
   } finally {
     globalThis.fetch = realFetch;
     clearCredentials();

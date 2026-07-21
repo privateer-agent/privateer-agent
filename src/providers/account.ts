@@ -11,6 +11,7 @@
 // only a first-ever machine login runs the device-code flow.
 
 import {
+  type AccountCredential,
   serverBaseUrl,
   hasCredentials,
   runDeviceLogin,
@@ -20,16 +21,18 @@ import {
   notifySignedIn,
 } from "../auth/privateer.ts";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
-import { ACCOUNT_DEFAULT_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
+import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
 
 // Seed/fallback catalog: registered synchronously so the account provider has real
 // models the instant it loads (before the live /api/models fetch resolves) — in
-// particular the signed-in default, near/zai-org/GLM-5.1-FP8, resolves at startup
-// without a "model not found" warning. The first entry is that default: a NEAR
-// confidential-compute (TEE, attestable) model — the strongest privacy tier. Also the
-// fallback list if the live listing can't be reached.
+// particular the default, tinfoil/glm-5-2, resolves at startup without a "model not
+// found" warning, which matters more than ever now that a signed-OUT terminal also
+// launches on it. The first two entries are the TEE tiers (Tinfoil, then NEAR); the
+// rest are the familiar names. Also the fallback list if the live listing is
+// unreachable.
 const DEFAULT_MODELS = [
   ACCOUNT_DEFAULT_MODEL_ID,
+  ACCOUNT_NEAR_MODEL_ID,
   "anthropic/claude-sonnet-4.6",
   "openai/gpt-5.5",
   "deepseek/deepseek-v4-flash",
@@ -169,37 +172,62 @@ export const privateerOAuthProvider = {
       }
     }
     if (cb.signal?.aborted) throw new Error("Login cancelled");
-    const creds = await acquireAccountCredential();
+    // Go through the process-wide, single-flighted accessor rather than acquiring
+    // directly. The device flow above already fired notifySignedIn, whose listeners arm
+    // the account channel — so a bare acquire here would race that one and mint a SECOND
+    // server-side session (a duplicate row in Linked Devices, and a step closer to
+    // 429 CHILD_SESSION_CAP). Sharing the in-flight promise makes it exactly one.
+    const creds = await accountCredential();
     // Seed Pi's saved model default to the account channel, so the next launch resolves
     // to a billable subscription model instead of falling through to a keyless built-in
     // (the "No API key found for openrouter" trap). No-op if the user already has a
     // chosen default. See providers/defaultModel.ts.
     ensurePiDefaultModel();
-    // The fresh path already fired notifySignedIn (pollForToken); fire here for the
-    // already-linked path so the header re-renders to "connected" on this terminal too.
-    if (wasLinked) notifySignedIn();
+    // Announce the completed login — ALWAYS, on both paths, and only now that the
+    // account channel actually holds a credential.
+    //
+    // The fresh path fires this once already, from pollForToken, the instant
+    // credentials.json is written. That's the right moment for the header, and the
+    // wrong one for the model: the listener that moves the live session onto an
+    // account model would run while this spawn was still in flight and find no key.
+    // Firing again here is what makes the switch land. Listeners are documented as
+    // idempotent (see notifySignedIn), and the model switch no-ops when it's already
+    // on target, so the double signal costs nothing.
+    notifySignedIn();
     return creds;
   },
   async refreshToken(creds: { refresh: string }) {
+    let next: AccountCredential;
     try {
-      return await refreshAccountCredentials(creds.refresh);
+      next = await refreshAccountCredentials(creds.refresh);
     } catch {
       // Child token expired/reused → get another. acquire (not spawn) so a terminal
       // that already holds the device's last session slot can reclaim an orphan
       // instead of being refused a fresh one mid-session.
-      return acquireAccountCredential();
+      next = await acquireAccountCredential();
     }
+    // Keep the process memo on the CURRENT token: the one it replaced is dead, and
+    // handing a dead token to a later arm() would 401 on the first prompt.
+    rememberAccountCredential(next);
+    return next;
   },
   getApiKey(creds: { access: string }): string {
     return creds.access;
   },
 };
 
-// Which privacy channel an account model routes through: NEAR confidential-compute
-// (TEE, attestable) for `near/`-prefixed ids, else a server-side ZDR channel.
-// Ported from tree-cli resolve.ts.
+// Confidential-compute prefixes in the account catalog: every model the server serves
+// out of a TEE. `near/` is the one we can attest end to end from here (the server
+// proxies a nonce'd quote); `tinfoil/` and `phala/` are equally real enclaves whose
+// attestation we cannot bind to THIS connection through the proxy — see accountPosture.
+const TEE_PREFIXES = ["near/", "tinfoil/", "phala/"];
+
+// Which privacy channel an account model routes through: confidential compute (TEE)
+// for the prefixes above, else a server-side ZDR channel. Ported from tree-cli
+// resolve.ts, then widened — it used to say `near/` only, which quietly labelled the
+// default model (tinfoil/glm-5-2, a TEE model) as a mere ZDR policy claim.
 export function privateerChannel(modelId: string): "tee" | "zdr" {
-  return modelId.startsWith("near/") ? "tee" : "zdr";
+  return TEE_PREFIXES.some((p) => modelId.startsWith(p)) ? "tee" : "zdr";
 }
 
 export interface AccountPosture {
@@ -219,6 +247,16 @@ export interface AccountPosture {
 export async function accountPosture(modelId: string): Promise<AccountPosture> {
   if (privateerChannel(modelId) === "zdr") {
     return { tier: "zdr-policy" };
+  }
+  // Honest labelling for the non-NEAR enclaves. Tinfoil and Phala publish real
+  // attestations, but the server proxies the inference, so from here we cannot bind a
+  // quote to the connection actually carrying our tokens — only the account's word
+  // that it did. That's `tee-unverified` (yellow "confidential compute, unconfirmed"),
+  // never the green tee-verified we reserve for a quote we checked ourselves. A user
+  // who wants the verified shield sets TINFOIL_API_KEY and runs `tinfoil/*` direct,
+  // where pi-privacy attests the enclave client-side.
+  if (!modelId.startsWith("near/")) {
+    return { tier: "tee-unverified" };
   }
   try {
     const res = await authedFetch(
@@ -286,22 +324,67 @@ export function makeAccountProvider() {
     // all, and the first prompt dead-ends on "No API key found for privateer." — even
     // though the banner says "connected". The REPL (cli/chat.ts) and the daemon
     // already spawn one at startup; this gives the TUI the same seed.
-    pi.on?.("session_start", (_e, ctx) => void ensureAccountCredential(ctx));
+    pi.on?.("session_start", (_e, ctx) => void armAccountCredential(ctx));
   };
 }
 
-// One spawn per PROCESS. session_start also fires for new/resume/fork/reload — all of
-// which keep this process (and its account session) alive — so re-spawning there would
-// leak a device row per event. A fresh process always spawns: a run that crashed
-// without its shutdown hook can leave a REVOKED credential persisted in auth.json with
-// a still-valid-looking `expires`, which Pi would happily reuse and 401 on.
+// ── Arming the account channel ───────────────────────────────────────────────
 //
-// The flag lives on globalThis, not in module scope, because jiti gives each extension
-// that imports this file its OWN module instance (see the note in auth/privateer.ts):
-// privateer-account and privateer-brand — which hot-registers the provider on /signin —
-// would otherwise hold separate flags and each spawn a session.
-const SEEDED = Symbol.for("privateer.accountCredentialSeeded");
-type SeedFlag = { [SEEDED]?: boolean };
+// ONE account session per PROCESS. Every mint is expensive and visible: it's a row in
+// the app's Linked Devices list, and the server caps how many a device may hold
+// (429 CHILD_SESSION_CAP). session_start alone fires for new/resume/fork/reload, and a
+// mid-session /login wants the channel armed too — so the credential is minted once
+// and then remembered, and later callers reuse it instead of stacking another row.
+//
+// Both the memo and its in-flight promise live on globalThis rather than in module
+// scope, because jiti gives each extension its OWN instance of this file (see the note
+// in auth/privateer.ts). privateer-account seeds at launch and privateer-brand arms
+// after a sign-in; module-scoped state would let each mint its own session.
+//
+// A fresh PROCESS always mints: a run that crashed without its shutdown hook can leave
+// a REVOKED credential persisted in auth.json with a still-valid-looking `expires`,
+// which Pi would happily reuse and 401 on.
+const ARMED = Symbol.for("privateer.accountCredential");
+type ArmedSlot = {
+  [ARMED]?: { cred?: AccountCredential; inFlight?: Promise<AccountCredential> };
+};
+
+function armSlot(): NonNullable<ArmedSlot[typeof ARMED]> {
+  const g = globalThis as ArmedSlot;
+  return (g[ARMED] ??= {});
+}
+
+// Record a credential this process minted so nothing mints a second one. Exported for
+// the OAuth login path, which acquires its credential for Pi to own and would
+// otherwise leave the next arm() with nothing to reuse.
+export function rememberAccountCredential(cred: AccountCredential): void {
+  armSlot().cred = cred;
+}
+
+// The remembered credential, if it's still usable. A minute of headroom: handing back
+// one that expires mid-request just trades a spawn for a 401.
+function liveAccountCredential(): AccountCredential | undefined {
+  const cred = armSlot().cred;
+  return cred && cred.expires > Date.now() + 60_000 ? cred : undefined;
+}
+
+// Get this process's account credential, minting one only if we don't already hold a
+// live one. Single-flighted, so two callers racing (session_start and a sign-in) share
+// one spawn rather than opening two sessions.
+async function accountCredential(): Promise<AccountCredential> {
+  const live = liveAccountCredential();
+  if (live) return live;
+  const slot = armSlot();
+  slot.inFlight ??= acquireAccountCredential()
+    .then((cred) => {
+      slot.cred = cred;
+      return cred;
+    })
+    .finally(() => {
+      slot.inFlight = undefined;
+    });
+  return slot.inFlight;
+}
 
 // `ctx` is Pi's ExtensionContext; the auth store hangs off its model registry (the same
 // path privateer-brand uses to DROP the credential on sign-out).
@@ -311,23 +394,35 @@ type SeedContext = {
   ui?: { notify?: (message: string, level: string) => void };
 };
 
-async function ensureAccountCredential(ctx: unknown): Promise<void> {
-  const flag = globalThis as SeedFlag;
-  if (flag[SEEDED] || !hasCredentials()) return;
-  flag[SEEDED] = true;
+// Put a working account credential into Pi's auth store, so `privateer/*` models can
+// actually run. Called at session_start (the launch seed) and again right after a
+// sign-in (see the brand extension) — a mid-session /login has to arm the channel
+// itself, because Pi writes an OAuth credential only for a login IT drove, never for
+// our own /login device-code command.
+//
+// Returns true when the channel is armed. `notify` controls whether a failure is
+// announced: the launch seed says so out loud, while a caller that reports the outcome
+// itself (the sign-in path) passes false so the user doesn't read it twice.
+export async function armAccountCredential(
+  ctx: unknown,
+  opts: { notify?: boolean } = {},
+): Promise<boolean> {
+  if (!hasCredentials()) return false;
   const store = (ctx as SeedContext)?.modelRegistry?.authStorage;
-  if (typeof store?.set !== "function") return;
+  if (typeof store?.set !== "function") return false;
   try {
-    const creds = await acquireAccountCredential();
-    store.set("privateer", { type: "oauth", ...creds });
+    store.set("privateer", { type: "oauth", ...(await accountCredential()) });
+    return true;
   } catch (e) {
     // The account channel is NOT armed: a dead machine login (401 → credentials cleared
     // + onSessionExpired), the terminal cap (429), or a network blip. Say so now — the
     // banner still reads "connected" (it only knows about the local credentials file),
     // so staying silent leaves the user to discover it as a bare "No API key found for
-    // privateer" on their first prompt. Cleared so a later attempt can retry.
-    flag[SEEDED] = false;
+    // privateer" on their first prompt.
     const c = ctx as SeedContext;
-    if (c?.hasUI) c.ui?.notify?.(`Privateer account channel unavailable — ${(e as Error).message}`, "error");
+    if (opts.notify !== false && c?.hasUI) {
+      c.ui?.notify?.(`Privateer account channel unavailable — ${(e as Error).message}`, "error");
+    }
+    return false;
   }
 }
