@@ -74,6 +74,17 @@ class SecretField {
   // are swallowed rather than inserted — the naive "strip control chars" approach
   // would leave "[A" behind from an up-arrow and silently corrupt the token.
   handleInput(data: string): boolean {
+    // A PASTE MUST BE UNWRAPPED FIRST. pi-tui's Terminal re-wraps pasted text in
+    // bracketed-paste markers and delivers it as ONE chunk (`\x1b[200~…\x1b[201~`,
+    // see pi-tui terminal.ts) — which starts with ESC, so the arrow-key guard below
+    // would otherwise swallow the entire token and leave the field empty.
+    const paste = /^\x1b\[200~([\s\S]*?)\x1b\[201~$/.exec(data);
+    if (paste) {
+      // Control chars (a trailing newline from the clipboard, most often) are stripped
+      // the same way typed input is — a token never legitimately contains one.
+      this.value += paste[1].replace(/[\x00-\x1f\x7f]/g, "");
+      return true;
+    }
     if (data.startsWith("\x1b")) return true;
     if (data === "\x7f" || data === "\b") {
       this.value = this.value.slice(0, -1);
@@ -84,7 +95,7 @@ class SecretField {
       this.value = "";
       return true;
     }
-    // Everything printable, including a bracketed-paste chunk arriving at once.
+    // Ordinary typed input (pastes took the branch above).
     const printable = data.replace(/[\x00-\x1f\x7f]/g, "");
     if (!printable) return false;
     this.value += printable;
