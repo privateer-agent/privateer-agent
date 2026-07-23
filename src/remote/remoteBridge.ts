@@ -27,6 +27,7 @@ export interface RelayLike {
   sendCommands(commands: { name: string; description?: string }[]): void;
   requestSelect(id: string, req: SelectRequest): void;
   requestInput(id: string, req: InputRequest): void;
+  sendFileMatches(id: string, matches: { path: string; isDir: boolean }[]): void;
   sendExtensions(payload: ExtensionsPayload): void;
   sendSkills(payload: SkillsPayload): void;
 }
@@ -93,6 +94,9 @@ export interface RemoteBridgeConfig {
   onSkillCreate?: (skill: { name: string; description: string; instructions: string }, sig?: string, ts?: number) => void;
   onSkillDelete?: (name: string, sig?: string, ts?: number) => void;
   onSkillSetEnabled?: (name: string, enabled: boolean, sig?: string, ts?: number) => void;
+  // The app is autocompleting an `@file` mention in its composer — the owner should
+  // list the cwd files matching `query` and reply via sendFileMatches(id, …).
+  onFilesSearch?: (id: string, query: string) => void;
   // A controller (re)attached — the owner should push a transcript snapshot.
   onControllerAttached?: () => void;
   onStatus?: (text: string) => void;
@@ -185,6 +189,7 @@ export class RemoteBridge {
       const resolve = this.pendingInputs.get(id);
       if (resolve) resolve(value);
     },
+    onFilesSearch: (id, query) => this.cfg.onFilesSearch?.(id, query),
     onNoQuarter: (on) => {
       this.noQuarter = on;
       this.relay?.sendNoQuarter(on); // echo the ack back so the app's toggle syncs
@@ -237,6 +242,11 @@ export class RemoteBridge {
   // Advertise the terminal's available commands to the app (on attach).
   sendCommands(commands: { name: string; description?: string }[]): void {
     this.relay?.sendCommands(commands);
+  }
+
+  // Reply to an app `@file` autocomplete query with the matching cwd entries.
+  sendFileMatches(id: string, matches: { path: string; isDir: boolean }[]): void {
+    this.relay?.sendFileMatches(id, matches);
   }
 
   // Push the installed-extensions snapshot to the app's extensions manager.

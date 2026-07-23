@@ -36,6 +36,7 @@ async function main() {
   const { makeExtensionsControl } = await import("../remote/extensionsControl.ts");
   const { makeSkillsControl } = await import("../remote/skillsControl.ts");
   const { authorizeControl } = await import("../remote/controlAuth.ts");
+  const { resolveMentions, completeMention, searchFiles } = await import("../util/fileMentions.ts");
   const priv = await import("../auth/privateer.ts");
   const { makeAccountProvider, accountPosture } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
@@ -59,7 +60,14 @@ async function main() {
   // /model switches, so the app banner + picker reflect what's actually selected.
   let currentSpec = spec;
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  // Tab-completes an `@path` mention against the cwd tree (files the user can
+  // reference in a prompt). readline calls this with the line up to the cursor; a
+  // non-mention line returns no hits, leaving normal input untouched. Async form
+  // (callback) so the filesystem read doesn't block the event loop.
+  const completer = (line: string, cb: (err: null, result: [string[], string]) => void): void => {
+    void completeMention(line, cwd).then((r) => cb(null, r)).catch(() => cb(null, [[], line]));
+  };
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, completer });
   let closed = false;
   rl.on("close", () => (closed = true));
   // Local terminal output is coalesced and prompt-aware. Two stutter sources it kills:
@@ -152,6 +160,13 @@ async function main() {
       relay?.sendCommands(availableCommands());
     },
     onStatus: (t) => console.log(`\n${DIM}⟿ ${t}${RESET}`),
+    // The app composer is autocompleting an `@file` mention — list the cwd entries
+    // matching the query and reply. Read-only + cwd-constrained (searchFiles never
+    // escapes the subtree); resolution of the picked path happens on the prompt turn.
+    onFilesSearch: (id, query) => void (async () => {
+      try { bridge.sendFileMatches(id, await searchFiles(query, cwd)); }
+      catch { bridge.sendFileMatches(id, []); }
+    })(),
     // The app's extensions manager: list the user's installed Pi extensions, or
     // add/remove one. add/remove persist immediately but only load on the next
     // terminal launch — so the final frame flags needsRestart. See runExtMutation.
@@ -258,7 +273,18 @@ async function main() {
     turnActive = true;
     if (remote && echo) console.log(`\n${DIM}⟿ [app] ${text.slice(0, 80)}${RESET}`);
     try {
-      await session.prompt(text);
+      // Expand any `@path` mentions into appended <file> blocks + image attachments,
+      // resolved against this terminal's cwd (constrained to the cwd subtree). Both a
+      // locally-typed prompt and an app-driven one land here, so both get it. A prompt
+      // with no resolvable mention passes through unchanged. Unresolved tokens stay
+      // inline; note them so a typo'd path isn't silently ignored.
+      const mentions = await resolveMentions(text, cwd);
+      if (mentions.skipped.length) {
+        const m = `Couldn't attach: ${mentions.skipped.join(", ")} (must be a file inside ${cwd})`;
+        console.log(`${DIM}${m}${RESET}`);
+        if (remote) relay?.sendNotice(m);
+      }
+      await session.prompt(mentions.text, mentions.images.length ? { images: mentions.images } : undefined);
     } catch (e) {
       console.log(`\n${RED}${(e as Error).message}${RESET}`);
     } finally {
@@ -500,7 +526,7 @@ async function main() {
   );
 
   const HELP = "Commands: /remote-access <on|off>  /login  /model <provider/id>  /models [filter]  /verify  /mode <…>  /quit";
-  console.log(`${DIM}Ready. Type a prompt. ${HELP}${RESET}`);
+  console.log(`${DIM}Ready. Type a prompt — reference a file with @path (Tab completes). ${HELP}${RESET}`);
   await showPosture();
 
   // The available model catalog as sorted "provider/id" specs. Same source the

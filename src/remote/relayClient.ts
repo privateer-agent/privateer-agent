@@ -127,6 +127,10 @@ export interface RelayCallbacks {
   // The app answered a CLI-initiated text-input prompt (the id from requestInput).
   // A null value means the app dismissed the prompt without submitting.
   onInputResponse?: (id: string, value: string | null) => void;
+  // The app's composer is autocompleting an `@file` mention — reply with the cwd
+  // files/dirs matching `query` (a sendFileMatches frame, keyed by the same id).
+  // Read-only; resolution of the picked path still happens on the prompt turn.
+  onFilesSearch?: (id: string, query: string) => void;
   // The app opened the extensions manager — reply with the current installed list
   // (a sendExtensions frame). Optional so pre-extensions callbacks keep compiling.
   onExtensionsList?: () => void;
@@ -424,6 +428,7 @@ export class RelayClient {
       title?: string;
       tools?: unknown;
       mode?: string;
+      query?: string;
       sig?: string;
       ts?: number;
     };
@@ -466,6 +471,9 @@ export class RelayClient {
         break;
       case "input_response":
         if (frame.id) this.cb.onInputResponse?.(frame.id, typeof frame.value === "string" ? frame.value : null);
+        break;
+      case "files_search":
+        if (typeof frame.id === "string") this.cb.onFilesSearch?.(frame.id, typeof frame.query === "string" ? frame.query : "");
         break;
       case "extensions_list":
         this.cb.onExtensionsList?.();
@@ -768,6 +776,18 @@ export class RelayClient {
     this.rawSend({
       type: "commands",
       commands: commands.slice(0, 200).map((c) => ({ name: c.name, description: c.description ? safe(c.description, 200) : undefined })),
+    });
+  }
+
+  // Reply to an `@file` autocomplete query with the matching cwd files/dirs. Keyed by
+  // the query's id so the app can match it to the in-flight request. Bounded; paths are
+  // cwd-relative (the caller — searchFiles — never emits a path outside the cwd subtree,
+  // so no machine location leaks beyond the project filenames the driver is browsing).
+  sendFileMatches(id: string, matches: { path: string; isDir: boolean }[]): void {
+    this.rawSend({
+      type: "file_matches",
+      id,
+      matches: matches.slice(0, 50).map((m) => ({ path: safe(m.path, 300), isDir: !!m.isDir })),
     });
   }
 

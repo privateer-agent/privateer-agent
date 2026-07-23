@@ -19,11 +19,13 @@ function makeFakeRelay() {
   const inputs: { id: string; req: any }[] = [];
   const extensions: any[] = [];
   const skills: any[] = [];
+  const fileMatches: { id: string; matches: { path: string; isDir: boolean }[] }[] = [];
   let connected = true;
   const relay: RelayLike & {
     approvals: typeof approvals; events: typeof events; noQuarter: typeof noQuarter;
     notices: typeof notices; commandLists: typeof commandLists; selects: typeof selects;
     inputs: typeof inputs; extensions: typeof extensions; skills: typeof skills;
+    fileMatches: typeof fileMatches;
     setConnected(v: boolean): void;
   } = {
     approvals,
@@ -35,6 +37,7 @@ function makeFakeRelay() {
     inputs,
     extensions,
     skills,
+    fileMatches,
     setConnected(v) { connected = v; },
     requestApproval(id, req) { approvals.push({ id, req }); },
     sendEvent(ev) { events.push(ev); },
@@ -47,6 +50,7 @@ function makeFakeRelay() {
     requestInput(id, req) { inputs.push({ id, req }); },
     sendExtensions(payload) { extensions.push(payload); },
     sendSkills(payload) { skills.push(payload); },
+    sendFileMatches(id, matches) { fileMatches.push({ id, matches }); },
   };
   return relay;
 }
@@ -185,6 +189,20 @@ test("sendNotice / sendCommands pass through to the relay", () => {
   bridge.sendCommands([{ name: "/model", description: "Switch the model" }]);
   assert.deepEqual(relay.notices, ["model → a/b"]);
   assert.deepEqual(relay.commandLists, [[{ name: "/model", description: "Switch the model" }]]);
+});
+
+test("files_search routes to the config handler and sendFileMatches passes through", () => {
+  const searches: { id: string; query: string }[] = [];
+  const bridge = new RemoteBridge({
+    onPrompt: () => {},
+    onFilesSearch: (id, query) => searches.push({ id, query }),
+  });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  bridge.callbacks.onFilesSearch!("q1", "src/");
+  assert.deepEqual(searches, [{ id: "q1", query: "src/" }]);
+  bridge.sendFileMatches("q1", [{ path: "src/app.ts", isDir: false }]);
+  assert.deepEqual(relay.fileMatches, [{ id: "q1", matches: [{ path: "src/app.ts", isDir: false }] }]);
 });
 
 test("extensions_* callbacks route to the config handlers", () => {
