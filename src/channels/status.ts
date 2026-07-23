@@ -1,9 +1,9 @@
-// Channels daemon heartbeat — the one bit of shared state between the channels
-// daemon (channels/run.ts, the WRITER) and the always-on management relay
-// (daemon/index.ts → channelsControl, the READER).
+// Channels harbor heartbeat — the one bit of shared state between the channels
+// harbor (channels/run.ts, the WRITER) and the always-on management relay
+// (harbor/index.ts → channelsControl, the READER).
 //
 // The two run as SEPARATE processes, so the manager can't ask the channels
-// daemon directly whether it's live. Instead the channels daemon writes a small
+// harbor directly whether it's live. Instead the channels harbor writes a small
 // heartbeat file with the platforms it's currently serving; the reader treats a
 // FRESH heartbeat as "running" and a stale/absent one as "not running". This is
 // best-effort presence, never a dependency: a missing file just means the app
@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { globalDir } from "../config/paths.ts";
 
-// Heartbeat cadence + freshness window. The channels daemon rewrites the file
+// Heartbeat cadence + freshness window. The channels harbor rewrites the file
 // every HEARTBEAT_MS; a heartbeat older than STALE_MS is treated as dead (the
 // process exited without clearing it, or wedged).
 export const HEARTBEAT_MS = 30_000;
@@ -40,8 +40,8 @@ export function writeChannelsStatus(platforms: string[]): void {
   }
 }
 
-// READER: the set of platforms the channels daemon is currently serving, or an
-// empty set when the daemon is down / the heartbeat is stale. Never throws.
+// READER: the set of platforms the channels harbor is currently serving, or an
+// empty set when the harbor is down / the heartbeat is stale. Never throws.
 export function readRunningPlatforms(): Set<string> {
   try {
     const status = JSON.parse(readFileSync(statusPath(), "utf8")) as ChannelsStatus;

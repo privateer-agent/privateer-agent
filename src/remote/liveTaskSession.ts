@@ -1,9 +1,9 @@
-// A live, app-drivable agent session spawned on demand by the daemon (task_spawn,
-// mode:"live"). Unlike a headless task (daemon/index.ts runTask → restricted tools +
+// A live, app-drivable agent session spawned on demand by the harbor (task_spawn,
+// mode:"live"). Unlike a headless task (harbor/index.ts runTask → restricted tools +
 // bypass gate + outbox), this stands up a FULL interactive session behind its own relay
 // terminal so the app can attach and drive it in real time: stream tokens, approve each
 // tool, interrupt. It is the same wiring cli/chat.ts uses for `/remote-access`, factored
-// so the daemon can create one without a TTY.
+// so the harbor can create one without a TTY.
 //
 // SAFETY: the gate runs in "default" mode, so on a driven turn every gated tool relays to
 // the app for allow/deny (bridge.remoteAsk) and fail-closes if the controller is gone —
@@ -70,7 +70,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     if (lifeTimer) clearTimeout(lifeTimer);
     try { relay?.stop(); } catch { /* already stopped */ }
     // Revoke ONLY this session's account inference session so it doesn't linger in the
-    // app's Linked Devices; the daemon's own child session stays alive. Best-effort.
+    // app's Linked Devices; the harbor's own child session stays alive. Best-effort.
     if (spawnedAccount) {
       try { await revokeAccountSession(); } catch { /* server TTL is the fallback */ }
       try { servicesRef?.authStorage?.remove?.("privateer"); } catch { /* nothing persisted */ }

@@ -26,7 +26,7 @@ concentrated in provisioning + the attested bootstrap.
 
 | Capability | Where it lives today | Role in Harbor |
 |---|---|---|
-| **Headless agent runtime** | `src/daemon/index.ts` (runs a Pi session with no TUI, executes routines) | This is the process that runs **inside the enclave**. |
+| **Headless agent runtime** | `src/harbor/index.ts` (runs a Pi session with no TUI, executes routines) | This is the process that runs **inside the enclave**. |
 | **Remote control plane** | `src/remote/relayClient.ts` + `remoteBridge.ts`; server `routes/relay.js` + `services/relayHub.js` (Redis pub/sub, single-use 30s WS ticket, `agent`/`controller` roles) | **Flip the topology.** Today: agent=laptop, controller=phone. Harbor: agent=enclave VM, controller=web portal. Same protocol, same ticket redemption at WS upgrade. |
 | **Remote attestation** | `pi-privacy/src/attest/{dispatcher,attestation}.ts` (undici global dispatcher captures TLS SPKI; NEAR/Tinfoil TDX quote fetch + nonce binding) | The *pattern* for attesting the **agent host**, and — reused unchanged **inside** the enclave — the way the enclave verifies its own outbound inference calls. |
 | **Honest privacy ladder** | `pi-privacy/src/posture/tiers.ts` (`tee-verified` requires *cryptographic* evidence; never conflate verified vs asserted) | Extended with a **runtime-attestation** concept (§4). The honest-labeling contract governs the new badge. |
@@ -51,7 +51,7 @@ workspaces. Those are §5's phases.
         ┌───────────────┐               ┌───────────────────────────────┐
         │ Privateer srv │  provisions   │  Intel TDX Confidential VM     │
         │ (Render)      │──────────────▶│  ┌──────────────────────────┐  │
-        │ relayHub      │◀─ relay WS ───│  │ daemon/index.ts (Pi)     │  │
+        │ relayHub      │◀─ relay WS ───│  │ harbor/index.ts (Pi)     │  │
         │ billing       │               │  │  + permission gate       │  │
         │ provisioner ★ │               │  │  + pi-privacy attest ────┼──┼──▶ TEE inference
         └───────────────┘               │  │  workspace vol (sealed)  │  │   (NEAR/Tinfoil,
@@ -97,7 +97,7 @@ This is what makes it "verify, not trust." It runs **before** any user data leav
    any secrets — to `enclave_pubkey` using the existing sealed-box (`sealJson` /
    `outboxSeal.ts`). Only code running inside the measured enclave holds the private key to
    open it. The Privateer server relays the ciphertext but can't read it.
-5. **Drive.** Client opens the relay as `controller`; the enclave daemon connects as `agent`
+5. **Drive.** Client opens the relay as `controller`; the enclave harbor connects as `agent`
    (existing `routes/relay.js` ticket flow). From here it's the *current* remote-access
    experience, just pointed at a server instead of a laptop — including the per-tool
    **permission gate**, which is now load-bearing (§6).
@@ -135,7 +135,7 @@ not just asserted by us. That's the strongest version of the claim.
 
 ## 5. Build phases & effort
 
-**Phase 0 — vertical spike (~1 week).** One Azure or GCP TDX CVM, booted with `daemon/index.ts`
+**Phase 0 — vertical spike (~1 week).** One Azure or GCP TDX CVM, booted with `harbor/index.ts`
 inside it. Get a real TD quote, verify it client-side against a hand-pinned measurement, open
 the existing relay from inside the VM, drive it from the CLI. Proves the entire trust chain
 minus provisioning UX and multi-tenancy. **This is the go/no-go.**
@@ -158,7 +158,7 @@ minus provisioning UX and multi-tenancy. **This is the go/no-go.**
 - Reproducible image builds + published measurement in the transparency mirror.
 - Optional: in-house **GPU-CC** model hosting (H100 CC) to own the inference link too.
 
-Rough sizing: internal MVP that reuses relay + billing and runs the daemon in a real TDX VM
+Rough sizing: internal MVP that reuses relay + billing and runs the harbor in a real TDX VM
 is **weeks**; the org product matching Nous is **~a couple months**, dominated by
 provisioning/lifecycle and the encrypted-persistence + RBAC work — *not* by the crypto, which
 largely exists.

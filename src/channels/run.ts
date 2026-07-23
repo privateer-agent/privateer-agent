@@ -1,6 +1,6 @@
 // Headless entry for the messaging channels — `npm run channels` (or
 // `node --env-file=.env --import tsx src/channels/run.ts`). Boots the Pi stack the
-// same way the routines daemon does, then bridges any configured chat platform
+// same way the routines harbor does, then bridges any configured chat platform
 // (Telegram, Slack) to per-conversation agent sessions.
 //
 // AUTHORIZATION MODEL (per channel):
@@ -23,7 +23,7 @@
 // posture). Every prompt/approval is appended to ~/.privateer/channels-audit.log.
 // Tokens live in config.json in plaintext — protect that file's permissions.
 //
-// Config lives in ~/.privateer/config.json (the same file the daemon reads):
+// Config lives in ~/.privateer/config.json (the same file the harbor reads):
 //   {
 //     "defaultModel": "openrouter/openai/gpt-4o-mini",
 //     "channels": {
@@ -47,7 +47,7 @@
 import "../boot.ts"; // env + attestation dispatcher, before any Pi import
 import { AsyncLocalStorage } from "node:async_hooks";
 
-// Read-only default toolset — same rationale as the routines daemon's SAFE_TOOLS:
+// Read-only default toolset — same rationale as the routines harbor's SAFE_TOOLS:
 // a turn nobody is watching can't mutate the filesystem or shell out. Now that the
 // gate routes approvals into the chat (see below), a user can safely widen this per
 // channel via `channels.tools` — e.g. add "edit","write","bash" and each risky call
@@ -64,7 +64,7 @@ const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 type Posture = "readonly" | "approve" | "auto";
 const POSTURES: Posture[] = ["readonly", "approve", "auto"];
 
-// Bound the live session map so a long-running daemon can't grow without limit or
+// Bound the live session map so a long-running harbor can't grow without limit or
 // hold stale context forever.
 const MAX_SESSIONS = 500;
 const SESSION_IDLE_MS = 30 * 60 * 1000; // evict a conversation unused for 30 min
@@ -255,7 +255,7 @@ async function main() {
   // ── build a bridge per configured platform ───────────────────────────────────
   const bridges: { stop(): void }[] = [];
   // Platforms with a live bridge — written to the heartbeat file so the app's
-  // channels manager (running on the daemon's relay, a separate process) can show
+  // channels manager (running on the harbor's relay, a separate process) can show
   // a live/offline badge without talking to this process.
   const startedPlatforms: string[] = [];
 

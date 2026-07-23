@@ -2,7 +2,7 @@
  * MCP connector management for the app — the sibling of channelsControl.ts, but for
  * MCP server config rather than messaging channels. It is what lets the phone/web
  * client add, toggle, and remove MCP connectors on a Node HOST it drives over the
- * relay (the daemon today; an interactive terminal by the same shape).
+ * relay (the harbor today; an interactive terminal by the same shape).
  *
  * The client itself can NEVER run MCP — a browser tab / RN runtime can't spawn a
  * stdio child or hold the adapter. So "serving MCP to phone/web" means MANAGING the
@@ -20,7 +20,7 @@
  * returns an env VALUE — only which env keys exist (`envKeys`) and which are non-empty
  * (`secretsSet`), by name. save() persists whatever env VALUES it is handed in
  * `draft.env`; the seal/open of those values in transit is the caller's job (the
- * daemon opens a sealed-box addressed to its terminal, mirroring applyChannelSave), so
+ * harbor opens a sealed-box addressed to its terminal, mirroring applyChannelSave), so
  * this module only ever deals in the plaintext files it already owns.
  *
  * Framework-agnostic: nothing here imports React or the relay. The caller owns the

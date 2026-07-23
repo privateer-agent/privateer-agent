@@ -5,11 +5,11 @@ import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
 
 // Harbor hosted mode.
 //
-// When true, this daemon is running inside Privateer's confidential-VM fleet
+// When true, this harbor is running inside Privateer's confidential-VM fleet
 // (the host orchestrator sets HARBOR_HOSTED=1), not on a user's own machine.
-// Hosted daemons run on-demand: they report their next routine fire time to the
+// Hosted harbors run on-demand: they report their next routine fire time to the
 // server and idle-suspend when there's no work, so the server can wake them
-// again in time. A daemon on a user's laptop leaves this off and keeps running
+// again in time. A harbor on a user's laptop leaves this off and keeps running
 // its own cron continuously.
 //
 // Read via process.env at call time, mirroring PRIVATEER_HOME / PRIVATEER_SERVER_URL.
@@ -18,7 +18,7 @@ export function isHosted(): boolean {
 }
 
 /**
- * Publish this daemon's relay identity key so the Harbor host can attest it.
+ * Publish this harbor's relay identity key so the Harbor host can attest it.
  *
  * ATTESTATION CONTRACT (host side: treeview `server/services/harborOrchestrator/`):
  * the orchestrator mints the SEV-SNP report on the CVM host — configfs-tsm is a
@@ -34,7 +34,7 @@ export function isHosted(): boolean {
  * before the relay registers.
  *
  * Hosted-only and best-effort: on a user's own machine this is a no-op, and a write
- * failure must never take the daemon down — attestation simply fail-closes host-side
+ * failure must never take the harbor down — attestation simply fail-closes host-side
  * with HARBOR_ATTEST_NO_KEY rather than reporting a false "attested".
  */
 export function publishRelayPub(): void {

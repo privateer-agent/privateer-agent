@@ -1,6 +1,6 @@
 // The single source of truth for "which model do we default to?" — shared by every
 // entry point that has to pick a model when the user hasn't named one: the REPL
-// (cli/chat.ts), the daemon (routines), the channels runner, and the login-time hook
+// (cli/chat.ts), the harbor (routines), the channels runner, and the login-time hook
 // that seeds Pi's TUI default (ensurePiDefaultModel).
 //
 // The bug this fixes: each of those sites used to hardcode `openrouter/openai/gpt-4o-

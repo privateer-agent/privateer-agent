@@ -45,7 +45,7 @@ function tsOf(frame: { ts?: unknown }): number | undefined {
 }
 
 // Parse a task_submit/task_spawn frame into a TaskSpec, keeping ONLY well-typed,
-// present fields (absent → left undefined). The daemon re-derives the canonical signed
+// present fields (absent → left undefined). The harbor re-derives the canonical signed
 // args from this (taskControlArgs, undefined → null), so it must not invent fields.
 export function parseTaskSpec(frame: {
   prompt?: string;
@@ -79,10 +79,10 @@ function safe(s: string, max: number): string {
   return clip(redactSecrets(s), max);
 }
 
-// An ad-hoc task the app asks the daemon to run headlessly (task_submit) or to spawn
+// An ad-hoc task the app asks the harbor to run headlessly (task_submit) or to spawn
 // as a live-drivable session (task_spawn). Only `prompt` is required; the rest fall back
-// to daemon defaults. The SAME field set is what the app canonical-signs into the control
-// envelope (client/services/accountSign.ts) and the daemon re-derives to verify (index.ts
+// to harbor defaults. The SAME field set is what the app canonical-signs into the control
+// envelope (client/services/accountSign.ts) and the harbor re-derives to verify (index.ts
 // taskControlArgs) — keep the two in sync, byte for byte, like the other signed frames.
 export interface TaskSpec {
   prompt: string;
@@ -99,7 +99,7 @@ export interface RelayCallbacks {
   onInterrupt: () => void;
   // The app asked to turn remote access OFF entirely (the in-app "End remote
   // access" action). The owner should disable /remote-access — i.e. stop this
-  // client and not reconnect. Optional: the routines daemon handles it too, but
+  // client and not reconnect. Optional: the routines harbor handles it too, but
   // callbacks that predate it keep compiling.
   onTerminate?: () => void;
   // The account signed this terminal out server-side (revoked from the app's
@@ -151,10 +151,10 @@ export interface RelayCallbacks {
   // The app toggled a user skill's model-invocation availability.
   onSkillSetEnabled?: (name: string, enabled: boolean, sig?: string, ts?: number) => void;
   // The app opened the routines manager — reply with the current routines list
-  // (a sendRoutines frame). Owned by the daemon, so these only fire on its relay.
+  // (a sendRoutines frame). Owned by the harbor, so these only fire on its relay.
   onRoutinesList?: () => void;
   // The app asked to create (no id) or edit (id) a routine. The raw draft object is
-  // handed through untyped; the daemon's routinesControl validates it. Signed (H2) —
+  // handed through untyped; the harbor's routinesControl validates it. Signed (H2) —
   // a forged routine runs a headless bypass-mode session (RCE), so it MUST be verified.
   onRoutinesSave?: (draft: Record<string, unknown>, sig?: string, ts?: number) => void;
   // The app asked to delete a routine by id or name.
@@ -167,14 +167,14 @@ export interface RelayCallbacks {
   // right now — a fresh restricted-tool bypass session whose result is sealed to the
   // account outbox. Signed (H2) — a forged task_submit runs an arbitrary headless
   // session (RCE), identical in blast radius to a forged routines_run, so it MUST be
-  // verified via controlAuth before it runs. Daemon-owned (fires only on its relay).
+  // verified via controlAuth before it runs. Harbor-owned (fires only on its relay).
   onTaskSubmit?: (spec: TaskSpec, sig?: string, ts?: number) => void;
   // The app asked to SPAWN a fresh interactive session it can drive live (mode:"live").
-  // The daemon stands up a new RemoteBridge terminal and replies (sendTaskSpawned) with
+  // The harbor stands up a new RemoteBridge terminal and replies (sendTaskSpawned) with
   // its termId so the app can attach. Same signed-RCE gate as task_submit.
   onTaskSpawn?: (spec: TaskSpec, sig?: string, ts?: number) => void;
   // The app opened the channels manager — reply with the current channel config
-  // (a sendChannels frame). Owned by the daemon, so these only fire on its relay.
+  // (a sendChannels frame). Owned by the harbor, so these only fire on its relay.
   onChannelsList?: () => void;
   // The app asked to create/edit a platform's channel config. `draft` carries only
   // NON-secret fields (roles/posture/tools/model). `sealedSecrets`, when present, is
@@ -187,7 +187,7 @@ export interface RelayCallbacks {
   // (H2) — a forged removal is a DoS (the bot stops until re-added).
   onChannelsRemove?: (platform: string, sig?: string, ts?: number) => void;
   // The app opened the MCP connectors manager — reply with the current MCP config
-  // (a sendMcp frame). Owned by the daemon (the host that runs the adapter), so these
+  // (a sendMcp frame). Owned by the harbor (the host that runs the adapter), so these
   // only fire on its relay. Read-only, so unsigned.
   onMcpList?: () => void;
   // The app asked to create/edit an MCP connector. `draft` carries only NON-secret
@@ -203,12 +203,12 @@ export interface RelayCallbacks {
   // The app asked to delete a connector by name. Signed (H2) — a forged removal is a DoS.
   onMcpRemove?: (name: string, sig?: string, ts?: number) => void;
   // The app opened the workflows manager — reply with the current workflow summaries
-  // (a sendWorkflows frame). Owned by the daemon, so these only fire on its relay.
+  // (a sendWorkflows frame). Owned by the harbor, so these only fire on its relay.
   onWorkflowsList?: () => void;
   // The app opened one workflow in its editor — reply with the full graph (sendWorkflow).
   onWorkflowsGet?: (idOrName: string) => void;
   // The app asked to create (no workflow.id) or edit (id) a workflow. The raw graph is
-  // handed through untyped; the daemon's workflowsControl strict-validates it. Signed
+  // handed through untyped; the harbor's workflowsControl strict-validates it. Signed
   // (H2) — a forged save plants a `script` step that BYPASSES the permission gate (RCE),
   // exactly like a forged routine, so it MUST be verified before it persists.
   onWorkflowsSave?: (draft: Record<string, unknown>, sig?: string, ts?: number) => void;
@@ -290,7 +290,7 @@ export class RelayClient {
   private buf = "";
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
   // Stable for this process so reconnects keep the same terminal identity. Callers
-  // may pass a persisted id/label (e.g. the routines daemon, so it shows up as one
+  // may pass a persisted id/label (e.g. the routines harbor, so it shows up as one
   // recognizable "Privateer Routines" terminal across restarts instead of a fresh
   // random one each time).
   private readonly termId: string;
@@ -548,7 +548,7 @@ export class RelayClient {
         break;
       case "mcp_save":
         // The connector rides in `draft` (same slot as channels_save), untyped — the
-        // daemon strict-validates it via mcpControl.save after the signature check.
+        // harbor strict-validates it via mcpControl.save after the signature check.
         if (frame.draft && typeof frame.draft === "object") {
           this.cb.onMcpSave?.(
             frame.draft,
@@ -571,7 +571,7 @@ export class RelayClient {
         if (typeof frame.idOrName === "string") this.cb.onWorkflowsGet?.(frame.idOrName);
         break;
       case "workflows_save":
-        // The graph rides in `draft` (same slot as channels_save), untyped — the daemon
+        // The graph rides in `draft` (same slot as channels_save), untyped — the harbor
         // strict-validates it via workflowsControl.save after the signature check.
         if (frame.draft && typeof frame.draft === "object") this.cb.onWorkflowsSave?.(frame.draft, sig(frame), tsOf(frame));
         break;
@@ -675,7 +675,7 @@ export class RelayClient {
   }
 
   // Push a workflow's live step text / final result to any attached controller as a text
-  // event, so it renders in the daemon terminal's feed. Same durable-copy caveat as
+  // event, so it renders in the harbor terminal's feed. Same durable-copy caveat as
   // sendRoutineResult (the outbox is the source of truth).
   sendWorkflowResult(name: string, content: string): boolean {
     if (!this.isConnected()) return false;
@@ -686,7 +686,7 @@ export class RelayClient {
 
   // Tell the app that a live task session was stood up on `termId` (label for display),
   // so it can open a controller connection to that terminal and drive it. Fire-and-forget
-  // over the daemon's management relay.
+  // over the harbor's management relay.
   sendTaskSpawned(termId: string, label: string): void {
     this.rawSend({ type: "task_spawned", termId, label });
   }
@@ -843,7 +843,7 @@ export class RelayClient {
     });
   }
 
-  // Push the daemon's saved routines to the app's routines manager. Sent on request
+  // Push the harbor's saved routines to the app's routines manager. Sent on request
   // and after each save/delete/pause/run. `busy` drives a progress indicator;
   // `message` carries a one-line result/error. Unlike the feed/webhook paths this is
   // the user's OWN config echoed back to their OWN app, so fields are size-clipped
@@ -893,7 +893,7 @@ export class RelayClient {
     });
   }
 
-  // Push the daemon's channel config to the app's channels manager. Sent on request
+  // Push the harbor's channel config to the app's channels manager. Sent on request
   // and after each save/remove. Like sendRoutines this is the user's OWN config
   // echoed to their OWN app — but a bot token NEVER crosses this wire: only
   // `secretsSet` (which secret fields are present, by NAME) is sent, so a relay /
@@ -973,7 +973,7 @@ export class RelayClient {
     });
   }
 
-  // Push the daemon's saved workflows to the app's workflows manager as SUMMARIES (not
+  // Push the harbor's saved workflows to the app's workflows manager as SUMMARIES (not
   // the full graphs — the editor fetches one at a time via sendWorkflow). Sent on request
   // and after each save/remove/run. The user's OWN config echoed to their OWN app, so
   // fields are clipped (not redacted). List bounded like the other managers.

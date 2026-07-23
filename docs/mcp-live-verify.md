@@ -1,7 +1,7 @@
 # MCP over the relay — live verification
 
 Everything in this feature is typecheck-clean and covered by automated checks, but until
-you run this, **no MCP frame has crossed a real relay to a real daemon.** This is the
+you run this, **no MCP frame has crossed a real relay to a real harbor.** This is the
 checklist that closes that.
 
 It is ordered so each step can only fail in one place. Don't skip ahead — if step 2
@@ -21,25 +21,25 @@ cd ../treeview/desktop && node --import tsx scripts/check-mcp-relay.mjs
 ```
 
 Those cover the crypto and the config layer. What they **cannot** cover — and what this
-document exists for — is: the relay actually routing `mcp_*` frames, the daemon's
+document exists for — is: the relay actually routing `mcp_*` frames, the harbor's
 callbacks firing, the adapter really spawning a server, and MCP tools passing the moat.
 
 ---
 
 ## Prerequisites
 
-- A computer signed in to Privateer with the daemon running: `privateer daemon`
-  (or `privateer daemon install` for the always-on service).
+- A computer signed in to Privateer with the harbor running: `privateer harbor`
+  (or `privateer harbor install` for the always-on service).
 - The phone or web app signed in to the **same account**, with that machine linked.
-- The daemon's terminal appears in the app as **Privateer Routines** (`routines-…`).
+- The harbor's terminal appears in the app as **Privateer Routines** (`routines-…`).
 
-Useful throughout — watch the daemon while you drive from the phone:
+Useful throughout — watch the harbor while you drive from the phone:
 
 ```bash
-tail -f ~/.privateer/daemon.log     # adjust if your log path differs
+tail -f ~/.privateer/harbor.log     # adjust if your log path differs
 ```
 
-Config the daemon reads (both should change as you act from the app):
+Config the harbor reads (both should change as you act from the app):
 
 ```bash
 cat ~/.privateer/agent/mcp-desktop.json   # source of truth, incl. `enabled`
@@ -62,7 +62,7 @@ Step 3 remains the only test of the seal.
 
 ## Step 1 — The screen loads and the list round-trips
 
-Open the app → **Code** tab → the daemon card → **MCP connectors**.
+Open the app → **Code** tab → the harbor card → **MCP connectors**.
 
 - [ ] The screen opens and does not sit on "Connecting…"
 - [ ] Any connectors already in `mcp-desktop.json` are listed
@@ -70,7 +70,7 @@ Open the app → **Code** tab → the daemon card → **MCP connectors**.
 **Proves:** relay routing works for a new frame type, `mcp_list` reaches
 `onMcpList`, and `sendMcp` comes back and parses.
 
-If it hangs on "Connecting…", the drive session isn't focused on the daemon terminal —
+If it hangs on "Connecting…", the drive session isn't focused on the harbor terminal —
 that's navigation/`familyId`, not MCP. If it connects but the list is empty when the file
 isn't, the failure is in `sendMcp` / the `mcp` frame parser.
 
@@ -86,7 +86,7 @@ Quick-add → **Memory** (or any `needs: none` entry) → Save.
 exercised. This is the clean separation: if step 3 later fails, it's the crypto, not the
 frame plumbing.
 
-If it fails here with a refusal message, read it — the daemon's copy distinguishes
+If it fails here with a refusal message, read it — the harbor's copy distinguishes
 "couldn't verify this change came from your account" (signature) from a validation error.
 
 ## Step 3 — Add a connector WITH a credential
@@ -128,7 +128,7 @@ With the GitHub (or Memory) connector enabled, spawn a task from the app that ne
 include the MCP tool by its `server__tool` name (e.g. `github__list_issues`); the
 allow-list now passes `split.mcp` through.
 
-- [ ] The daemon log shows the MCP server starting (an `npx` child process for stdio)
+- [ ] The harbor log shows the MCP server starting (an `npx` child process for stdio)
 - [ ] The task result reflects real MCP data, not a refusal or a hallucination
 - [ ] A tool the routine did **not** list is still refused
 
@@ -145,11 +145,11 @@ Add **Linear** (or any `needs: oauth` entry) from the phone.
 - [ ] The amber callout appears naming the host machine
 - [ ] Saving works, but its tools fail until you authorize
 - [ ] Open Privateer **on the host computer**, authorize in the browser
-- [ ] The daemon can now use it — tokens land in
+- [ ] The harbor can now use it — tokens land in
       `~/.privateer/agent/mcp-oauth/sha256-<hash>/tokens.json` and are shared with the
       desktop app, and refresh headlessly from there
 
-**Known limitation, not a bug:** the daemon can't *initiate* that browser flow itself.
+**Known limitation, not a bug:** the harbor can't *initiate* that browser flow itself.
 On a genuinely headless host (VPS/container) an OAuth connector can't be authorized at
 all. See `mcp-over-relay` notes for the options if that ever matters.
 
@@ -161,7 +161,7 @@ all. See `mcp-over-relay` notes for the options if that ever matters.
 |---|---|
 | Screen stuck "Connecting…" | drive session / `familyId`, not MCP |
 | List empty but file isn't | `sendMcp` payload, `mcp` frame parser in `RemoteDriveContext` |
-| "Couldn't verify this change came from your account" | signature — app `signControlFrame` args vs daemon `authorizeControl` args must canonicalize identically |
+| "Couldn't verify this change came from your account" | signature — app `signControlFrame` args vs harbor `authorizeControl` args must canonicalize identically |
 | "Couldn't decrypt the connector credentials" | sealed to the wrong terminal key — re-link to re-pin |
 | "This terminal can't accept changes… re-link it" | no pinned account key on that terminal |
 | Saves fine, tools never fire | Step 5 — adapter loading or the tool allow-list, not the relay |

@@ -4,7 +4,7 @@
 //
 // Phase 1 skeleton: this prints the resolved boot state so `npm start` proves
 // the boot chain end-to-end (env pinned, dispatcher installed) without a TUI.
-// Phases 4/6 replace the body with the daemon/relay wiring and the pi-tui app.
+// Phases 4/6 replace the body with the harbor/relay wiring and the pi-tui app.
 
 import "./boot.ts";
 

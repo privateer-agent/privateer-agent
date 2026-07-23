@@ -12,7 +12,7 @@
  * makeMcpControl() the relay uses (src/remote/mcpControl.ts) — which is why that
  * module was written framework-agnostic. A connector added here lands in
  * `agent/mcp-desktop.json` and is projected into `agent/mcp.json`, so it shows up in
- * the app's MCP screen, survives a toggle from the phone, and is read by the daemon's
+ * the app's MCP screen, survives a toggle from the phone, and is read by the harbor's
  * routine runs. Nothing about this panel is terminal-specific except the pixels.
  *
  * SECRETS: env values are typed into a masked field and written in PLAINTEXT to the
@@ -394,7 +394,7 @@ class ConnectPanel extends Container {
     const t = this.theme;
     this.body.addChild(new Text(t.fg("accent", t.bold("Connect a service")), 1, 0));
     this.body.addChild(
-      new Text(t.fg("muted", "MCP connectors on this machine — shared with the app and the daemon."), 1, 0),
+      new Text(t.fg("muted", "MCP connectors on this machine — shared with the app and the harbor."), 1, 0),
     );
     this.body.addChild(new Spacer(1));
 

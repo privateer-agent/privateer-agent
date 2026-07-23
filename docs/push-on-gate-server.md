@@ -13,7 +13,7 @@
 
 ## 1. Problem
 
-A workflow `human_gate` opens on the daemon and holds for `GATE_TIMEOUT_MS` (5 min) before it
+A workflow `human_gate` opens on the harbor and holds for `GATE_TIMEOUT_MS` (5 min) before it
 fail-closes to the cloud outbox. The person who must approve is usually not looking at the app —
 that's the whole "automation in my pocket" premise.
 
@@ -25,7 +25,7 @@ arrives *while the app is backgrounded but still alive* (JS running, relay socke
 gone, so it never receives the gate frame and never fires a local notification. Only a
 **server-sent push** (APNs / FCM), delivered by the OS independent of the app process, can reach
 that person. That needs three things that don't exist yet: (a) device push-token registration,
-(b) a server push sender, (c) a trigger that fires when the daemon opens a gate.
+(b) a server push sender, (c) a trigger that fires when the harbor opens a gate.
 
 ## 2. Non-goals
 
@@ -56,7 +56,7 @@ acceptable. Keep it minimal.
 ## 4. Architecture
 
 ```
-   daemon (privateer-agent)                 relay server (treeview/server)             device
+   harbor (privateer-agent)                 relay server (treeview/server)             device
   ┌────────────────────────┐               ┌───────────────────────────────┐        ┌────────┐
   │ askGate() opens a gate  │  push_wake    │ relay WS (pure transport)     │        │  app   │
   │ pendingGates.set(id,…)  │──────────────▶│  ├ is an app socket live for  │        │(killed)│
@@ -71,7 +71,7 @@ acceptable. Keep it minimal.
 
 Trigger flow:
 
-1. **Daemon opens a gate** (`askGate`). In addition to sending the E2EE `select_request` to any
+1. **Harbor opens a gate** (`askGate`). In addition to sending the E2EE `select_request` to any
    attached controller, it emits a **content-free** `push_wake` control frame over its existing
    relay connection.
 2. **Relay checks presence.** `relayHub` knows whether the account/device-family has a live app
@@ -80,7 +80,7 @@ Trigger flow:
    proceed.
 3. **Server sends push.** Look up the account's registered device tokens (`pushDeviceModel`),
    send a content-free push via `pushService` (Expo push API / `expo-server-sdk`).
-4. **User taps → app opens → attaches** to the named family/terminal. The daemon **re-emits any
+4. **User taps → app opens → attaches** to the named family/terminal. The harbor **re-emits any
    open `pendingGates`** on attach (see §7 — a required change; `onAttachment` is a no-op today),
    so the reconnected app renders the gate and the person answers over the live E2EE relay.
 
@@ -113,19 +113,19 @@ Trigger flow:
   are device identifiers, not user content. Document this in the model header.
 
 ### 5.3 Relay (`treeview/server/server.js` + `services/relayHub.js` + `routes/relay.js`)
-- Handle a new **`push_wake`** control frame from a daemon socket: authenticate it belongs to the
+- Handle a new **`push_wake`** control frame from a harbor socket: authenticate it belongs to the
   account (same session/ticket auth the relay already enforces), then ask `relayHub` whether an
   **app** socket is live for that account/family.
 - **Offline gate:** if an app socket is present → drop (covered in-app). If absent → call
   `pushService.sendGateWake`. Optionally a short debounce/grace (e.g. 3–5 s) to let a
   briefly-backgrounded app reconnect before paying for a push.
-- **Abuse control:** only a daemon socket authenticated for the account may trigger a wake for
+- **Abuse control:** only a harbor socket authenticated for the account may trigger a wake for
   that account; rate-limit per account (a gate can't fire pushes faster than gates open).
 
-### 5.4 Daemon / agent (`privateer-agent`)
+### 5.4 Harbor / agent (`privateer-agent`)
 - **`src/remote/relayClient.ts`** — add `sendPushWake(family?)` that emits the content-free
   `push_wake` frame (sibling of `sendNotice`). No content, ever.
-- **`src/daemon/index.ts`** — in `askGate` (where `pendingGates.set` happens), also call
+- **`src/harbor/index.ts`** — in `askGate` (where `pendingGates.set` happens), also call
   `relay.sendPushWake(...)`. And implement **`onAttachment`** (currently `() => {}`) to re-emit
   every open `pendingGates` entry as a fresh `select_request`, so a pushed-then-opened app that
   attaches after the gate opened actually sees it. **This reconnect re-emit is required for the
@@ -156,7 +156,7 @@ Trigger flow:
 - Push undelivered / ignored → the gate still fail-closes to the **cloud outbox** exactly as
   today. Push is an *enhancement*, never load-bearing for correctness.
 - Token stale (`DeviceNotRegistered`) → pruned on the send receipt.
-- Multiple devices → push all; whichever attaches first answers; the daemon resolves the gate
+- Multiple devices → push all; whichever attaches first answers; the harbor resolves the gate
   once and the others show it already handled.
 - Relay can't see content → by design; it only ever sees the content-free `push_wake` + presence.
 
@@ -165,7 +165,7 @@ Trigger flow:
 1. **Expo push vs direct APNs/FCM** for P1 (recommend Expo).
 2. **Grace window** before pushing (0 vs ~3–5 s) to avoid pushing a device that's about to
    reconnect.
-3. **Extend gate timeout on push?** (better UX vs. holding a daemon session longer).
+3. **Extend gate timeout on push?** (better UX vs. holding a harbor session longer).
 4. **Presence source of truth** — confirm `relayHub` exposes per-account/family app-socket
    presence cheaply (Redis key). If not, add it.
 5. **Payload routing granularity** — `familyId` only, or also `termId`/run id (still non-content)
@@ -175,7 +175,7 @@ Trigger flow:
 
 | Phase | Scope |
 |-------|-------|
-| **P1** | Token register/unregister + `pushService` (Expo) + `push_wake` frame + relay offline-gate + daemon `sendPushWake` + **`onAttachment` re-emit** + content-free payload + tap-to-open-gate. |
+| **P1** | Token register/unregister + `pushService` (Expo) + `push_wake` frame + relay offline-gate + harbor `sendPushWake` + **`onAttachment` re-emit** + content-free payload + tap-to-open-gate. |
 | **P2** | Interactive **Approve/Hold** notification actions (works when the app can be woken to a background task that re-establishes the relay; degrade to open-app if not). |
 | **P3** | Direct APNs/FCM (drop Expo intermediary); multi-device de-dupe polish; optional gate-timeout extension. |
 
@@ -183,8 +183,8 @@ Trigger flow:
 
 - **Unit:** `pushService` token pruning; relay offline-gate (present→no push, absent→push);
   `push_wake` auth rejection for a non-owning socket.
-- **Integration:** daemon opens gate with no app connected → exactly one content-free push per
-  account; app attaches → daemon re-emits the open gate → answer resolves it.
+- **Integration:** harbor opens gate with no app connected → exactly one content-free push per
+  account; app attaches → harbor re-emits the open gate → answer resolves it.
 - **Privacy assertion (must-have test):** the outbound push payload contains **no** workflow
   name / gate prompt / step text — only the fixed localized string + routing ids.
 - **Device manual:** kill the app fully; trigger an overnight gate; confirm the push wakes it and

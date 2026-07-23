@@ -29,7 +29,7 @@ privateer-<os>-<arch>/
 ├── bin/               # privateer-launch.mjs (shared logic) + platform shims
 │                      #   privateer-tui  (unix bash shim → picks node → launch.mjs)
 │                      #   privateer.cmd  (Windows shim → node.exe → launch.mjs)
-│                      #   privateer-daemon.mjs, privateer-subagent.mjs
+│                      #   privateer-harbor.mjs, privateer-subagent.mjs
 ├── package.json  patches/  README.md  LICENSE
 └── BUNDLE_INFO.json   # { target, node, version, channel:"bundle" } — launcher marker
 ```
@@ -37,7 +37,7 @@ privateer-<os>-<arch>/
 ### Launcher
 
 `bin/privateer-launch.mjs` is the **single, cross-platform** source of launch logic
-(moat-shim install, settings defaults, model pick, update/daemon dispatch, exec into
+(moat-shim install, settings defaults, model pick, update/harbor dispatch, exec into
 Pi's TUI). Two thin shims just pick a Node and run it:
 
 - **unix** `bin/privateer-tui` (bash) — bundled `./node` wins, else system node ≥22, else nvm.
@@ -119,8 +119,8 @@ on PATH, and support `privateer update` (re-download). Neither needs Node or npm
    slims runtime-dead weight: `.dSYM` debug symbols (a mis-published `hypa.dSYM` was
    ~102 MB), source maps (~105 MB), and `.d.ts` declarations (~80 MB). Remaining fat is
    the Node runtime (~109 MB) and provider SDKs. Further options, not yet done: drop
-   `tsx` + `@esbuild` (~12 MB — needs the daemon/REPL launchers moved off `tsx/esm/api`
-   to `jiti`, which risks the daemon boot); drop `recheck` jar+native (~49 MB, if truly
+   `tsx` + `@esbuild` (~12 MB — needs the harbor/REPL launchers moved off `tsx/esm/api`
+   to `jiti`, which risks the harbor boot); drop `recheck` jar+native (~49 MB, if truly
    unused at runtime); `strip` the Node binary (risky re: macOS signing).
 4. **In-app `/update` still assumes npm.** `bin/privateer-tui`/`privateer-launch.mjs`
    handle `privateer update` bundle-aware (re-run the installer), but the `/update`

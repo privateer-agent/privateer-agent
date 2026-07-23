@@ -72,11 +72,11 @@ export function clearAccountSignKey(): void {
 // watermark for its terminal is a replay/rollback of an older signed envelope and is
 // refused; at-or-above is accepted (an idempotent replay of the latest is harmless).
 //
-// Keyed by termId — NOT global — so the always-on daemon (stable routines-… id) and
+// Keyed by termId — NOT global — so the always-on harbor (stable routines-… id) and
 // each interactive terminal (its own id) don't cross-reject each other's frames when
 // the app drives them near-simultaneously with independent ts streams. Each signed
 // frame binds its termId (see accountVerify.controlMessage), so a per-terminal
-// watermark is the matching granularity. Persisted so it survives a daemon restart;
+// watermark is the matching granularity. Persisted so it survives a harbor restart;
 // deliberately NOT cleared on logout (see clearAccountSignKey — M1).
 function tsPath(): string {
   return join(globalDir(), "control-sig.json");

@@ -593,7 +593,7 @@ export default function privateerBrand(pi: any): void {
     // in src/auth/privateer.ts): revokeLocalSessions kills the account session
     // server-side, so leaving the persisted copy behind would make the NEXT launch
     // reuse a token that's already dead and dead-end on its first prompt (Pi doesn't
-    // refresh on a 401). Mirrors the daemon's shutdown (daemon/index.ts).
+    // refresh on a 401). Mirrors the harbor's shutdown (harbor/index.ts).
     dropPersistedAccount(ctxRef);
   });
 

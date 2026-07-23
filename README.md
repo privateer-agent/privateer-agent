@@ -38,8 +38,8 @@ servers, sub-agents, scheduled routines, multi-step workflows, chat-app bridges,
 one-tap approval from your phone are included — and every one of the agent's actions runs
 through a **safe-by-default permission gate**.
 
-Privateer runs in three places, over one account and one config: the **terminal**, a
-**background daemon** for unattended work, and the **Privateer app** on
+Privateer runs in three places, over one account and one config: the **terminal**,
+**Harbor** (a background service) for unattended work, and the **Privateer app** on
 [phone, web](https://privateer.pro), and [desktop](#the-privateer-app).
 
 ## Why Privateer?
@@ -108,7 +108,7 @@ silently. The moat is swappable; the floor under it holds.
   terminal. See [The Privateer app](#the-privateer-app).
 - **A desktop app.** The same agent hosted inside a local Electron shell — no relay hop, works
   offline, multi-window with per-window MCP connectors. Shares your CLI login and config.
-- **Scheduled routines.** A background daemon runs approved tasks unattended — cron or
+- **Scheduled routines.** Harbor, a background service, runs approved tasks unattended — cron or
   one-off — and the agent can schedule its own follow-up work. Results deliver to a file,
   the next session, your phone, email, or a webhook.
 - **Declarative workflows.** Multi-step agent pipelines as YAML — typed steps, conditional
@@ -298,7 +298,7 @@ and a management surface for it.
 | | |
 |---|---|
 | **Drive a session** | Send prompts, watch streamed output, and **Allow/Deny** each proposed action — including actions from sub-agents the session spawned |
-| **Spawn an agent** | Start a one-shot task on the daemon: *background* (headless, read-only toolset, result sealed to your outbox) or *live* (a fresh drivable session) |
+| **Spawn an agent** | Start a one-shot task on the harbor: *background* (headless, read-only toolset, result sealed to your outbox) or *live* (a fresh drivable session) |
 | **Routines** | Create, edit, pause, run, and delete scheduled unattended tasks |
 | **Workflows** | List, run, and monitor multi-step workflows; answer `human_gate` steps to resume a paused run |
 | **MCP connectors** | Add, edit, and enable MCP servers; credentials are sealed to the terminal and write-only |
@@ -325,24 +325,24 @@ Download for [macOS](https://privateer.pro/download/mac) (Apple silicon),
 
 It's an early release and **not yet code-signed or notarized** — macOS will warn on first
 open. Routines and channels deliberately aren't hosted here: those belong to the always-on
-daemon, so background work still wants `privateer daemon install`.
+harbor, so background work still wants `privateer harbor install`.
 
-## Run it unattended — the daemon
+## Run it unattended — Harbor
 
-A resident background daemon runs scheduled routines, executes workflows, and accepts task
-spawns from the app — with no terminal open.
+**Harbor** is a resident background service that runs scheduled routines, executes workflows,
+and accepts task spawns from the app — with no terminal open.
 
 ```bash
-privateer daemon install      # install as a login service (auto-starts, reachable from the app)
-privateer daemon status       # service installed? daemon answering?
-privateer daemon run          # or just run it in the foreground
-privateer daemon uninstall
+privateer harbor install      # install as a login service (auto-starts, reachable from the app)
+privateer harbor status       # service installed? harbor answering?
+privateer harbor run          # or just run it in the foreground
+privateer harbor uninstall
 ```
 
 Installs as a **launchd user agent** on macOS or a **`systemd --user` unit** on Linux — no
-root, no sudo. (There's no Windows service path yet; use `privateer daemon run`.)
+root, no sudo. (There's no Windows service path yet; use `privateer harbor run`.)
 
-Everything the daemon does still runs through the permission gate. Actions needing approval
+Everything the harbor does still runs through the permission gate. Actions needing approval
 surface in the app; routines you approved once run on their own schedule.
 
 ## Workflows
@@ -354,12 +354,12 @@ resumes when you answer it, including from your phone.
 
 The engine ships in the standalone
 [`privateer-workflow`](https://www.npmjs.com/package/privateer-workflow) package. Today the
-user-facing surface is the **app** (save, run, monitor, share) and the **daemon** that
+user-facing surface is the **app** (save, run, monitor, share) and the **harbor** that
 executes them — there's no `/workflow` command in the terminal yet. Schedule one by pointing
 a routine at it.
 
 Because a workflow can carry `script` steps, saving one from the app requires your **account
-signature** — the server can't inject a workflow onto your daemon.
+signature** — the server can't inject a workflow onto your harbor.
 
 ## Chat-app channels
 
@@ -410,14 +410,14 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 
 - **MCP servers** (`pi-mcp-adapter`) — declare them and their tools become first-class, gated
   like the rest (local stdio, or remote HTTP with interactive OAuth). One catalog at
-  `~/.privateer/agent/mcp-desktop.json` is shared by the CLI, the daemon, and the desktop
+  `~/.privateer/agent/mcp-desktop.json` is shared by the CLI, the harbor, and the desktop
   app, so a machine has one coherent connector config.
 - **Sub-agents** (`pi-subagents`) — delegate investigations to bounded parallel agents. Children
   run as headless child processes that **inherit the moat**, so their actions hit the same
   permission gate and their approvals surface on your phone.
-- **Routines** — saved tasks the daemon runs unattended; ask the agent to schedule work and
+- **Routines** — saved tasks the harbor runs unattended; ask the agent to schedule work and
   approve it once.
-- **Workflows** — declarative multi-step pipelines the daemon executes; see
+- **Workflows** — declarative multi-step pipelines the harbor executes; see
   [Workflows](#workflows).
 - **Web tools** (`rpiv-web-tools`) — private-by-default web search/fetch with pluggable backends
   (self-hosted SearXNG for fully private search).
@@ -435,7 +435,7 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/init` | scaffold a starter `PRIVATEER.md` in this directory |
 | `/update` · `/privateer` | update to the latest release / Privateer status and posture |
 
-Shell subcommands: `privateer` (interactive), `privateer update`, `privateer daemon …`,
+Shell subcommands: `privateer` (interactive), `privateer update`, `privateer harbor …`,
 `privateer --no-quarter`, `privateer --version`.
 
 ## Develop

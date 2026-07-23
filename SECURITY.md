@@ -55,4 +55,4 @@ are sent only to the provider you selected. Bot tokens for messaging channels ar
 to a terminal keypair before they reach our relay, and channel configuration is verified
 against a link-pinned account key — the relay can neither read those tokens nor forge
 configuration. Architecture and residual risks are documented in
-`docs/daemon-channels-and-app.md`.
+`docs/harbor-channels-and-app.md`.

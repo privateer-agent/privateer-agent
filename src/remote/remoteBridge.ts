@@ -143,7 +143,7 @@ export class RemoteBridge {
     onSkillCreate: (skill, sig, ts) => this.cfg.onSkillCreate?.(skill, sig, ts),
     onSkillDelete: (name, sig, ts) => this.cfg.onSkillDelete?.(name, sig, ts),
     onSkillSetEnabled: (name, enabled, sig, ts) => this.cfg.onSkillSetEnabled?.(name, enabled, sig, ts),
-    // Routines are owned by the daemon, not an interactive session, so its own relay
+    // Routines are owned by the harbor, not an interactive session, so its own relay
     // (not this bridge) handles routines_*. These no-ops just satisfy Required — an
     // interactive terminal never surfaces the routines manager in the app.
     onRoutinesList: () => {},
@@ -151,25 +151,25 @@ export class RemoteBridge {
     onRoutinesDelete: () => {},
     onRoutinesSetEnabled: () => {},
     onRoutinesRun: () => {},
-    // Ad-hoc task spawns are daemon-owned too (they run on / are stood up by the daemon,
+    // Ad-hoc task spawns are harbor-owned too (they run on / are stood up by the harbor,
     // not an interactive session), so its own relay handles task_submit/task_spawn. These
     // no-ops just satisfy Required — an interactive terminal never receives them.
     onTaskSubmit: () => {},
     onTaskSpawn: () => {},
-    // Channels, like routines, are owned by the daemon (its channels/run.ts config),
-    // not an interactive session — the daemon's own relay handles channels_*. These
+    // Channels, like routines, are owned by the harbor (its channels/run.ts config),
+    // not an interactive session — the harbor's own relay handles channels_*. These
     // no-ops just satisfy Required; an interactive terminal never surfaces channels.
     onChannelsList: () => {},
     onChannelsSave: () => {},
     onChannelsRemove: () => {},
-    // MCP connectors, like channels, are managed on the daemon (the host that runs the
-    // adapter) — the daemon's own relay handles mcp_*. These no-ops just satisfy Required;
+    // MCP connectors, like channels, are managed on the harbor (the host that runs the
+    // adapter) — the harbor's own relay handles mcp_*. These no-ops just satisfy Required;
     // an interactive terminal manages MCP over IPC (desktop), never over this relay.
     onMcpList: () => {},
     onMcpSave: () => {},
     onMcpSetEnabled: () => {},
     onMcpRemove: () => {},
-    // Workflows, like routines/channels, are daemon-owned — the daemon's own relay handles
+    // Workflows, like routines/channels, are harbor-owned — the harbor's own relay handles
     // workflows_*. These no-ops just satisfy Required; an interactive terminal never
     // surfaces workflows.
     onWorkflowsList: () => {},

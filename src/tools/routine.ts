@@ -1,6 +1,6 @@
 // The `create_routine` tool — lets the agent turn "summarize the news every morning"
-// or "remind me at 3pm tomorrow" into a saved routine the scheduler daemon runs
-// unattended (see src/daemon). Ported from tree-cli/src/tools/routine.ts, adapted to
+// or "remind me at 3pm tomorrow" into a saved routine the scheduler harbor runs
+// unattended (see src/harbor). Ported from tree-cli/src/tools/routine.ts, adapted to
 // Pi's registerTool (TypeBox schema) with the in-tool ctx.gate.request removed: in
 // the Pi model our permission-gate extension gates the tool_call itself (classify.ts
 // gives it a "Create routine" prompt + flags email/webhook egress).
@@ -11,7 +11,7 @@ import { configPath } from "../config/paths.ts";
 import { newRoutineId, webhookName, type Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, describeTrigger } from "../routines/trigger.ts";
 import { upsertRoutine } from "../routines/store.ts";
-import { sendToDaemon, DaemonNotRunningError } from "../daemon/ipc.ts";
+import { sendToHarbor, HarborNotRunningError } from "../harbor/ipc.ts";
 
 const KNOWN_CHANNELS = new Set(["file", "relay", "notice", "cloud", "email"]);
 
@@ -106,20 +106,20 @@ export const routineToolDefinition = {
       nextRun: next?.toISOString(),
     };
 
-    // Hand to the running daemon (it validates + schedules); fall back to writing the
-    // file so the routine persists until the daemon starts.
+    // Hand to the running harbor (it validates + schedules); fall back to writing the
+    // file so the routine persists until the harbor starts.
     try {
-      const res = await sendToDaemon({ cmd: "add", routine });
+      const res = await sendToHarbor({ cmd: "add", routine });
       if (!res.ok) return text(`Error saving routine: ${res.message ?? "unknown"}`);
       return text(
         `Created routine "${name}" (${describeTrigger({ cron, at })}). ` +
           `Next run ${next ? next.toLocaleString() : "unknown"}, delivery: ${chans.join(", ")}.`,
       );
     } catch (e) {
-      if (e instanceof DaemonNotRunningError) {
+      if (e instanceof HarborNotRunningError) {
         upsertRoutine(routine);
         return text(
-          `Saved routine "${name}" (${describeTrigger({ cron, at })}), but the scheduler daemon isn't ` +
+          `Saved routine "${name}" (${describeTrigger({ cron, at })}), but the scheduler harbor isn't ` +
             `running yet, so it won't fire until you start it.`,
         );
       }

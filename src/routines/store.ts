@@ -20,7 +20,7 @@ function slug(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "routine";
 }
 
-// A stable relay terminal id for the daemon, persisted so it reappears as the same
+// A stable relay terminal id for the harbor, persisted so it reappears as the same
 // "Privateer Routines" terminal in the app across restarts (rather than a fresh
 // random terminal each boot). Random on first use so it stays unique per install —
 // the relay routes on this id with no user namespacing, so a shared constant could
@@ -53,7 +53,7 @@ export function loadRoutines(): Routine[] {
   try {
     return RoutineFile.parse(JSON.parse(readFileSync(path, "utf8"))).routines;
   } catch {
-    // A corrupt or hand-edited file shouldn't crash the daemon; treat as empty.
+    // A corrupt or hand-edited file shouldn't crash the harbor; treat as empty.
     return [];
   }
 }
@@ -160,7 +160,7 @@ export function drainNotices(): RoutineNotice[] {
 }
 
 // A relay result produced while no controller was attached, held until the app
-// next connects. Persisted (not just in-memory) so it survives a daemon restart.
+// next connects. Persisted (not just in-memory) so it survives a harbor restart.
 export interface PendingRelay {
   routine: string;
   at: string; // ISO timestamp

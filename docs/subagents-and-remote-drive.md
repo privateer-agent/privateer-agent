@@ -37,9 +37,9 @@ A subagent child is a fresh `pi` process that reads the shared `PI_CODING_AGENT_
 
 The TUI runs Pi's `cli.js` directly and loads everything via discovery, so it uses **no in-code factories** and never double-loads. `PI_SUBAGENT_PI_BINARY` is set to the bundled `cli.js` so children spawn the known-good `pi` and discover the shims.
 
-### 2b. The wrapper — REPL / daemon (in-code-factory) paths
+### 2b. The wrapper — REPL / harbor (in-code-factory) paths
 
-The lean REPL (`src/cli/chat.ts`), the daemon (`src/daemon`), and live task sessions load the moat as **in-code `extensionFactories`** passed to `createAgentSessionServices`. A child can't inherit those.
+The lean REPL (`src/cli/chat.ts`), the harbor (`src/harbor`), and live task sessions load the moat as **in-code `extensionFactories`** passed to `createAgentSessionServices`. A child can't inherit those.
 
 The obvious fix — "install the shims so children discover them" — **breaks these parents**: Pi's resource loader loads agent-dir *discovered* extensions **and** in-code factories into one list (`resource-loader.js`), so a parent that has both would **double-load** the gate (two `tool_call` hooks, two provider registrations).
 
@@ -58,7 +58,7 @@ Net: the child loads *exactly* pi-subagents' runtime + Privateer's gate/privacy/
 |---|---|---|---|
 | TUI (`privateer-tui`) | discovery shims | discovery | bundled `cli.js` |
 | REPL (`chat.ts`) | in-code factories | wrapper `-e` + `--no-extensions` | `bin/privateer-subagent.mjs` |
-| daemon / live tasks | in-code factories | wrapper `-e` + `--no-extensions` | `bin/privateer-subagent.mjs` |
+| harbor / live tasks | in-code factories | wrapper `-e` + `--no-extensions` | `bin/privateer-subagent.mjs` |
 
 ### How a child gate behaves
 
@@ -103,7 +103,7 @@ Before the relay existed, `src/ext/permissionGate.ts` shipped `REMOTE_UNSAFE_TOO
 
 ## 4. Privacy and account on the child
 
-The child loads `privateer-privacy` (ZDR/TEE posture + the attestation dispatcher, installed at extension-init) and `privateer-account` (the `privateer/*` provider) via discovery (TUI) or the wrapper's `-e` (REPL/daemon). It also inherits the **machine login** (`~/.privateer/credentials.json`), so Pi's on-demand OAuth (`spawnAccountCredentials`, non-interactive when machine-linked) can authenticate `privateer/*` models **per child** — distinct sessions, so no token reuse. `agent/auth.json` being empty is irrelevant: credentials come from the machine login, not persisted OAuth.
+The child loads `privateer-privacy` (ZDR/TEE posture + the attestation dispatcher, installed at extension-init) and `privateer-account` (the `privateer/*` provider) via discovery (TUI) or the wrapper's `-e` (REPL/harbor). It also inherits the **machine login** (`~/.privateer/credentials.json`), so Pi's on-demand OAuth (`spawnAccountCredentials`, non-interactive when machine-linked) can authenticate `privateer/*` models **per child** — distinct sessions, so no token reuse. `agent/auth.json` being empty is irrelevant: credentials come from the machine login, not persisted OAuth.
 
 The common case needs none of this: the builtin `delegate` agent inherits the parent's model (e.g. tinfoil), so it authenticates via the inherited environment.
 
@@ -125,7 +125,7 @@ Result: background → foreground retains the feed, auto-reconnects, and resumes
 
 ## 6. Known limitations / open work
 
-- **`liveTaskSession` relay** — deferred. The daemon hosts multiple parents in one process, so the `process.env`-based channel advertisement would cross-wire. Needs per-session channel addressing (not via env). Its subagents stay blocked-when-driven via the stopgap, so there's no regression.
+- **`liveTaskSession` relay** — deferred. The harbor hosts multiple parents in one process, so the `process.env`-based channel advertisement would cross-wire. Needs per-session channel addressing (not via env). Its subagents stay blocked-when-driven via the stopgap, so there's no regression.
 - **Clarify / `contact_supervisor`** — pi-subagents' `ctx.ui.custom` clarify overlay and its own supervisor channel (`<tmp>/supervisor-channels/*`, matched on `orchestratorSessionId`) are not relayed. `clarify` is **off by default** (only fires if the model passes `clarify: true`), so risk is low; if it ever bites, force `clarify:false` or shim `ctx.ui.custom`.
 - **Cold-attach history** — §5's fix B retains a *warm* feed, but a *cold* attach (killed app, second device) starts blank because the CLI sends an empty on-attach snapshot. A real first-attach transcript snapshot would close this.
 - **Live verification pending** — the parent→app relay is verified live; the full child→parent→app hop and a `privateer/*`-pinned subagent's headless inference still need a clean driven run to confirm.
@@ -142,7 +142,7 @@ Result: background → foreground retains the feed, auto-reconnects, and resumes
 | `extensions/privateer-gate.ts` | the moat: gate + `RemoteBridge`; child-forward + parent watcher wiring; headless bypass; busy-guard |
 | `src/ext/permissionGate.ts` | `decideToolCall`, `REMOTE_UNSAFE_TOOLS` stopgap block |
 | `src/cli/chat.ts` | REPL: sets `PI_SUBAGENT_PI_BINARY`, starts the parent relay |
-| `bin/privateer-daemon.mjs` | daemon: sets `PI_SUBAGENT_PI_BINARY` |
+| `bin/privateer-harbor.mjs` | harbor: sets `PI_SUBAGENT_PI_BINARY` |
 | `bin/privateer-tui` | TUI: installs discovery shims, sets `PI_SUBAGENT_PI_BINARY` |
 | `treeview/client/contexts/RemoteDriveContext.tsx` | app drive session: reconnect + feed retention |
 | `tests/subagentChannel.test.ts`, `subagentRelay.test.ts`, `subagentWrapper.test.ts` | unit coverage |

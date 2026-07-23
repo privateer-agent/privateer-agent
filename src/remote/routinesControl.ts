@@ -2,15 +2,15 @@
  * Routine management for the app.
  *
  * A UI-agnostic wrapper over the routines store so the app (over the relay) can
- * see the daemon's saved routines and create / edit / delete / pause / run them —
+ * see the harbor's saved routines and create / edit / delete / pause / run them —
  * the sibling of extensionsControl.ts and skillsControl.ts, but for scheduled
  * tasks rather than Pi packages/skills.
  *
- * Unlike those two, routines are owned by the DAEMON (not an interactive Pi
+ * Unlike those two, routines are owned by the HARBOR (not an interactive Pi
  * session): they live in routines.json (see routines/store.ts) and fire from the
- * resident scheduler. So this control is wired into the daemon's own relay
+ * resident scheduler. So this control is wired into the harbor's own relay
  * connection (the "Privateer Routines" terminal), not the REPL/TUI. Running a
- * routine now is the one action that needs the daemon itself, so it's injected as
+ * routine now is the one action that needs the harbor itself, so it's injected as
  * `runNow` rather than reaching back into the store.
  *
  * Framework-agnostic: nothing here imports React or the relay. The caller owns the
@@ -75,7 +75,7 @@ export interface RoutinesControl {
   remove(idOrName: string): { ok: boolean; message?: string };
   // Pause/resume a routine. Resuming reschedules nextRun; pausing clears it.
   setEnabled(idOrName: string, enabled: boolean): { ok: boolean; message?: string };
-  // Run a routine now (fire-and-forget on the daemon). ok:false when not found.
+  // Run a routine now (fire-and-forget on the harbor). ok:false when not found.
   run(idOrName: string): { ok: boolean; message?: string };
 }
 
@@ -122,11 +122,11 @@ function toRemote(r: Routine): RemoteRoutine {
 }
 
 export function makeRoutinesControl(opts: {
-  // Working directory for a new routine when the draft omits `cwd` (the daemon's).
+  // Working directory for a new routine when the draft omits `cwd` (the harbor's).
   defaultCwd: () => string;
   // Is a webhook name declared in config? Guards "webhook:<name>" delivery entries.
   webhookExists?: (name: string) => boolean;
-  // Fire a routine now — injected by the daemon (its runRoutine). Absent → run is
+  // Fire a routine now — injected by the harbor (its runRoutine). Absent → run is
   // reported unavailable rather than silently dropped.
   runNow?: (routine: Routine) => void;
 }): RoutinesControl {

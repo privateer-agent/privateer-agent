@@ -16,7 +16,7 @@ export function triggerError(t: Trigger): string | null {
 
 // The fire time to store as `nextRun`. For cron: the next match strictly after
 // `from`. For a one-off: the fixed `at` time as-is (even if already past, so a
-// missed one-off still fires once when the daemon comes back). Null if unparseable.
+// missed one-off still fires once when the harbor comes back). Null if unparseable.
 export function computeNextRun(t: Trigger, from: Date = new Date()): Date | null {
   if (t.cron) return cronNext(t.cron, from);
   if (t.at) {

@@ -1,12 +1,12 @@
 # Workflows on Mobile — UX & Sharing Plan
 
-> Companion to [`daemon-channels-and-app.md`](./daemon-channels-and-app.md) §8
-> (Workflows). That doc specifies the **agent/daemon** side (schema, runner, store,
+> Companion to [`harbor-channels-and-app.md`](./harbor-channels-and-app.md) §8
+> (Workflows). That doc specifies the **agent/harbor** side (schema, runner, store,
 > control, relay wiring — all built and tested). This doc specifies the **Privateer
 > app** side: how workflows are surfaced, run, authored, and — the highest-value
 > part — **shared (upload/download)**.
 >
-> Status: **Phases 1–2 built** (2026-07-13). Daemon side: `src/workflows/*`,
+> Status: **Phases 1–2 built** (2026-07-13). Harbor side: `src/workflows/*`,
 > `src/remote/workflowsControl.ts`, the `workflows_*` relay frames, `tests/workflows.test.ts`.
 > App side: Phase 1 (manage & run) + Phase 2 (file/link sharing) — see the phasing table (§6)
 > for the built-vs-remaining breakdown. Phase 3 (linear editor) and Phase 4 (gallery) remain.
@@ -29,7 +29,7 @@ Two product forks were decided up front; the rest of this plan assumes them:
 1. **Driving a workflow needs no new crypto.** `client/services/accountSign.ts` already
    exposes a *generic* `signControl({ termId, ts, action, args })`. The three new
    mutations (`workflows_save` / `workflows_remove` / `workflows_run`) are just new
-   `action` strings through the identical path `routines_save` already uses. The daemon
+   `action` strings through the identical path `routines_save` already uses. The harbor
    verifies them (`guardControl`; `workflows_run` is in the STRICT replay set). So
    "Phase 1: manage & run" is small.
 
@@ -62,9 +62,9 @@ once-per-workflow, lean-back, desktop-shaped task.
 ```
 
 Why this is mostly already built:
-- The `human_gate` → `requestSelect` → app picker path exists end-to-end (daemon
+- The `human_gate` → `requestSelect` → app picker path exists end-to-end (harbor
   `askGate`, `resolveGate`, `GATE_TIMEOUT_MS`; the app's existing select UI renders it).
-- The runner emits `step_start` events; the daemon forwards them as feed notices.
+- The runner emits `step_start` events; the harbor forwards them as feed notices.
 - The runner **fail-closes** unattended script steps to `deferred`. The mobile answer to
   "deferred" is **"tap the notification to approve and resume"** — a feature, not a limit.
 
@@ -92,7 +92,7 @@ Most real workflows are near-linear, so this covers the 80% and stays honest abo
 ## 4. Screen inventory (mirrors the manager pattern)
 
 Entry point: a **Workflows** row on the "Privateer Routines" terminal card in
-`client/components/LiveTerminalsList.tsx`, next to Routines/Channels (all daemon-owned).
+`client/components/LiveTerminalsList.tsx`, next to Routines/Channels (all harbor-owned).
 
 | Screen | Purpose |
 |--------|---------|
@@ -164,7 +164,7 @@ The trust chain does **not** depend on trusting the publisher:
 1. **Import re-signs locally.** "Add to my workflows" makes *your* device sign the
    `workflows_save` with *your* account key. The publisher's identity grants nothing;
    execution trust is entirely your local signature. A malicious artifact can't run on your
-   daemon unless you import it.
+   harbor unless you import it.
 2. **The manifest surfaces every script command** before you commit — informed consent.
 3. **The runner already fail-closes.** Unattended scripts defer to approval; attended ones
    require an explicit in-app approve at run time. An imported script can't fire silently.
@@ -199,7 +199,7 @@ target terminal is the caller's `familyId` (from WorkflowsScreen) or the active 
 than guessing. `services/workflowShare.ts` is pure logic and was exercised end-to-end (export→link→
 decode→manifest→strip→draft + all error codes). Not yet driven on a device/simulator.
 
-Phase 1 is small (crypto + daemon already exist and are tested) and delivers the hero UX.
+Phase 1 is small (crypto + harbor already exist and are tested) and delivers the hero UX.
 Phase 2 is the high-value download/upload MVP with **no new server trust**.
 
 **Phase 1 UI revision (2026-07-14).** The first-cut screens shipped functional but flat; the
@@ -215,7 +215,7 @@ list was four look-alike text links and the monitor a plain text feed. Redesigne
 - **`WorkflowRunScreen`** — the flat feed became a **typed step timeline** grounded in real
   data: nodes come from `getWorkflow` (`workflows.detail`) with each step's real `type` and its
   `routes`' `when:` conditions rendered as `→ if <expr> → <target>` chips; live status is
-  overlaid from signals the daemon actually emits — the runner's `▶ <stepName>` step-start
+  overlaid from signals the harbor actually emits — the runner's `▶ <stepName>` step-start
   notices and the `pendingSelect` gate. Falls back to the raw feed if the graph can't load. The
   gate became a labelled decision sheet (affirmative option last); **no countdown** was shown
   because `PendingSelect` carries no deadline over the wire.
@@ -231,7 +231,7 @@ starter-recipe on-ramp.
 `RemoteDriveContext.tsx`; `expo-notifications ~0.32.17` added to package.json + app.json — needs
 `npm install` + a dev-client rebuild to activate). That covers a *backgrounded-but-alive* app.
 Waking a *fully-killed* app needs server-sent push — specced (design only, low priority) in
-[`push-on-gate-server.md`](./push-on-gate-server.md): content-free wake via a daemon `push_wake`
+[`push-on-gate-server.md`](./push-on-gate-server.md): content-free wake via a harbor `push_wake`
 frame → relay offline-check → Expo push, plus the `onAttachment` gate re-emit.
 
 ---
@@ -249,7 +249,7 @@ frame → relay offline-check → Expo push, plus the `onAttachment` gate re-emi
   DoS); full agent suite 269/269 green.
 - **i18n — DONE (2026-07-13).** `workflows.*` (Phase 1 + 2) shipped at key parity in all 9
   client locales (en/de/es/fr/pt/pl/ja/zh/th).
-- **Storage backend.** Workflows live on the daemon (the user's machine), reached over the
+- **Storage backend.** Workflows live on the harbor (the user's machine), reached over the
   relay — they are *not* app-local content, so the `cloud`/`local` storage-backend split
   doesn't apply to the graphs themselves. Shared *artifacts* (Phase 2) are transient files,
   not persisted server content.

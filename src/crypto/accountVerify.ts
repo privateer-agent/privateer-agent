@@ -32,7 +32,7 @@ function canonicalize(value: unknown): string {
 
 // The signed envelope. `termId` binds the intended recipient terminal (so a signature
 // for terminal X can't be replayed against Y — verification uses OUR termId). `ts`
-// binds freshness (the daemon rejects a ts it has already applied → no replay/rollback).
+// binds freshness (the harbor rejects a ts it has already applied → no replay/rollback).
 export interface ChannelSaveEnvelope {
   termId: string;
   ts: number;

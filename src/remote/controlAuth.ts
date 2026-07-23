@@ -9,7 +9,7 @@
 // skill). channels_save has its own bespoke verify (it also carries sealed secrets);
 // everything else routes through here.
 //
-// Both loci call this: the daemon (routines_*/channels_remove, termId = routineRelayId)
+// Both loci call this: the harbor (routines_*/channels_remove, termId = routineRelayId)
 // and each interactive terminal (extensions_*/skills_*, termId = the relay's id).
 //
 // Fail-closed: no pinned account key, a missing signature, a bad signature, or a stale

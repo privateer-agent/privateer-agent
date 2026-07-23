@@ -2,7 +2,7 @@ import type { Server } from "node:net";
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-// Pi session stack. The daemon MUST be launched after ./boot.ts (env +
+// Pi session stack. The harbor MUST be launched after ./boot.ts (env +
 // attestation dispatcher) — these are evaluated on import.
 import {
   createAgentSessionServices,
@@ -71,15 +71,15 @@ const MAX_CLOUD_PLAINTEXT = 45_000;
 // a stuck graph from pinning a `running` slot forever when the controller wanders off.
 const GATE_TIMEOUT_MS = 5 * 60_000;
 
-interface DaemonConfig {
+interface HarborConfig {
   defaultModel: string;
   webhooks?: Record<string, { url: string; secret?: string; headers?: Record<string, string> }>;
   providers?: Record<string, { apiKey?: string } | undefined>;
 }
 
 // Minimal config read (webhooks + providers-for-redaction + default model). The
-// full config layer is a Phase-7 port; the daemon only needs these fields.
-function loadDaemonConfig(): DaemonConfig {
+// full config layer is a Phase-7 port; the harbor only needs these fields.
+function loadHarborConfig(): HarborConfig {
   try {
     const raw = JSON.parse(readFileSync(configPath(), "utf8"));
     return {
@@ -156,7 +156,7 @@ export function taskControlArgs(spec: TaskSpec): Record<string, unknown> {
   };
 }
 
-export class Daemon {
+export class Harbor {
   private server?: Server;
   private timer?: ReturnType<typeof setInterval>;
   private readonly startedAt = Date.now();
@@ -170,36 +170,36 @@ export class Daemon {
   // socket stays open).
   private lastActivityAt = Date.now();
   // Live, app-drivable sessions spawned on demand (task_spawn). Each has its OWN relay
-  // terminal (task-<uuid>); the daemon just keeps handles so it can reap them on shutdown.
+  // terminal (task-<uuid>); the harbor just keeps handles so it can reap them on shutdown.
   private readonly liveTasks = new Map<string, LiveTaskHandle>();
 
-  // App-facing routine management (list/save/delete/pause/run) over the daemon's
-  // relay. Run-now is injected here since only the daemon can actually fire one;
+  // App-facing routine management (list/save/delete/pause/run) over the harbor's
+  // relay. Run-now is injected here since only the harbor can actually fire one;
   // webhook validation reads config fresh so a just-declared endpoint is honored.
   private readonly routines = makeRoutinesControl({
     defaultCwd: () => process.cwd(),
-    webhookExists: (name) => !!loadDaemonConfig().webhooks?.[name],
+    webhookExists: (name) => !!loadHarborConfig().webhooks?.[name],
     runNow: (routine) => void this.runRoutine(routine),
   });
 
-  // App-facing channel management (list/save/remove) over the daemon's relay. The
-  // channels daemon (channels/run.ts) is a SEPARATE process that may be down, so
+  // App-facing channel management (list/save/remove) over the harbor's relay. The
+  // channels harbor (channels/run.ts) is a SEPARATE process that may be down, so
   // this edits config.json directly; `runningPlatforms` is a best-effort heartbeat
   // read for a live/offline badge, never a dependency. Edits apply on the channels
-  // daemon's next restart (its deliberate fail-safe posture).
+  // harbor's next restart (its deliberate fail-safe posture).
   private readonly channels = makeChannelsControl({
     runningPlatforms: () => readRunningPlatforms(),
   });
 
   // App-facing MCP connector management (list/save/set_enabled/remove) over the
-  // daemon's relay — the daemon is the Node HOST that actually runs the adapter (a
+  // harbor's relay — the harbor is the Node HOST that actually runs the adapter (a
   // phone/web client can't). Edits the SHARED agent/mcp-desktop.json + mcp.json, so a
   // machine has one MCP config whether it was set from the desktop (IPC) or the phone
   // (relay). Tokens ride in a SEALED box (applyMcpSave) — the relay never sees them.
   private readonly mcp = makeMcpControl();
 
-  // App-facing workflow management (list/get/save/remove/run) over the daemon's relay.
-  // Run-now is injected here since only the daemon owns the runner + its seams. A
+  // App-facing workflow management (list/get/save/remove/run) over the harbor's relay.
+  // Run-now is injected here since only the harbor owns the runner + its seams. A
   // workflow can carry a `script` step (RCE if forged), so every mutation is
   // account-signed + verified (guardControl) before reaching this control.
   private readonly workflows = makeWorkflowsControl({
@@ -236,7 +236,7 @@ export class Daemon {
     this.syncRelay();
     void this.flushPendingCloud();
     const count = loadRoutines().filter((r) => r.enabled).length;
-    log(`daemon started (pid ${process.pid}); ${count} enabled routine(s). Tick every ${TICK_MS / 1000}s.`);
+    log(`harbor started (pid ${process.pid}); ${count} enabled routine(s). Tick every ${TICK_MS / 1000}s.`);
     void this.tick();
   }
 
@@ -261,7 +261,7 @@ export class Daemon {
         onInterrupt: () => {},
         // A workflow human_gate / script-approval is surfaced as a select_request; the app
         // answers with select_response (option name) or an approval_response (allow/deny).
-        // Both resolve the pending gate — otherwise the daemon relay ignores approvals.
+        // Both resolve the pending gate — otherwise the harbor relay ignores approvals.
         onApprovalResponse: (id, decision) => this.resolveGate(id, decision === "deny" ? "deny" : "approve"),
         onSelectResponse: (id, value) => this.resolveGate(id, value),
         onControllerAttached: () => this.onControllerAttached(),
@@ -321,20 +321,20 @@ export class Daemon {
           this.controllerAttached = false;
           this.relay?.stop();
           this.relay = undefined;
-          log("relay terminated from the app; staying offline until the daemon restarts");
+          log("relay terminated from the app; staying offline until the harbor restarts");
         },
-        // The account signed this daemon out server-side (revoked from the app's Linked
+        // The account signed this harbor out server-side (revoked from the app's Linked
         // Devices). Beyond ending remote access (onTerminate), this wipes the machine
         // login: drop the relay and clear credentials, so routines/tasks stop cleanly
         // instead of dead-ending on a 401 each run. Stays idle until you /login on this
-        // machine and restart the daemon (the relayTerminated guard, as with onTerminate).
+        // machine and restart the harbor (the relayTerminated guard, as with onTerminate).
         onRevoked: () => {
           this.relayTerminated = true;
           this.controllerAttached = false;
           this.relay?.stop();
           this.relay = undefined;
           handleServerRevoke();
-          log("account signed out from the app (session revoked) — cleared credentials; idle until you run /login on this machine and restart the daemon");
+          log("account signed out from the app (session revoked) — cleared credentials; idle until you run /login on this machine and restart the harbor");
         },
         onStatus: (text) => log(`relay: ${text}`),
         onDisconnected: () => {
@@ -448,7 +448,7 @@ export class Daemon {
     return this.channels.save(withSecrets as any).message;
   }
 
-  // Verify an account-signed mutating control frame (H2) against this daemon's termId,
+  // Verify an account-signed mutating control frame (H2) against this harbor's termId,
   // then run the mutation. Fail-closed: an unsigned/forged/stale frame returns the
   // refusal message and the mutation NEVER runs. `routines_*` and `channels_remove`
   // route through here; `channels_save` has its own verify (sealed secrets) above.
@@ -577,7 +577,7 @@ export class Daemon {
   }
 
   // ── Harbor hosted mode ──────────────────────────────────────────────────────
-  // A hosted daemon runs on-demand: it reports its earliest upcoming fire time so
+  // A hosted harbor runs on-demand: it reports its earliest upcoming fire time so
   // the server can wake it while suspended, and idle-suspends when there's no work.
   // No-op on a user's own machine (isHosted() === false).
 
@@ -652,7 +652,7 @@ export class Daemon {
     this.markActivity(); // hosted: work in progress — don't idle-suspend under it
     log(`running routine "${routine.name}"`);
 
-    const config = loadDaemonConfig();
+    const config = loadHarborConfig();
     const modelSpec = routine.model ?? config.defaultModel;
     const split = splitRoutineTools(routine.tools);
     // MCP tools (server__tool) join the allow-list: the mcpAdapter loaded in runSession
@@ -770,7 +770,7 @@ export class Daemon {
       status = "error";
       error = err instanceof Error ? err.message : String(err);
     } finally {
-      // Revoke ONLY this run's account inference session (the daemon's own child API
+      // Revoke ONLY this run's account inference session (the harbor's own child API
       // session — relay/outbox — stays alive until shutdown). Drop Pi's persisted copy
       // too so a later run's fallback never reuses a revoked token. Best-effort.
       if (spawnedAccount) {
@@ -788,7 +788,7 @@ export class Daemon {
   // just executes. Concurrency-guarded by a `task:<title>` key in `this.running` (never
   // collides with routine ids, which are uuids).
   async runTask(spec: TaskSpec): Promise<void> {
-    const config = loadDaemonConfig();
+    const config = loadHarborConfig();
     const cwd = spec.cwd && spec.cwd.trim() ? spec.cwd : process.cwd();
     const modelSpec = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
     const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
@@ -825,7 +825,7 @@ export class Daemon {
     void (async () => {
       try {
         const handle = await createLiveTaskSession(spec, {
-          defaultModel: loadDaemonConfig().defaultModel,
+          defaultModel: loadHarborConfig().defaultModel,
           parseSpec,
           log,
           onClosed: (id) => this.liveTasks.delete(id),
@@ -845,7 +845,7 @@ export class Daemon {
 
   // Run a saved workflow graph to completion (workflows_run / the injected runNow). The
   // signed-frame gate (guardControl, STRICT) already ran before this is reached. Wires the
-  // runner's injected seams to the daemon's real capabilities: agent steps → runSession
+  // runner's injected seams to the harbor's real capabilities: agent steps → runSession
   // (SAFE_TOOLS gate), gates → relay approvals, scripts → a gated child process (only when
   // attended + approved; the runner fail-closes an unattended script itself), and the
   // result is sealed to the outbox + mirrored live, exactly like an ad-hoc task.
@@ -863,9 +863,9 @@ export class Daemon {
         runScript: (step, cwd) => this.runScript(step, cwd),
         askGate: (step, promptText) => this.askGate(step.options.map((o) => ({ name: o.name, description: o.description })), promptText),
         attended: () => this.controllerAttached,
-        // Preserve the daemon's one-at-a-time discipline: fan-out (parallel/for_each) runs
+        // Preserve the harbor's one-at-a-time discipline: fan-out (parallel/for_each) runs
         // sequentially here, so a workflow never spawns concurrent headless sessions on the
-        // resident daemon. (The standalone runner defaults to 4; a UI host can raise it.)
+        // resident harbor. (The standalone runner defaults to 4; a UI host can raise it.)
         concurrency: 1,
         // An effectful step reached while unattended: seal a "needs approval" notice so the
         // user catches up, and (if a controller is somehow attached) surface it live.
@@ -878,7 +878,7 @@ export class Daemon {
         },
         sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
         log: (m) => log(`  [wf ${wf.workflow.name}] ${m}`),
-        // Live progress: announce each step start in the daemon terminal's feed.
+        // Live progress: announce each step start in the harbor terminal's feed.
         onEvent: (ev) => {
           if (ev.type === "step_start") this.relay?.sendNotice(`▶ ${ev.name}`);
         },
@@ -969,7 +969,7 @@ export class Daemon {
   // (so a later step can route on `{{ step.output.field }}`). Non-JSON output leaves
   // `output` empty and lives in `text` — the raw/display path.
   private async runWorkflowAgent(spec: AgentRunSpec): Promise<AgentRunResult> {
-    const config = loadDaemonConfig();
+    const config = loadHarborConfig();
     const model = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
     const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
     const tools = [...(split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS), ...(split?.mcp ?? [])];
@@ -1031,13 +1031,13 @@ export class Daemon {
   }
 }
 
-// Entry point for `privateer daemon`. Caller must have imported ./boot.ts first.
-export function runDaemon(): void {
-  const daemon = new Daemon();
-  daemon.start();
+// Entry point for `privateer harbor`. Caller must have imported ./boot.ts first.
+export function runHarbor(): void {
+  const harbor = new Harbor();
+  harbor.start();
   const shutdown = () => {
     log("shutting down");
-    daemon.stop();
+    harbor.stop();
     void revokeLocalSessions().finally(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);

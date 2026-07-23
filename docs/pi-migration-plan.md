@@ -92,8 +92,8 @@ it natively).
 | Auth | `auth/privateer.ts` | **KEEP** | Self-contained REST/WS/ticket. No agent-loop deps. |
 | Crypto | `crypto/outboxSeal.ts` | **KEEP** | Untouched. |
 | Redaction/util | `util/redact.ts`, `images.ts`, `limit.ts`, `attachmentStore.ts` | **KEEP** | `redact` reused in gate, `tool_result`, and the dispatcher. |
-| Daemon | `daemon/index.ts`, `ipc.ts` | **ADAPT** | Drive `createAgentSession({sessionManager: inMemory})` (or orchestrator RPC children) instead of `createSession`. IPC unchanged. |
-| Routines | `routines/*` | **KEEP** (logic) | Scheduler/trigger/delivery/store unchanged; daemon rewire only. Pi orchestrator gives the process-supervision half, NOT scheduling — we keep cron/trigger. |
+| Harbor | `harbor/index.ts`, `ipc.ts` | **ADAPT** | Drive `createAgentSession({sessionManager: inMemory})` (or orchestrator RPC children) instead of `createSession`. IPC unchanged. |
+| Routines | `routines/*` | **KEEP** (logic) | Scheduler/trigger/delivery/store unchanged; harbor rewire only. Pi orchestrator gives the process-supervision half, NOT scheduling — we keep cron/trigger. |
 | Tools (Pi has native) | `tools/read.ts`, `grep.ts`, `glob.ts`, `walk.ts`, `edit.ts`, `write.ts`, `bash.ts` | **DELETE** | Pi builtins: `read/bash/edit/write/grep/find/ls`. Verify parity of options; keep our prompt-guidelines via `promptSnippet`. |
 | Tools (custom) | `tools/routine.ts`, `sendFileToClient.ts`, `saveAttachment.ts`, `memory.ts`, `skill.ts`, `task.ts`, `worktree.ts`, `web.ts`, `askUser.ts`, `todo*.ts`, `context.ts`, `exec.ts`, `processRegistry.ts` | **ADAPT** | Port to `defineTool`/`registerTool`. Schema **Zod → TypeBox**; `execute()` bodies port directly. `askUser` → `ctx.ui`. `context.ts` guards (`resolveInCwd`/`guardScope`) reused by ported tools. |
 | Sessions/checkpoints | `memory/checkpoints.ts`, branching in `session.ts` | **DELETE** | NATIVE: `SessionManager` append-only tree, `createBranchedSession(leafId)`, labels, `session_before_fork`. Rewire `/fork`,`/rename`,`/resume` to Pi. |
@@ -145,13 +145,13 @@ headless (no TUI) so the whole agent + relay is provable before the UI rewrite.
 - **Verify:** live smoke against `inference.tinfoil.sh` → green posture; SPKI matches
   the report. (Spike already proved interception + SPKI extraction.)
 
-### Phase 4 — Connection layer (relay + daemon + login)
+### Phase 4 — Connection layer (relay + harbor + login)
 **Goal:** drive this terminal from the privateer app, unchanged on the wire.
 - KEEP `remote/relayClient.ts`, `auth/privateer.ts`, `crypto/outboxSeal.ts` verbatim.
 - Wire `RelayClient` to the Phase-1 adapter + Phase-2 remote gate branch.
-- Port `daemon/` to drive headless sessions; `routines/*` logic unchanged.
+- Port `harbor/` to drive headless sessions; `routines/*` logic unchanged.
 - Reconcile trust: headless modes must NOT auto-trust — set `defaultProjectTrust`
-  in `agent/settings.json` and never pass `-a` in the daemon; keep our permission
+  in `agent/settings.json` and never pass `-a` in the harbor; keep our permission
   gate as the real safety. (Config home already pinned via `PI_CODING_AGENT_DIR` — §0.)
 - **Verify:** real app ↔ CLI round-trip — prompt down, events up, approval relayed,
   file transfer both ways, no-quarter toggle, routine result push. Port
@@ -189,7 +189,7 @@ headless (no TUI) so the whole agent + relay is provable before the UI rewrite.
 | Relay survives the loop swap | **RESOLVED** (spike B) | adapter + gate proven end-to-end |
 | TEE attestation survives | **RESOLVED** (spike A) | out-of-band undici dispatcher; SPKI extracted |
 | Live token counter fidelity | Known limit | Anthropic live; others per-turn. Acceptable. |
-| Headless auto-trust footgun | Design item | Gate is the real safety; never `-a` in daemon; set `defaultProjectTrust`. |
+| Headless auto-trust footgun | Design item | Gate is the real safety; never `-a` in harbor; set `defaultProjectTrust`. |
 | `edit`/`bash` builtin semantics differ | Verify in P5 | Diff against our tools; keep ours if divergent. |
 | Pinning to Pi internals (dispatcher, hooks) | Ongoing | Adapter + dispatcher are the only tight couplings; both small and covered by tests. Consider upstreaming a `fetch` option to `pi-ai`. |
 | Concurrent tree edits by user | Process | Fresh repo/worktree; never `git add -A`. |

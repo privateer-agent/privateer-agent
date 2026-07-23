@@ -152,7 +152,7 @@ let _refreshInFlight: Promise<ChildSession> | null = null;
 // remove the "privateer" entry from Pi's authStorage (authStorage.remove("privateer"))
 // right after revokeLocalSessions() so the next launch spawns a fresh session instead
 // of reusing the revoked one. Doing both is safe; doing only one is not. See
-// revokeLocalSessions and its callers (cli/chat.ts, daemon/index.ts).
+// revokeLocalSessions and its callers (cli/chat.ts, harbor/index.ts).
 //
 // That pairing only covers a CLEAN exit, though. A terminal killed without running its
 // shutdown hook leaves its row alive server-side for the full TTL, and the next launch
@@ -625,7 +625,7 @@ export async function revokeAccountSession(timeoutMs = 1500): Promise<void> {
  * launch without a reactive-on-401 refresh, so the caller MUST also drop the persisted
  * copy right after this resolves — `authStorage.remove("privateer")` — or the next run
  * will reuse the token we just revoked and dead-end on a 401 (see the _account note).
- * Callers: cli/chat.ts cleanup() and daemon/index.ts shutdown().
+ * Callers: cli/chat.ts cleanup() and harbor/index.ts shutdown().
  */
 export async function revokeLocalSessions(timeoutMs = 1500): Promise<void> {
   await Promise.all([revokeChildSession(timeoutMs), revokeAccountSession(timeoutMs)]);

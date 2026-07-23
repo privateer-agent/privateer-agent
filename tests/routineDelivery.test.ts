@@ -60,7 +60,7 @@ test("delivery: relay queued (app closed) is durable — no notice needed", asyn
   await withHome(async () => {
     const report = await deliver(routine(["relay"]), "x", "ok", { pushRelay: () => "queued" });
     assert.ok(report.delivered.includes("relay(queued)"));
-    assert.equal(drainNotices().length, 0); // the daemon persisted it to the pending queue
+    assert.equal(drainNotices().length, 0); // the harbor persisted it to the pending queue
   });
 });
 
@@ -102,7 +102,7 @@ test("delivery: cloud queued (offline) is durable — no notice", async () => {
   await withHome(async () => {
     const report = await deliver(routine(["cloud"]), "x", "error", { pushCloud: async () => "queued" });
     assert.ok(report.delivered.includes("cloud(queued)"));
-    assert.equal(drainNotices().length, 0); // the daemon buffered it to pending-cloud
+    assert.equal(drainNotices().length, 0); // the harbor buffered it to pending-cloud
   });
 });
 

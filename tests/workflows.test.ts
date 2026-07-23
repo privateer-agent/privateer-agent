@@ -43,7 +43,7 @@ const TERM = "routines-wf-test";
 
 test.after(() => { try { rmSync(HOME, { recursive: true, force: true }); } catch { /* best effort */ } });
 
-// The graph the daemon's guardControl protects: an agent step routed to a script step.
+// The graph the harbor's guardControl protects: an agent step routed to a script step.
 const DRAFT = {
   workflow: { name: "triage", entry_point: "scan" },
   steps: [

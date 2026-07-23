@@ -1,28 +1,35 @@
-// Install the resident daemon as a per-user OS service so it auto-starts at login
+// Install the resident harbor as a per-user OS service so it auto-starts at login
 // and survives the terminal closing — the difference between "the CLI is running"
-// and "the daemon is reachable from the app even when no CLI is". macOS → launchd
+// and "the harbor is reachable from the app even when no CLI is". macOS → launchd
 // user agent; Linux → systemd --user unit. No root: everything lives under the
 // user's own home and login session.
 //
 // ORDERING NOTE: this module is import-safe (node builtins + our paths only, no Pi),
-// so the daemon CLI can load it without going through boot.ts.
+// so the harbor CLI can load it without going through boot.ts.
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { globalDir } from "../config/paths.ts";
-import { daemonIsRunning } from "./ipc.ts";
+import { harborIsRunning } from "./ipc.ts";
 
-const LABEL = "pro.privateer.daemon"; // launchd label / reverse-dns id
-const UNIT = "privateer-daemon.service"; // systemd --user unit name
+const LABEL = "pro.privateer.harbor"; // launchd label / reverse-dns id
+const UNIT = "privateer-harbor.service"; // systemd --user unit name
 
-// Absolute path to the node launcher that boots + runs the daemon (bin/privateer-daemon.mjs).
+// Pre-rename service identity ("daemon"). Kept ONLY so install/uninstall can evict a
+// service a user installed before the harbor rename — otherwise it lingers as an
+// orphaned launchd agent / systemd unit still running the old launcher. Never written,
+// only torn down.
+const OLD_LABEL = "pro.privateer.daemon";
+const OLD_UNIT = "privateer-daemon.service";
+
+// Absolute path to the node launcher that boots + runs the harbor (bin/privateer-harbor.mjs).
 // Resolved from THIS module so it's correct for both a dev checkout and a global npm
-// install (…/node_modules/privateer-agent/bin/privateer-daemon.mjs).
-function daemonLauncherPath(): string {
-  const here = dirname(fileURLToPath(import.meta.url)); // …/src/daemon
-  return resolve(here, "../../bin/privateer-daemon.mjs");
+// install (…/node_modules/privateer-agent/bin/privateer-harbor.mjs).
+function harborLauncherPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url)); // …/src/harbor
+  return resolve(here, "../../bin/privateer-harbor.mjs");
 }
 
 // The node binary to bake into the unit. We use the CURRENT interpreter (>=22, the
@@ -32,12 +39,12 @@ function nodeBinaryPath(): string {
   return process.execPath;
 }
 
-function daemonLogPath(): string {
-  return join(globalDir(), "daemon.log");
+function harborLogPath(): string {
+  return join(globalDir(), "harbor.log");
 }
 
 // Env we forward into the service so a non-default home / server URL survives. Kept
-// tiny and explicit — the daemon reads the rest from ~/.privateer.
+// tiny and explicit — the harbor reads the rest from ~/.privateer.
 function forwardedEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   if (process.env.PRIVATEER_HOME) env.PRIVATEER_HOME = process.env.PRIVATEER_HOME;
@@ -56,13 +63,13 @@ function xmlEscape(s: string): string {
 }
 
 function launchdPlist(): string {
-  const args = [nodeBinaryPath(), daemonLauncherPath(), "run"];
+  const args = [nodeBinaryPath(), harborLauncherPath(), "run"];
   const envVars = forwardedEnv();
   const argXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
   const envXml = Object.entries(envVars)
     .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`)
     .join("\n");
-  const log = xmlEscape(daemonLogPath());
+  const log = xmlEscape(harborLogPath());
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -86,7 +93,18 @@ ${envVars.PRIVATEER_HOME || envVars.PRIVATEER_SERVER_URL ? `  <key>EnvironmentVa
 `;
 }
 
+// Evict a pre-rename launchd agent (pro.privateer.daemon) if one is installed, so the
+// harbor rename doesn't leave the old service running the old launcher alongside it.
+function evictOldLaunchd(): void {
+  const oldPlist = join(homedir(), "Library", "LaunchAgents", `${OLD_LABEL}.plist`);
+  if (existsSync(oldPlist)) {
+    spawnSync("launchctl", ["unload", "-w", oldPlist], { stdio: "ignore" });
+    rmSync(oldPlist, { force: true });
+  }
+}
+
 function installLaunchd(): void {
+  evictOldLaunchd();
   const plist = launchAgentPath();
   mkdirSync(dirname(plist), { recursive: true });
   writeFileSync(plist, launchdPlist());
@@ -100,6 +118,7 @@ function installLaunchd(): void {
 }
 
 function uninstallLaunchd(): void {
+  evictOldLaunchd();
   const plist = launchAgentPath();
   if (existsSync(plist)) {
     spawnSync("launchctl", ["unload", "-w", plist], { stdio: "ignore" });
@@ -115,12 +134,12 @@ function systemdUnitPath(): string {
 }
 
 function systemdUnit(): string {
-  const exec = [nodeBinaryPath(), daemonLauncherPath(), "run"].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+  const exec = [nodeBinaryPath(), harborLauncherPath(), "run"].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
   const envLines = Object.entries(forwardedEnv())
     .map(([k, v]) => `Environment=${k}=${v}`)
     .join("\n");
   return `[Unit]
-Description=Privateer resident agent daemon (routines + app-driven task spawns)
+Description=Privateer resident agent harbor (routines + app-driven task spawns)
 After=network-online.target
 Wants=network-online.target
 
@@ -136,7 +155,20 @@ WantedBy=default.target
 `;
 }
 
+// Evict a pre-rename systemd --user unit (privateer-daemon.service) if present, so the
+// harbor rename doesn't leave the old unit enabled alongside the new one.
+function evictOldSystemd(): void {
+  const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  const oldUnit = join(base, "systemd", "user", OLD_UNIT);
+  if (existsSync(oldUnit)) {
+    spawnSync("systemctl", ["--user", "disable", "--now", OLD_UNIT], { stdio: "ignore" });
+    rmSync(oldUnit, { force: true });
+    spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
+  }
+}
+
 function installSystemd(): void {
+  evictOldSystemd();
   const unit = systemdUnitPath();
   mkdirSync(dirname(unit), { recursive: true });
   writeFileSync(unit, systemdUnit());
@@ -152,6 +184,7 @@ function installSystemd(): void {
 }
 
 function uninstallSystemd(): void {
+  evictOldSystemd();
   const unit = systemdUnitPath();
   spawnSync("systemctl", ["--user", "disable", "--now", UNIT], { stdio: "ignore" });
   if (existsSync(unit)) rmSync(unit, { force: true });
@@ -182,7 +215,7 @@ export function serviceInfo(): ServiceInfo {
     supported: platform === "darwin" || platform === "linux",
     installed: !!unitPath && existsSync(unitPath),
     unitPath,
-    logPath: daemonLogPath(),
+    logPath: harborLogPath(),
   };
 }
 
@@ -191,7 +224,7 @@ export function installService(): ServiceInfo {
   const platform = process.platform;
   if (platform === "darwin") installLaunchd();
   else if (platform === "linux") installSystemd();
-  else throw new Error(`Auto-start isn't supported on ${platform}. Run \`privateer daemon\` yourself, or keep a terminal open.`);
+  else throw new Error(`Auto-start isn't supported on ${platform}. Run \`privateer harbor\` yourself, or keep a terminal open.`);
   return serviceInfo();
 }
 
@@ -203,15 +236,15 @@ export function uninstallService(): ServiceInfo {
   return serviceInfo();
 }
 
-// Human-readable status line for `privateer daemon status`: whether the service is
-// installed AND whether a daemon is actually answering on the IPC socket right now.
+// Human-readable status line for `privateer harbor status`: whether the service is
+// installed AND whether a harbor is actually answering on the IPC socket right now.
 export async function statusReport(): Promise<string> {
   const info = serviceInfo();
-  const live = await daemonIsRunning();
+  const live = await harborIsRunning();
   const lines = [
-    `platform:  ${info.platform}${info.supported ? "" : " (auto-start unsupported — run `privateer daemon` manually)"}`,
+    `platform:  ${info.platform}${info.supported ? "" : " (auto-start unsupported — run `privateer harbor` manually)"}`,
     `service:   ${info.installed ? `installed (${info.unitPath})` : "not installed"}`,
-    `daemon:    ${live ? "running (answering IPC)" : "not reachable"}`,
+    `harbor:    ${live ? "running (answering IPC)" : "not reachable"}`,
     `logs:      ${info.logPath}`,
   ];
   // Surface a stale-unit hint: file present but nothing answering usually means it
@@ -220,11 +253,11 @@ export async function statusReport(): Promise<string> {
   return lines.join("\n");
 }
 
-// Best-effort read of the tail of the daemon log (for a `status --log` affordance or
+// Best-effort read of the tail of the harbor log (for a `status --log` affordance or
 // error surfacing). Returns "" if absent.
-export function tailDaemonLog(maxBytes = 4_000): string {
+export function tailHarborLog(maxBytes = 4_000): string {
   try {
-    const buf = readFileSync(daemonLogPath(), "utf8");
+    const buf = readFileSync(harborLogPath(), "utf8");
     return buf.length > maxBytes ? buf.slice(buf.length - maxBytes) : buf;
   } catch {
     return "";

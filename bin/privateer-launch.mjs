@@ -111,13 +111,14 @@ if (sub === "update") {
   // runToCompletion exits via the child's exit handler.
 }
 
-// --- `privateer daemon [run|install|uninstall|status]` ---------------------
-// The resident background daemon (routines + app-driven headless task spawns). Boots
-// straight into src/daemon via bin/privateer-daemon.mjs — no moat-shim install (the
-// daemon loads the moat as in-code factories, not interactive extensions).
-else if (sub === "daemon") {
+// --- `privateer harbor [run|install|uninstall|status]` ---------------------
+// The resident background harbor (routines + app-driven headless task spawns). Boots
+// straight into src/harbor via bin/privateer-harbor.mjs — no moat-shim install (the
+// harbor loads the moat as in-code factories, not interactive extensions).
+// `daemon` is a hidden back-compat alias for the pre-rename command name.
+else if (sub === "harbor" || sub === "daemon") {
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
-  runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-daemon.mjs"), ...args.slice(1)]);
+  runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-harbor.mjs"), ...args.slice(1)]);
 }
 
 // --- normal launch: install the moat, then exec Pi's TUI -------------------

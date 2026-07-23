@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { globalDir } from "../config/paths.ts";
 import type { Routine } from "../routines/schema.ts";
 
-// The CLI/TUI talks to the resident daemon over a unix domain socket. The protocol
+// The CLI/TUI talks to the resident harbor over a unix domain socket. The protocol
 // is one JSON request per connection, answered with one JSON response, both
 // newline-terminated. Kept tiny and local — nothing crosses the machine boundary.
 
-export function daemonSocketPath(): string {
-  return join(globalDir(), "daemon.sock");
+export function harborSocketPath(): string {
+  return join(globalDir(), "harbor.sock");
 }
 
 export type IpcRequest =
@@ -26,16 +26,16 @@ export interface IpcResponse {
   ok: boolean;
   message?: string;
   routines?: Routine[];
-  // Daemon liveness/uptime for `status`.
+  // Harbor liveness/uptime for `status`.
   pid?: number;
   uptimeSec?: number;
 }
 
 export type IpcHandler = (req: IpcRequest) => Promise<IpcResponse> | IpcResponse;
 
-// Start the daemon-side socket server. Returns the Server so the caller can close it.
+// Start the harbor-side socket server. Returns the Server so the caller can close it.
 export function startIpcServer(handler: IpcHandler): Server {
-  const path = daemonSocketPath();
+  const path = harborSocketPath();
   // A stale socket file from a previous crash would block bind; remove it first.
   if (existsSync(path)) {
     try {
@@ -73,20 +73,20 @@ export function startIpcServer(handler: IpcHandler): Server {
   return server;
 }
 
-// Client side: send one request, resolve with the response. Rejects if the daemon
+// Client side: send one request, resolve with the response. Rejects if the harbor
 // isn't running (no socket / connection refused) so callers can offer to start it.
-export function sendToDaemon(req: IpcRequest, timeoutMs = 5_000): Promise<IpcResponse> {
-  const path = daemonSocketPath();
+export function sendToHarbor(req: IpcRequest, timeoutMs = 5_000): Promise<IpcResponse> {
+  const path = harborSocketPath();
   return new Promise<IpcResponse>((resolve, reject) => {
     if (!existsSync(path)) {
-      reject(new DaemonNotRunningError());
+      reject(new HarborNotRunningError());
       return;
     }
     const sock = createConnection(path);
     let buf = "";
     const timer = setTimeout(() => {
       sock.destroy();
-      reject(new Error("daemon did not respond in time"));
+      reject(new Error("harbor did not respond in time"));
     }, timeoutMs);
     sock.on("connect", () => sock.end(JSON.stringify(req) + "\n"));
     sock.on("data", (chunk) => {
@@ -97,29 +97,29 @@ export function sendToDaemon(req: IpcRequest, timeoutMs = 5_000): Promise<IpcRes
       try {
         resolve(JSON.parse(buf.trim()) as IpcResponse);
       } catch {
-        reject(new Error("malformed response from daemon"));
+        reject(new Error("malformed response from harbor"));
       }
     });
     sock.on("error", (err: NodeJS.ErrnoException) => {
       clearTimeout(timer);
       // ECONNREFUSED means a stale socket file with no listener behind it.
-      if (err.code === "ENOENT" || err.code === "ECONNREFUSED") reject(new DaemonNotRunningError());
+      if (err.code === "ENOENT" || err.code === "ECONNREFUSED") reject(new HarborNotRunningError());
       else reject(err);
     });
   });
 }
 
-export class DaemonNotRunningError extends Error {
+export class HarborNotRunningError extends Error {
   constructor() {
-    super("Privateer daemon is not running. Start it with `privateer daemon`.");
-    this.name = "DaemonNotRunningError";
+    super("Harbor is not running. Start it with `privateer harbor`.");
+    this.name = "HarborNotRunningError";
   }
 }
 
-// Convenience: is the daemon reachable right now?
-export async function daemonIsRunning(): Promise<boolean> {
+// Convenience: is the harbor reachable right now?
+export async function harborIsRunning(): Promise<boolean> {
   try {
-    const res = await sendToDaemon({ cmd: "status" }, 2_000);
+    const res = await sendToHarbor({ cmd: "status" }, 2_000);
     return res.ok;
   } catch {
     return false;

@@ -14,7 +14,7 @@ process.env.PRIVATEER_HOME = HOME;
 
 const { authorizeControl } = await import("../src/remote/controlAuth.ts");
 const { pinAccountSignKey, clearAccountSignKey } = await import("../src/crypto/accountTrust.ts");
-const { taskControlArgs, deriveTaskTitle } = await import("../src/daemon/index.ts");
+const { taskControlArgs, deriveTaskTitle } = await import("../src/harbor/index.ts");
 const { parseTaskSpec } = await import("../src/remote/relayClient.ts");
 const { addPendingCloud, loadPendingCloud, savePendingCloud } = await import("../src/routines/store.ts");
 

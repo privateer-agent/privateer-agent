@@ -3,12 +3,12 @@
  *
  * The sibling of routinesControl.ts / channelsControl.ts, for declarative workflow
  * graphs. UI-agnostic: nothing here imports React or the relay — the caller (the
- * daemon) owns the frame plumbing, the signed-frame gate (authorizeControl), and the
- * run seam. Like routines, workflows are owned by the DAEMON (they run on its resident
- * scheduler / on-demand), so this control is wired into the daemon's own relay.
+ * harbor) owns the frame plumbing, the signed-frame gate (authorizeControl), and the
+ * run seam. Like routines, workflows are owned by the HARBOR (they run on its resident
+ * scheduler / on-demand), so this control is wired into the harbor's own relay.
  *
  * A workflow file is an EXECUTABLE artifact (it can carry `script` steps), so the
- * daemon MUST verify the account signature on every mutating frame (workflows_save /
+ * harbor MUST verify the account signature on every mutating frame (workflows_save /
  * remove / run) via guardControl BEFORE calling save/remove/run here — a forged save
  * would plant a script step, a forged run would execute one. `list`/`get` are read-only.
  *
@@ -48,7 +48,7 @@ export interface WorkflowsControl {
   save(draft: unknown): { ok: boolean; message?: string; id?: string };
   // Remove a workflow by id or name. ok:false when nothing matched.
   remove(idOrName: string): { ok: boolean; message?: string };
-  // Run a workflow now (fire-and-forget on the daemon). ok:false when not found or the
+  // Run a workflow now (fire-and-forget on the harbor). ok:false when not found or the
   // runner isn't wired.
   run(idOrName: string): { ok: boolean; message?: string };
 }
@@ -72,7 +72,7 @@ function draftId(draft: unknown): string | undefined {
 }
 
 export function makeWorkflowsControl(opts: {
-  // Fire a workflow now — injected by the daemon (it owns the runner + its seams).
+  // Fire a workflow now — injected by the harbor (it owns the runner + its seams).
   // Absent → run is reported unavailable rather than silently dropped (mirrors routines).
   runNow?: (wf: Workflow) => void;
 }): WorkflowsControl {

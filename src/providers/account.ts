@@ -322,7 +322,7 @@ export function makeAccountProvider() {
     // auth.json entry (see the LIFECYCLE HAZARD note in src/auth/privateer.ts). So a
     // signed-in user who quits and relaunches lands on privateer/* with no key at
     // all, and the first prompt dead-ends on "No API key found for privateer." — even
-    // though the banner says "connected". The REPL (cli/chat.ts) and the daemon
+    // though the banner says "connected". The REPL (cli/chat.ts) and the harbor
     // already spawn one at startup; this gives the TUI the same seed.
     pi.on?.("session_start", (_e, ctx) => void armAccountCredential(ctx));
   };

@@ -27,7 +27,7 @@ export function webhookName(entry: string): string | null {
 }
 
 // A saved, unattended agent task. Persisted in routines.json and executed by the
-// daemon when its trigger comes due. A routine's trigger is EITHER recurring (a
+// harbor when its trigger comes due. A routine's trigger is EITHER recurring (a
 // cron expression) or one-off (`at`, a specific datetime) — exactly one is set.
 export const Routine = z
   .object({
@@ -48,14 +48,14 @@ export const Routine = z
     model: z.string().optional(),
     // Where to deliver the result. Defaults to on-box file output.
     delivery: z.array(DeliveryEntry).default(["file"]),
-    // Optional tool allow-subset. Unset → the safe read/web set (see daemon). Entries
+    // Optional tool allow-subset. Unset → the safe read/web set (see harbor). Entries
     // may be builtin names ("read") or MCP selectors — "<server>__<tool>" exact or
     // "<server>__*" for a whole server (see routines/toolSelect.ts). Selected MCP
     // tools run unattended under the auto-approve gate, so grant the minimum needed.
     tools: z.array(z.string()).optional(),
     // Paused routines stay in the file but never fire.
     enabled: z.boolean().default(true),
-    // Bookkeeping, updated by the daemon after each run.
+    // Bookkeeping, updated by the harbor after each run.
     lastRun: z.string().optional(),
     lastStatus: z.enum(["ok", "error"]).optional(),
     lastError: z.string().optional(),

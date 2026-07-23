@@ -57,7 +57,7 @@ test("outbox: decodeAccountPublicKey round-trips a 32-byte key and rejects bad l
 });
 
 test("outbox: a max-size body seals to base64 under the server cap", () => {
-  // The daemon caps plaintext at 45_000 chars before sealing; the server rejects
+  // The harbor caps plaintext at 45_000 chars before sealing; the server rejects
   // sealed base64 over 128 KiB. Confirm the worst case stays comfortably under.
   const body = "x".repeat(45_000) + "\n…truncated";
   const wire = sealJson(PUB, { v: 1, kind: "routine", name: "big", status: "ok", at: "2026-07-07T08:00:00Z", content: body });

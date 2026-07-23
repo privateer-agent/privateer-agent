@@ -3,13 +3,13 @@
  * messaging-channel config (Telegram/Slack/Discord/WhatsApp) rather than scheduled
  * routines.
  *
- * Like routines, this is owned by the ALWAYS-ON daemon relay (daemon/index.ts),
- * NOT the channels daemon (channels/run.ts) — which may be down, and which the app
+ * Like routines, this is owned by the ALWAYS-ON harbor relay (harbor/index.ts),
+ * NOT the channels harbor (channels/run.ts) — which may be down, and which the app
  * must be able to configure before it has ever run. So this control edits the
- * `channels` block of ~/.privateer/config.json; the channels daemon adopts changes
+ * `channels` block of ~/.privateer/config.json; the channels harbor adopts changes
  * on its next RESTART, matching run.ts's deliberate "no in-chat toggle, restart is
  * the fail-safe reset" posture. `running` is a best-effort read of the channels
- * daemon's heartbeat (channels/status.ts), never a dependency.
+ * harbor's heartbeat (channels/status.ts), never a dependency.
  *
  * SECRETS: bot tokens are WRITE-ONLY from the app's perspective. list() NEVER
  * returns a token value — it reports `configured`, `running`, and `secretsSet`
@@ -46,7 +46,7 @@ const SECRET_FIELDS: Record<ChannelPlatform, string[]> = {
 export interface RemoteChannel {
   platform: ChannelPlatform;
   configured: boolean; // a config block exists for this platform
-  running: boolean; // the channels daemon is currently serving it
+  running: boolean; // the channels harbor is currently serving it
   adminCount: number;
   memberCount: number;
   posture: ChannelPosture;
@@ -94,7 +94,7 @@ function cleanStrList(v: unknown): string[] | undefined {
 }
 
 export function makeChannelsControl(opts: {
-  // Which platforms the channels daemon is serving right now (heartbeat read).
+  // Which platforms the channels harbor is serving right now (heartbeat read).
   // Absent → everything reports not-running.
   runningPlatforms?: () => Set<string>;
 }): ChannelsControl {
@@ -173,7 +173,7 @@ export function makeChannelsControl(opts: {
       } catch (e) {
         return { ok: false, message: `Couldn't write config: ${e instanceof Error ? e.message : String(e)}` };
       }
-      return { ok: true, message: `Saved ${draft.platform}. Restart the channels daemon to apply.` };
+      return { ok: true, message: `Saved ${draft.platform}. Restart the channels harbor to apply.` };
     },
 
     remove(platform: ChannelPlatform): { ok: boolean; message?: string } {
@@ -186,7 +186,7 @@ export function makeChannelsControl(opts: {
       } catch (e) {
         return { ok: false, message: `Couldn't write config: ${e instanceof Error ? e.message : String(e)}` };
       }
-      return { ok: true, message: `Removed ${platform}. Restart the channels daemon to apply.` };
+      return { ok: true, message: `Removed ${platform}. Restart the channels harbor to apply.` };
     },
   };
 }

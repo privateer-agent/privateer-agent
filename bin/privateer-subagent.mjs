@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The binary pi-subagents spawns for each subagent child (via PI_SUBAGENT_PI_BINARY)
 // when the PARENT loaded privateer's moat as IN-CODE extension factories (the lean
-// REPL, the daemon, live task sessions) rather than agent-dir discovery.
+// REPL, the harbor, live task sessions) rather than agent-dir discovery.
 //
 // Why a wrapper here (vs the plain cli.js the TUI uses): a subagent child is a fresh
 // `pi` subprocess that can't inherit the parent's in-code factories. It CAN auto-

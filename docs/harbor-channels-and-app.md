@@ -1,7 +1,7 @@
-# Privateer Agent — Daemon, Channels, Terminal Sessions, and App Integration
+# Privateer Agent — Harbor, Channels, Terminal Sessions, and App Integration
 
 > Internal codename **TreeView** · public name **Privateer**. This document explains
-> how the always-on **daemon**, the **channels** bridge, and **terminal sessions**
+> how the always-on **harbor**, the **channels** bridge, and **terminal sessions**
 > fit together, how the **Privateer app** drives them, and — most importantly — where
 > the privacy/security boundaries are and what they do and do not guarantee.
 >
@@ -19,8 +19,8 @@
    │  · RemoteDriveContext        │                                             │  on the user's machine   │
    │  · Channels/Routines/Skills/ │        REST (auth, device-code, sessions)   │                          │
    │    Extensions screens        │  ◄──────────────────────────────────────────│  · TUI / REPL session    │
-   └──────────────────────────────┘                                             │  · daemon (always-on)    │
-                                                                                │  · channels daemon       │
+   └──────────────────────────────┘                                             │  · harbor (always-on)    │
+                                                                                │  · channels harbor       │
    server (treeview/server): auth, JWT sessions, relay hub, outbox store.       └─────────────────────────┘
    Treated as UNTRUSTED for user content (stores/forwards ciphertext only).
 ```
@@ -30,8 +30,8 @@ Three long-lived agent roles, each a separate process/session:
 | Role | Process | Purpose | Relay? |
 |------|---------|---------|--------|
 | **Interactive terminal** | `privateer` TUI (`src/main.ts` → `cli/chat.ts`) | The coding agent a human types at | Optional, per session, when the user enables remote-access |
-| **Daemon** | `src/daemon/index.ts` (`privateer daemon`) | Runs **scheduled routines**; hosts the app-facing **management** surface (routines + channels config) | Always, when the account is signed in |
-| **Channels daemon** | `src/channels/run.ts` (`npm run channels`) | Bridges **Telegram/Slack/Discord/WhatsApp** chats to agent turns | No relay — reads config from disk |
+| **Harbor** | `src/harbor/index.ts` (`privateer harbor`) | Runs **scheduled routines**; hosts the app-facing **management** surface (routines + channels config) | Always, when the account is signed in |
+| **Channels harbor** | `src/channels/run.ts` (`npm run channels`) | Bridges **Telegram/Slack/Discord/WhatsApp** chats to agent turns | No relay — reads config from disk |
 
 The **relay** is a server-forwarded WebSocket that lets the app drive a terminal.
 The **REST** endpoints handle account login (device-code), session listing, and the
@@ -40,16 +40,16 @@ content.
 
 ---
 
-## 2. The daemon
+## 2. The harbor
 
-`src/daemon/index.ts` is the resident process behind the **"Privateer Routines"**
+`src/harbor/index.ts` is the resident process behind the **"Privateer Routines"**
 terminal. It does two jobs:
 
 ### 2.1 Scheduled routines
 - Routines (saved unattended agent tasks) live in `~/.privateer/routines/` (see
   `src/routines/store.ts`). Each has a trigger (`cron` or one-off `at`), a prompt, a
   cwd, a model, a tool set, and delivery channels.
-- The daemon ticks once a minute (`TICK_MS`), runs due routines headlessly through a
+- The harbor ticks once a minute (`TICK_MS`), runs due routines headlessly through a
   Pi session with an **auto-approve gate restricted to a safe tool set** (`SAFE_TOOLS`
   — read/grep/find/ls), and delivers the result via `file` / `notice` / `relay` /
   `cloud` / `email` / `webhook:<name>`.
@@ -57,20 +57,20 @@ terminal. It does two jobs:
   (sealed; see §6.3).
 
 ### 2.2 App-facing management (over its always-on relay)
-Since the routines memory landed, the daemon **connects its relay whenever the
+Since the routines memory landed, the harbor **connects its relay whenever the
 account is signed in** (`syncRelay`), not only when a routine wants `relay` delivery.
 That makes the "Privateer Routines" terminal a general, always-reachable **management
 terminal** — the app can create the very first routine, or configure channels, before
-either daemon has otherwise done anything.
+either harbor has otherwise done anything.
 
-On that one relay the daemon answers two manager surfaces:
+On that one relay the harbor answers two manager surfaces:
 - **Routines** — `routines_*` frames → `src/remote/routinesControl.ts` (list / save /
   delete / pause / run over `routines.json`).
 - **Channels** — `channels_*` frames → `src/remote/channelsControl.ts` (list / save /
   remove over the `channels` block of `config.json`).
 
 Both are **UI-agnostic controls**: they validate + persist and never import the relay
-or React. The daemon owns the frame plumbing (`onControllerAttached` primes both
+or React. The harbor owns the frame plumbing (`onControllerAttached` primes both
 lists; each mutation re-pushes the list with a one-line result).
 
 ---
@@ -81,8 +81,8 @@ A **channel** turns an allow-listed chat into a prompt: a user's message becomes
 agent turn, the reply goes back to the chat. It's the inbound mirror of the relay
 (the relay lets the *app* drive the terminal; a channel lets a *chat* drive it).
 
-### 3.1 The channels daemon (`src/channels/run.ts`)
-- A **separate process** from the relay daemon. It reads the `channels` block of
+### 3.1 The channels harbor (`src/channels/run.ts`)
+- A **separate process** from the relay harbor. It reads the `channels` block of
   `~/.privateer/config.json` at startup and starts one `MessagingBridge` per
   configured platform (`telegram`/`slack`/`discord`/`whatsapp`). Each platform is just
   a dumb `ChannelAdapter` transport; the shared bridge does allow-listing, per-chat
@@ -106,8 +106,8 @@ Bot tokens live in `config.json` **in plaintext on the machine** — protect tha
 permissions. (The same posture applies to the terminal identity key in §6.1.)
 
 ### 3.3 Heartbeat (`src/channels/status.ts`)
-Because the channels daemon and the management daemon are different processes, the
-channels daemon writes a small heartbeat (`~/.privateer/channels-status.json`, every
+Because the channels harbor and the management harbor are different processes, the
+channels harbor writes a small heartbeat (`~/.privateer/channels-status.json`, every
 30 s) listing the platforms it's actively serving. `channelsControl` reads it to show
 the app a **live / configured-but-offline** badge — best-effort presence, never a
 dependency.
@@ -137,7 +137,7 @@ tokens independently without tripping refresh-reuse detection. Children surface 
 
 ### 4.3 The relay
 When a terminal enables remote-access it opens a relay WebSocket keyed by a `termId`
-(the daemon uses a stable `routines-…` id; interactive terminals use a per-terminal
+(the harbor uses a stable `routines-…` id; interactive terminals use a per-terminal
 id). The server's relay hub routes frames between the app (driver) and the terminal,
 enforcing a soft single-driver lock. The relay carries **EngineEvents** up (streamed
 text, tool calls) and **prompts/approvals/commands** down.
@@ -165,8 +165,8 @@ agent, a `*_*` frame family, and a screen in the app:
 
 | Surface | Agent | Screen |
 |---------|-------|--------|
-| Routines | `routinesControl.ts` (daemon relay) | `RoutinesScreen` |
-| Channels | `channelsControl.ts` (daemon relay) | `ChannelsScreen` |
+| Routines | `routinesControl.ts` (harbor relay) | `RoutinesScreen` |
+| Channels | `channelsControl.ts` (harbor relay) | `ChannelsScreen` |
 | Skills | `skillsControl.ts` (per interactive terminal) | `SkillsScreen` |
 | Extensions | `extensionsControl.ts` (per interactive terminal) | `ExtensionsScreen` |
 | Live drive | `RemoteBridge` | `RemoteSessionScreen` |
@@ -175,16 +175,16 @@ The **Channels** and **Routines** actions live on the "Privateer Routines" termi
 card in `LiveTerminalsList`; Skills/Extensions/Drive live on interactive terminals.
 
 ### 5.3 The channels flow, end to end
-1. App opens `ChannelsScreen` → `channels_list` → daemon replies with a `channels`
+1. App opens `ChannelsScreen` → `channels_list` → harbor replies with a `channels`
    frame (all four platforms; **never a token value**, only `secretsSet` names +
    counts + posture + `running`).
 2. User edits roles/posture/tools/model and (if the terminal is *sealable*, §6) bot
    credentials.
 3. `saveChannel` sends `channels_save` with a plaintext `draft` (non-secret fields)
    and, when secrets are present, a **sealed** `sealedSecrets` blob.
-4. Daemon validates, opens the sealed blob, verifies the embedded `termId`, merges,
+4. Harbor validates, opens the sealed blob, verifies the embedded `termId`, merges,
    writes `config.json`, and re-pushes the list. **Changes reach live bridges on the
-   channels daemon's next restart.**
+   channels harbor's next restart.**
 
 ---
 
@@ -237,7 +237,7 @@ neither reads the token nor can forge the config:
 **Confidentiality (bot tokens are sealed).** `client/services/terminalSeal.ts` seals
 `{termId, secrets}` to the terminal's pinned pubkey (X25519 → HKDF-SHA256 →
 AES-256-GCM, domain label `privateer-channel-seal-v1`, distinct from the outbox label);
-the daemon opens it with `src/crypto/terminalUnseal.ts`. Plaintext tokens never travel;
+the harbor opens it with `src/crypto/terminalUnseal.ts`. Plaintext tokens never travel;
 the server forwards ciphertext only.
 
 **Authenticity (every save is signed — Phase 4).** A sealed box gives confidentiality
@@ -246,12 +246,12 @@ it), so anyone who knows it could otherwise *create* a valid sealed blob, and th
 non-secret fields (`admins`/`posture`/`tools`) would travel in plaintext. To close that
 (the review's F7/F8): the app **signs the whole envelope** — `{termId, ts, draft,
 sealedSecrets}` — with an **Ed25519 key derived from the account master key**
-(`client/services/accountSign.ts`), and the daemon **verifies** it
+(`client/services/accountSign.ts`), and the harbor **verifies** it
 (`src/crypto/accountVerify.ts`) against the account signing public key it **pinned at
 link time** (`src/crypto/accountTrust.ts`, delivered through the human-approved
 device-code grant, symmetric to §6.2). Only the master-key holder can sign, so a
 hostile relay can neither forge a token nor inject an admin. The signature also binds
-`termId` (defeats misrouting) and `ts` (the daemon rejects any `ts` at or below the
+`termId` (defeats misrouting) and `ts` (the harbor rejects any `ts` at or below the
 last it applied — no replay/rollback). Verification is **fail-closed**: no pin, a
 missing signature, a bad signature, or a stale `ts` all refuse the entire save.
 
@@ -272,7 +272,7 @@ permission gate: a forged `routines_save`+`run` runs a headless **bypass-mode** 
 `skills_create` injects an auto-invoked system-prompt skill. Without signing, the
 untrusted server could forge any of them; with it, a server that turns malicious after
 link cannot. The replay watermark is **per-terminal** (`crypto/accountTrust.ts`
-`control-sig.json`), so the always-on daemon and interactive terminals don't
+`control-sig.json`), so the always-on harbor and interactive terminals don't
 cross-reject each other's independent `ts` streams.
 
 ### 6.5 Honest limits (what still trusts the server, and where)
@@ -311,7 +311,7 @@ cross-reject each other's independent `ts` streams.
 2. **Fail-closed.** No controller, a disconnect, an untrusted terminal, or an
    unverifiable seal all resolve to *deny / don't send*, never *allow / send in the
    clear*.
-3. **Restart is the fail-safe** for the channels daemon — roles/posture reset to
+3. **Restart is the fail-safe** for the channels harbor — roles/posture reset to
    config on restart; there is deliberately no live in-chat privilege toggle.
 4. **One control, one frame family, one screen** per app-manageable feature — mirror
    the routines/channels/skills/extensions pattern rather than inventing new plumbing.
@@ -324,8 +324,8 @@ cross-reject each other's independent `ts` streams.
 
 ## 8. Workflows (proposed) — routed multi-agent routines
 
-> **Status: agent/daemon side built & tested; app side planned.** This section
-> specifies *declarative multi-agent workflows* on the daemon — the schema, runner,
+> **Status: agent/harbor side built & tested; app side planned.** This section
+> specifies *declarative multi-agent workflows* on the harbor — the schema, runner,
 > store, control, and relay wiring now exist (`src/workflows/*`,
 > `src/remote/workflowsControl.ts`, the `workflows_*` frames, `tests/workflows.test.ts`).
 > It pins down the shape and — above all — the security seam, because a workflow file is
@@ -334,7 +334,7 @@ cross-reject each other's independent `ts` streams.
 
 ### 8.1 What it adds, and why it isn't just a bigger routine
 A routine (§2.1) is **one prompt** on a trigger. A workflow is a **routed graph of
-steps** — the same unattended, daemon-run, safe-tool-gated execution model, but with
+steps** — the same unattended, harbor-run, safe-tool-gated execution model, but with
 branching, fan-out, human gates, and sub-workflow composition between steps. It is the
 thing the [[spawn-agent-from-app]] and [[subagents-blocked-when-driven]] work gestures
 at, made *declarative* and *deterministic* rather than agent-improvised.
@@ -349,13 +349,13 @@ model (Conductor is a local CLI with no untrusted server; we have §6).
 |---|---|---|
 | `agent` | a headless Pi session under the **`SAFE_TOOLS` auto-approve gate** (as routines run today) | `tools:` is the ceiling, same semantics as `Routine.tools` |
 | `script` | a shell command | ⚠️ **bypasses the agent permission gate — RCE surface**, see §8.4 |
-| `human_gate` | pause → surface `options:` to the app as an **approval over the daemon relay** | native fit for the existing `approval_response` frame + app approval UI |
+| `human_gate` | pause → surface `options:` to the app as an **approval over the harbor relay** | native fit for the existing `approval_response` frame + app approval UI |
 | `set` / `wait` | pure context transform / sleep | no LLM, no tools, harmless |
 | `workflow` | sub-workflow (local path only — **no registry/GitHub refs**, §8.4) | composition |
 | `terminate` | end `success|failed` | the fail-closed exit (§7.2) |
 
 `for_each` / `parallel` fan-out map onto spawning N gated Pi sessions with a
-`max_concurrent` cap (mirror the daemon's existing one-at-a-time discipline; don't let
+`max_concurrent` cap (mirror the harbor's existing one-at-a-time discipline; don't let
 a workflow outrun it).
 
 ### 8.3 Storage and the control surface (mirror routines exactly)
@@ -372,7 +372,7 @@ Follow principle §7.4 — **one control, one frame family, one screen**:
   scheduler (§2.1) is the single entry point. No second scheduler.
 - **Control:** `src/remote/workflowsControl.ts` (UI-agnostic, no React/relay import,
   like `routinesControl.ts`): `list / save / remove / setEnabled / run`.
-- **Frames:** a `workflows_*` family, `workflowsControl` on the **daemon relay**.
+- **Frames:** a `workflows_*` family, `workflowsControl` on the **harbor relay**.
 - **Screen:** a `WorkflowsScreen`, on the "Privateer Routines" terminal card next to
   Routines/Channels.
 

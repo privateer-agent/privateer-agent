@@ -2,13 +2,13 @@ import type { Routine } from "./schema.ts";
 import { webhookName } from "./schema.ts";
 import { writeRoutineOutput, addNotice } from "./store.ts";
 
-// A relay pusher, injected by the daemon. Given the finished result it either
+// A relay pusher, injected by the harbor. Given the finished result it either
 // forwards it to an attached controller immediately ("live") or persists it to the
 // pending-relay queue to flush when the app next attaches ("queued"). Either way the
 // result is durably accounted for, so delivery doesn't add a notice backstop for it.
 export type RelayPusher = (routine: Routine, content: string) => "live" | "queued";
 
-// A cloud-outbox pusher, injected by the daemon. Seals the result to the account's
+// A cloud-outbox pusher, injected by the harbor. Seals the result to the account's
 // outbox public key and POSTs the ciphertext to the server (E2EE store-and-forward),
 // or buffers it durably on failure. Returns "sent" when the server accepted it,
 // "queued" when it was persisted for a later flush — either way the result is
@@ -31,7 +31,7 @@ export interface DeliveryContext {
   // Named endpoints for "webhook:<name>" delivery entries; results POST here.
   webhooks?: Record<string, WebhookTarget>;
   // Scrubs secrets from anything leaving the machine. Webhook bodies always pass
-  // through this when provided (the daemon wires in redactText).
+  // through this when provided (the harbor wires in redactText).
   redact?: (text: string) => string;
   // Injectable for tests; defaults to global fetch.
   fetchImpl?: typeof fetch;
@@ -39,7 +39,7 @@ export interface DeliveryContext {
 
 export interface DeliveryReport {
   // Channels that actually delivered (email is handled inside the agent run, so it
-  // never appears here — see the daemon). Failed webhooks show as
+  // never appears here — see the harbor). Failed webhooks show as
   // "webhook:<name>(failed)" and leave a notice so the result isn't silently lost.
   delivered: string[];
   // Absolute path to latest.md when file delivery ran.
@@ -101,7 +101,7 @@ async function postWebhook(
 // result is never silently lost. `webhook:<name>` POSTs the (redacted) result to a
 // named endpoint from config; a failed or unconfigured webhook leaves a notice.
 // `email` is intentionally not handled here: it is fulfilled inside the agent turn
-// (the daemon adds the Gmail tool + an instruction to the prompt) so plaintext
+// (the harbor adds the Gmail tool + an instruction to the prompt) so plaintext
 // egress stays an explicit, gated action.
 export async function deliver(
   routine: Routine,
@@ -127,7 +127,7 @@ export async function deliver(
   }
 
   // Relay: pushed live to an attached controller, or queued to flush when the app
-  // next attaches (the daemon persists that queue, so it's durable either way). Only
+  // next attaches (the harbor persists that queue, so it's durable either way). Only
   // when no pusher is wired at all do we fall back to a notice so it isn't lost.
   if (wants.has("relay")) {
     const pushed = ctx.pushRelay?.(routine, content);

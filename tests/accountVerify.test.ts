@@ -154,7 +154,7 @@ test("verifyControl: accepts a signature produced by the client construction", (
 
 test("verifyControl: H2 — rejects a forged routine (tampered args) under a captured sig", () => {
   // A malicious server takes a valid sig for a benign routine and swaps in an RCE
-  // payload. The signature can't cover the new args, so the daemon refuses it.
+  // payload. The signature can't cover the new args, so the harbor refuses it.
   const sig = clientSignControl(MK, CTRL);
   const forged: ControlEnvelope = {
     ...CTRL,
@@ -194,7 +194,7 @@ test("verifyControl: arg key order does not affect verification (canonical)", ()
 
 // ── mcp_save (MCP connectors over the relay). Unlike channels_save, this rides the
 // GENERIC control envelope: action "mcp_save", args { draft, sealedSecrets }. The app
-// (RemoteDriveContext saveMcp) and the daemon (applyMcpSave -> authorizeControl) must
+// (RemoteDriveContext saveMcp) and the harbor (applyMcpSave -> authorizeControl) must
 // build those args identically — including `sealedSecrets: null` when no credential is
 // being set, which is the easiest thing to get wrong (undefined vs null canonicalize
 // differently). These lock that contract. ────────────────────────────────────────────
@@ -225,7 +225,7 @@ test("mcp_save: verifier accepts a credential-less save (sealedSecrets null)", (
 
 test("mcp_save: a null-sealed signature does NOT verify against an injected sealed box", () => {
   // A hostile relay watches a credential-less save and tries to staple its OWN sealed
-  // box onto it (which the daemon would then open and write as the connector's token).
+  // box onto it (which the harbor would then open and write as the connector's token).
   const noSecret: ControlEnvelope = { ...MCP_CTRL, args: { draft: MCP_DRAFT, sealedSecrets: null } };
   const sig = clientSignControl(MK, noSecret);
   assert.equal(verifyControl(clientPub(MK), MCP_CTRL, sig), false);

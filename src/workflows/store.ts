@@ -52,7 +52,7 @@ function parseWorkflow(raw: string): Workflow | null {
 }
 
 // All valid workflows on disk, sorted by name. Corrupt/invalid files are skipped, not
-// thrown — a hand-mangled file shouldn't take down the daemon or the app's list.
+// thrown — a hand-mangled file shouldn't take down the harbor or the app's list.
 export function loadWorkflows(): Workflow[] {
   const dir = workflowsDir();
   if (!existsSync(dir)) return [];
