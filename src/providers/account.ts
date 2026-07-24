@@ -22,6 +22,13 @@ import {
 } from "../auth/privateer.ts";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
+import {
+  sealedEnabled,
+  sealedProviderFor,
+  sealedShimBase,
+  ensureSealedShim,
+  attestSealed,
+} from "./sealedShim.ts";
 
 // Seed/fallback catalog: registered synchronously so the account provider has real
 // models the instant it loads (before the live /api/models fetch resolves) — in
@@ -248,13 +255,26 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
   if (privateerChannel(modelId) === "zdr") {
     return { tier: "zdr-policy" };
   }
-  // Honest labelling for the non-NEAR enclaves. Tinfoil and Phala publish real
-  // attestations, but the server proxies the inference, so from here we cannot bind a
-  // quote to the connection actually carrying our tokens — only the account's word
-  // that it did. That's `tee-unverified` (yellow "confidential compute, unconfirmed"),
-  // never the green tee-verified we reserve for a quote we checked ourselves. A user
-  // who wants the verified shield sets TINFOIL_API_KEY and runs `tinfoil/*` direct,
-  // where pi-privacy attests the enclave client-side.
+  // Sealed (EHBP) path. When sealed mode is on and the model has a Node sealed
+  // client (tinfoil/*), inference goes through the blind relay with the body
+  // HPKE-sealed to the enclave, and we attest that enclave client-side with the SAME
+  // SecureClient that carries the tokens. A green ready() is a quote WE checked,
+  // bound to the HPKE key we seal to — so it earns tee-verified. A failure stays
+  // tee-unverified with the reason surfaced (never a silent green). See
+  // docs/tee-privateer-tinfoil-ehbp.md.
+  const sealedProvider = sealedEnabled() ? sealedProviderFor(modelId) : null;
+  if (sealedProvider) {
+    const att = await attestSealed(sealedProvider);
+    return att.ok ? { tier: "tee-verified" } : { tier: "tee-unverified", error: att.error };
+  }
+  // Honest labelling for the non-NEAR enclaves without sealed mode. Tinfoil and Phala
+  // publish real attestations, but the server proxies the inference in cleartext, so
+  // from here we cannot bind a quote to the connection actually carrying our tokens —
+  // only the account's word that it did. That's `tee-unverified` (yellow "confidential
+  // compute, unconfirmed"), never the green tee-verified we reserve for a quote we
+  // checked ourselves. Turn on sealed mode (PRIVATEER_SEALED=1) for the verified
+  // shield, or set TINFOIL_API_KEY and run `tinfoil/*` direct (pi-privacy attests
+  // client-side over the TLS binding).
   if (!modelId.startsWith("near/")) {
     return { tier: "tee-unverified" };
   }
@@ -299,15 +319,40 @@ export function makeAccountProvider() {
     on?: (event: string, handler: (e: unknown, ctx: unknown) => void) => void;
   }): void => {
     if (typeof pi.registerProvider !== "function") return;
-    const register = (ids: string[]): void =>
+    // A model entry, with a per-model baseUrl override for sealed models once the
+    // EHBP shim is listening: `tinfoil/*` then route through the loopback shim (which
+    // seals to the blind relay) instead of the cleartext `/api/agent/v1` proxy.
+    // Everything else keeps the provider baseUrl below. Until the shim is up (or when
+    // sealed mode is off) sealed models fall back to the cleartext path — and the
+    // badge stays honestly `tee-unverified` (see accountPosture).
+    const modelEntry = (id: string) => {
+      const base = seedModel(id);
+      const provider = sealedEnabled() ? sealedProviderFor(id) : null;
+      const shim = sealedShimBase();
+      return provider && shim ? { ...base, baseUrl: `${shim}/${provider}/v1` } : base;
+    };
+    let lastIds: string[] = DEFAULT_MODELS;
+    const register = (ids: string[]): void => {
+      lastIds = ids;
       pi.registerProvider!("privateer", {
         name: "Privateer account",
         baseUrl: `${serverBaseUrl()}/api/agent/v1`,
         api: "openai-completions",
         oauth: privateerOAuthProvider,
-        models: ids.map(seedModel),
+        models: ids.map(modelEntry),
       });
+    };
     register(DEFAULT_MODELS); // immediate: provider exists this tick
+    // Bring up the sealed shim, then re-register so sealed models pick up their shim
+    // baseUrl. Registration re-runs anyway after the catalog fetch; this just makes
+    // sure the switch lands even if the fetch is slow or fails.
+    if (sealedEnabled()) {
+      void ensureSealedShim()
+        .then(() => register(lastIds))
+        .catch(() => {
+          /* shim failed to start → sealed models stay on the cleartext path */
+        });
+    }
     // Refine to the live catalog. fetchAccountCatalog also populates accountTierMap
     // as a side effect, so the /models picker can shield each row without re-fetching.
     void fetchAccountCatalog()
