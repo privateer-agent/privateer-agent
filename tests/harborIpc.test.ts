@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Harbor } from "../src/harbor/index.ts";
-import { sendToHarbor, harborSocketPath, HarborNotRunningError } from "../src/harbor/ipc.ts";
+import { sendToHarbor, harborSocketPath, HarborNotRunningError, HarborAlreadyRunningError } from "../src/harbor/ipc.ts";
 import { Routine } from "../src/routines/schema.ts";
 
 function sleep(ms: number): Promise<void> {
@@ -25,7 +25,7 @@ test("harbor IPC: add/list/pause/resume/remove over the socket", async () => {
   process.env.PRIVATEER_HOME = home;
   const harbor = new Harbor();
   try {
-    harbor.start();
+    await harbor.start();
     await waitForSocket();
 
     // status responds and reports our pid.
@@ -77,6 +77,30 @@ test("harbor IPC: add/list/pause/resume/remove over the socket", async () => {
     assert.equal(removed.routines?.length, 0);
   } finally {
     harbor.stop();
+    if (prev === undefined) delete process.env.PRIVATEER_HOME;
+    else process.env.PRIVATEER_HOME = prev;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("harbor single-instance: a second harbor on the same home refuses to start", async () => {
+  const home = mkdtempSync(join(tmpdir(), "priv-home-"));
+  const prev = process.env.PRIVATEER_HOME;
+  process.env.PRIVATEER_HOME = home;
+  const first = new Harbor();
+  try {
+    await first.start();
+    await waitForSocket();
+    // The first harbor holds the socket; a second under the same ~/.privateer must
+    // detect the live listener and refuse rather than steal the path.
+    const second = new Harbor();
+    await assert.rejects(() => second.start(), HarborAlreadyRunningError);
+    // The original is untouched and still answering.
+    const status = await sendToHarbor({ cmd: "status" });
+    assert.equal(status.ok, true);
+    assert.equal(status.pid, process.pid);
+  } finally {
+    first.stop();
     if (prev === undefined) delete process.env.PRIVATEER_HOME;
     else process.env.PRIVATEER_HOME = prev;
     rmSync(home, { recursive: true, force: true });

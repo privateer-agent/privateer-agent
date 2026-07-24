@@ -33,44 +33,82 @@ export interface IpcResponse {
 
 export type IpcHandler = (req: IpcRequest) => Promise<IpcResponse> | IpcResponse;
 
-// Start the harbor-side socket server. Returns the Server so the caller can close it.
-export function startIpcServer(handler: IpcHandler): Server {
-  const path = harborSocketPath();
-  // A stale socket file from a previous crash would block bind; remove it first.
-  if (existsSync(path)) {
-    try {
-      unlinkSync(path);
-    } catch {
-      /* ignore — bind will surface a clearer error */
-    }
-  }
-  const server = createServer((sock: Socket) => {
-    let buf = "";
-    sock.on("data", (chunk) => {
-      buf += chunk.toString("utf8");
-      const nl = buf.indexOf("\n");
-      if (nl < 0) return; // wait for the full line
-      const line = buf.slice(0, nl);
-      void (async () => {
-        let res: IpcResponse;
-        try {
-          res = await handler(JSON.parse(line) as IpcRequest);
-        } catch (err) {
-          res = { ok: false, message: err instanceof Error ? err.message : String(err) };
-        }
-        sock.end(JSON.stringify(res) + "\n");
-      })();
+// Probe whether a LIVE process is listening on the socket at `path`. Used as the
+// single-instance test: a successful connect (or a slow-to-answer one) means a real
+// harbor holds the lock; ECONNREFUSED/ENOENT means the socket file is stale (no
+// listener behind it) and is safe to reclaim. Conservative — any ambiguous error
+// resolves `true` so we never steal a path that might still be owned.
+function probeExistingListener(path: string, timeoutMs = 1000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = createConnection(path);
+    const done = (live: boolean) => {
+      clearTimeout(timer);
+      try { sock.destroy(); } catch { /* already gone */ }
+      resolve(live);
+    };
+    const timer = setTimeout(() => done(true), timeoutMs); // slow to answer ⇒ assume live
+    sock.on("connect", () => done(true));
+    sock.on("error", (err: NodeJS.ErrnoException) => {
+      done(!(err.code === "ECONNREFUSED" || err.code === "ENOENT"));
     });
-    sock.on("error", () => sock.destroy());
   });
-  server.listen(path, () => {
-    try {
-      chmodSync(path, 0o600); // owner-only IPC endpoint
-    } catch {
-      /* non-POSIX — best effort */
-    }
+}
+
+// Start the harbor-side socket server. Resolves with the Server (so the caller can
+// close it), or REJECTS with HarborAlreadyRunningError if a live harbor already owns
+// the socket — the bind is the machine's single-instance lock. Two harbors under one
+// ~/.privateer share a single routineRelayId(), so a second instance would collide on
+// the relay and double-fire routines; refusing to start is the fix. A stale socket
+// file (crash with no live listener) is detected and reclaimed, so recovery still works.
+export function startIpcServer(handler: IpcHandler): Promise<Server> {
+  const path = harborSocketPath();
+  const build = (): Server =>
+    createServer((sock: Socket) => {
+      let buf = "";
+      sock.on("data", (chunk) => {
+        buf += chunk.toString("utf8");
+        const nl = buf.indexOf("\n");
+        if (nl < 0) return; // wait for the full line
+        const line = buf.slice(0, nl);
+        void (async () => {
+          let res: IpcResponse;
+          try {
+            res = await handler(JSON.parse(line) as IpcRequest);
+          } catch (err) {
+            res = { ok: false, message: err instanceof Error ? err.message : String(err) };
+          }
+          sock.end(JSON.stringify(res) + "\n");
+        })();
+      });
+      sock.on("error", () => sock.destroy());
+    });
+
+  return new Promise<Server>((resolve, reject) => {
+    // `reclaimed` guards a single stale-socket reclaim so a persistent bind failure
+    // can't loop. On EADDRINUSE we probe for a live listener rather than unlinking
+    // blindly (the old behavior, which let a second harbor silently steal the path).
+    const attempt = (reclaimed: boolean) => {
+      const server = build();
+      server.once("error", (err: NodeJS.ErrnoException) => {
+        if (err.code !== "EADDRINUSE") { reject(err); return; }
+        void probeExistingListener(path).then((live) => {
+          if (live) { reject(new HarborAlreadyRunningError()); return; }
+          if (reclaimed) { reject(err); return; } // already reclaimed once — give up
+          try { unlinkSync(path); } catch { /* ignore — retry surfaces a clearer error */ }
+          attempt(true);
+        });
+      });
+      server.listen(path, () => {
+        try {
+          chmodSync(path, 0o600); // owner-only IPC endpoint
+        } catch {
+          /* non-POSIX — best effort */
+        }
+        resolve(server);
+      });
+    };
+    attempt(false);
   });
-  return server;
 }
 
 // Client side: send one request, resolve with the response. Rejects if the harbor
@@ -113,6 +151,16 @@ export class HarborNotRunningError extends Error {
   constructor() {
     super("Harbor is not running. Start it with `privateer harbor`.");
     this.name = "HarborNotRunningError";
+  }
+}
+
+// Thrown by startIpcServer when a live harbor already holds this machine's socket —
+// i.e. a second instance is trying to start under the same ~/.privateer. The caller
+// (runHarbor) treats this as a clean no-op exit, not a crash.
+export class HarborAlreadyRunningError extends Error {
+  constructor() {
+    super("A Harbor is already running on this machine.");
+    this.name = "HarborAlreadyRunningError";
   }
 }
 

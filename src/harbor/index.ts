@@ -30,7 +30,7 @@ import { openJsonFromApp } from "../crypto/terminalUnseal.ts";
 import { verifyChannelSave, verifyOutboxKey } from "../crypto/accountVerify.ts";
 import { loadAccountSignKey, loadLastControlTs, saveLastControlTs } from "../crypto/accountTrust.ts";
 import { authorizeControl } from "../remote/controlAuth.ts";
-import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, acquireAccountCredential, handleServerRevoke } from "../auth/privateer.ts";
+import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, acquireAccountCredential, handleServerRevoke, defaultDeviceLabel } from "../auth/privateer.ts";
 import {
   loadRoutines,
   upsertRoutine,
@@ -50,7 +50,7 @@ import { splitRoutineTools } from "../routines/toolSelect.ts";
 import { deliver, type RelayPusher, type CloudPusher } from "../routines/delivery.ts";
 import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
-import { startIpcServer, type IpcRequest, type IpcResponse } from "./ipc.ts";
+import { startIpcServer, HarborAlreadyRunningError, type IpcRequest, type IpcResponse } from "./ipc.ts";
 import { isHosted, publishRelayPub } from "../config/hosted.ts";
 
 // The safe, read-only toolset for unattended runs — Pi builtins with no
@@ -226,13 +226,19 @@ export class Harbor {
     return "queued";
   };
 
-  start(): void {
+  async start(): Promise<void> {
+    // Single-instance lock FIRST, before any other side effect: binding the IPC
+    // socket is the machine's mutex. If a live harbor already holds it this throws
+    // HarborAlreadyRunningError — two harbors under one ~/.privateer share a single
+    // routineRelayId(), so a second would collide on the relay and double-fire
+    // routines. Doing this first means a rejected second instance never publishes a
+    // relay key, connects, or fires a tick.
+    this.server = await startIpcServer((req) => this.handleIpc(req));
     // Hosted only: publish our relay pubkey for the host to bind into the SEV-SNP
     // report. Before syncRelay() so the key exists by the time we're reachable.
     publishRelayPub();
     this.primeSchedule();
     this.timer = setInterval(() => void this.tick(), TICK_MS);
-    this.server = startIpcServer((req) => this.handleIpc(req));
     this.syncRelay();
     void this.flushPendingCloud();
     const count = loadRoutines().filter((r) => r.enabled).length;
@@ -517,11 +523,22 @@ export class Harbor {
     }
   }
 
+  // This machine's origin tag, embedded (E2EE) in every sealed result so the app can
+  // show WHICH box/environment produced it — the outbox record itself is account-only,
+  // so attribution can only live inside the sealed blob (where hostnames are allowed;
+  // the server never sees it). `id` is this install's stable relay id; `label` is the
+  // hostname-based device name. Cached — it never changes for the process lifetime.
+  private originCache?: { id: string; label: string };
+  private machineOrigin(): { id: string; label: string } {
+    if (!this.originCache) this.originCache = { id: routineRelayId(), label: defaultDeviceLabel() };
+    return this.originCache;
+  }
+
   private async postOutbox(name: string, at: string, status: "ok" | "error", content: string, kind: "routine" | "task" = "routine"): Promise<boolean> {
     const pub = await this.ensureOutboxPub();
     if (!pub) return false;
     const body = content.length > MAX_CLOUD_PLAINTEXT ? content.slice(0, MAX_CLOUD_PLAINTEXT) + "\n…truncated" : content;
-    const sealed = sealJson(pub, { v: 1, kind, name, status, at, content: body });
+    const sealed = sealJson(pub, { v: 1, kind, name, status, at, content: body, origin: this.machineOrigin() });
     try {
       const res = await apiRequest("/api/outbox", {
         method: "POST",
@@ -1034,7 +1051,6 @@ export class Harbor {
 // Entry point for `privateer harbor`. Caller must have imported ./boot.ts first.
 export function runHarbor(): void {
   const harbor = new Harbor();
-  harbor.start();
   const shutdown = () => {
     log("shutting down");
     harbor.stop();
@@ -1042,4 +1058,14 @@ export function runHarbor(): void {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  harbor.start().catch((err) => {
+    if (err instanceof HarborAlreadyRunningError) {
+      // A resident harbor already owns this machine — leave it in charge. Exit 0 so a
+      // manual `privateer harbor run` beside the installed login service isn't an error.
+      process.stderr.write("A Harbor is already running on this machine — leaving the existing one in charge.\n");
+      process.exit(0);
+    }
+    process.stderr.write(`Harbor failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  });
 }
