@@ -20,10 +20,10 @@ import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { makePermissionGate, isRemoteUnsafeTool, type GateController } from "../ext/permissionGate.ts";
 import { makePiPrivacyExtension } from "pi-privacy";
-import { makeAccountProvider } from "../providers/account.ts";
+import { makeAccountProvider, privateerChannel } from "../providers/account.ts";
 import { RelayClient, type TaskSpec } from "./relayClient.ts";
 import { RemoteBridge } from "./remoteBridge.ts";
-import { spawnAccountCredentials, revokeAccountSession } from "../auth/privateer.ts";
+import { spawnAccountCredentials, revokeAccountSession, hasCredentials } from "../auth/privateer.ts";
 
 export interface LiveTaskHandle {
   termId: string;
@@ -138,7 +138,15 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     cwd,
     agentDir: agentDir(),
     resourceLoaderOptions: {
-      extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider()] as any,
+      extensionFactories: [
+        makePermissionGate(gate),
+        // Per-model verified-TEE label for the /models picker (see harbor/index.ts):
+        // TEE-channel Privateer models verify on select when logged in; ZDR stays floored.
+        makePiPrivacyExtension({
+          privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
+        }),
+        makeAccountProvider(),
+      ] as any,
     },
   });
   servicesRef = services as any;

@@ -1,6 +1,6 @@
 {
   "name": "privateer-agent",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Privateer — a provider-agnostic, safe-by-default terminal coding agent with TEE/Tinfoil attestation, rebuilt on the Pi toolkit. Bring your own model across 20 providers.",
   "type": "module",
   "license": "MIT",
@@ -70,7 +70,7 @@
     "@phala/dcap-qvl": "^0.5.2",
     "patch-package": "^8.0.1",
     "pi-mcp-adapter": "^2.11.0",
-    "pi-privacy": "^0.3.0",
+    "pi-privacy": "^0.7.0",
     "pi-subagents": "^0.34.0",
     "picomatch": "^4.0.4",
     "privateer-workflow": "^0.1.0",

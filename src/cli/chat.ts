@@ -38,7 +38,7 @@ async function main() {
   const { authorizeControl } = await import("../remote/controlAuth.ts");
   const { resolveMentions, completeMention, searchFiles } = await import("../util/fileMentions.ts");
   const priv = await import("../auth/privateer.ts");
-  const { makeAccountProvider, accountPosture } = await import("../providers/account.ts");
+  const { makeAccountProvider, accountPosture, privateerChannel } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
   const { resolveDefaultModel, resolveSignedInModel } = await import("../providers/defaultModel.ts");
 
@@ -329,7 +329,15 @@ async function main() {
     agentDir: agentDir(),
     resourceLoaderOptions: {
       // Structural ext types are intentionally narrow; cast to Pi's ExtensionFactory.
-      extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider()] as any,
+      extensionFactories: [
+        makePermissionGate(gate),
+        // Per-model verified-TEE label for the /models picker (see harbor/index.ts):
+        // TEE-channel Privateer models verify on select when logged in; ZDR stays floored.
+        makePiPrivacyExtension({
+          privateerVerifiedTee: (m) => priv.hasCredentials() && privateerChannel(m.id ?? "") === "tee",
+        }),
+        makeAccountProvider(),
+      ] as any,
     },
   });
   for (const d of services.diagnostics) if (d.type === "error") console.log(`${RED}! ${d.message}${RESET}`);

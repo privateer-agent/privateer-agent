@@ -14,7 +14,7 @@ import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { makePermissionGate, type GateController } from "../ext/permissionGate.ts";
 import { makePiPrivacyExtension } from "pi-privacy";
-import { makeAccountProvider } from "../providers/account.ts";
+import { makeAccountProvider, privateerChannel } from "../providers/account.ts";
 import { resolveDefaultModel } from "../providers/defaultModel.ts";
 import { RelayClient, type TaskSpec } from "../remote/relayClient.ts";
 import { createLiveTaskSession, type LiveTaskHandle } from "../remote/liveTaskSession.ts";
@@ -744,7 +744,18 @@ export class Harbor {
         cwd: spec.cwd,
         agentDir: agentDir(),
         resourceLoaderOptions: {
-          extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider(), mcpAdapter] as any,
+          extensionFactories: [
+            makePermissionGate(gate),
+            // Per-model verified-TEE capability for pi-privacy's /models picker: show
+            // Privateer's TEE-channel models (near/tinfoil/phala) as "◆ Verifiable TEE"
+            // when logged in; ZDR-channel models stay at their honest floor. The live
+            // verdict still comes from accountPosture on select — this only lifts the label.
+            makePiPrivacyExtension({
+              privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
+            }),
+            makeAccountProvider(),
+            mcpAdapter,
+          ] as any,
         },
       });
       servicesRef = services as any;

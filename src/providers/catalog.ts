@@ -2,9 +2,9 @@
 // becomes reachable under Pi. Written after verifying (2026-07-07) that:
 //   - pi-ai ships STATIC model catalogs for its 14 built-in providers, so they're
 //     selectable once a key is present — privateer emits NO models.json entry for them;
-//   - the `pi-privacy` extension registers the 6 privacy providers (tinfoil, nearai,
-//     venice, ollama, custom, privateer-api) at load — privateer emits NO entry for
-//     them either;
+//   - the `pi-privacy` extension registers the privacy providers (tinfoil, nearai,
+//     venice, ollama, and — since pi-privacy 0.7 — `privateer`, its posture-aware
+//     public dev-key surface) at load — privateer emits NO entry for them either;
 //   - so the ONLY provider this generator must emit is `qwen` (config-only,
 //     non-privacy, no built-in catalog), and `privateer` (the account OAuth channel)
 //     is handled in code, not config (Phase 4).
@@ -66,9 +66,11 @@ export const PROVIDERS: ProviderEntry[] = [
   { id: "tinfoil", source: "pi-privacy" },
   { id: "venice", source: "pi-privacy" },
   { id: "custom", source: "pi-privacy" },
-  // Public developer-API surface (sk-priv-… key). Registered by the pi-privacy
-  // extension like the others; distinct from the in-app `privateer` account channel.
-  { id: "privateer-api", source: "pi-privacy" },
+  // The in-app account OAuth channel. NOTE: since pi-privacy 0.7 the extension ALSO
+  // registers a `privateer` provider (its posture-aware public sk-priv- dev-key surface,
+  // floored to zdr-policy) — but makeAccountProvider runs AFTER pi-privacy in the
+  // extension list and re-registers the same id, so the account channel wins. There is
+  // no longer a separate `privateer-api` id (renamed to `privateer` upstream).
   { id: "privateer", source: "account" },
 ];
 

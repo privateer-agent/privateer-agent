@@ -109,7 +109,8 @@ async function main() {
   const { makePermissionGate } = await import("../ext/permissionGate.ts");
   type GateController = import("../ext/permissionGate.ts").GateController;
   const { makePiPrivacyExtension } = await import("pi-privacy");
-  const { makeAccountProvider } = await import("../providers/account.ts");
+  const { makeAccountProvider, privateerChannel } = await import("../providers/account.ts");
+  const { hasCredentials } = await import("../auth/privateer.ts");
   const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
   const { agentDir, configPath, globalDir } = await import("../config/paths.ts");
   const { redactText, collectSecrets } = await import("../util/redact.ts");
@@ -181,7 +182,15 @@ async function main() {
     cwd,
     agentDir: agentDir(),
     resourceLoaderOptions: {
-      extensionFactories: [makePermissionGate(gate), makePiPrivacyExtension(), makeAccountProvider()] as any,
+      extensionFactories: [
+        makePermissionGate(gate),
+        // Per-model verified-TEE label for the /models picker (see harbor/index.ts):
+        // TEE-channel Privateer models verify on select when logged in; ZDR stays floored.
+        makePiPrivacyExtension({
+          privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
+        }),
+        makeAccountProvider(),
+      ] as any,
     },
   });
 
