@@ -862,8 +862,12 @@ export class Harbor {
         this.relay?.sendTaskSpawned(handle.termId, handle.label);
         log(`live task spawned: ${handle.termId} (${handle.label})`);
       } catch (e) {
-        const msg = `Couldn't spawn a live session: ${(e as Error).message}`;
+        const reason = (e as Error).message;
+        const msg = `Couldn't spawn a live session: ${reason}`;
         log(msg);
+        // Typed failure reply so the app's spawn screen stops waiting and shows why. Also send
+        // a notice as a back-compat fallback for older app builds that don't handle the frame.
+        this.relay?.sendTaskSpawnError(reason);
         this.relay?.sendNotice(msg);
       }
     })();

@@ -295,6 +295,14 @@ export class RelayClient {
   // random one each time).
   private readonly termId: string;
   private readonly label: string;
+  // First-registration signal (opt-in via awaitRegistered): `start()` resolves before the
+  // socket actually opens, so a caller that must not act until the terminal is truly live on
+  // the relay — e.g. a live-task spawn that announces `task_spawned` — waits on this instead.
+  // Settled once: resolved on the first ws `open`, rejected on a hard (4xx) ticket-mint
+  // failure. Reconnect blips after a successful first open do NOT re-settle it.
+  private firstConnectSettled = false;
+  private firstConnectError: Error | null = null;
+  private firstConnectWaiters: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
   // In-progress file transfers from the app, keyed by the controller's attachment
   // id. Reassembled from attach_begin/chunk/end frames, then handed to onAttachment.
   private readonly incoming = new Map<
@@ -322,8 +330,43 @@ export class RelayClient {
     await this.connect();
   }
 
+  // Resolve once this terminal has actually registered on the relay (ws `open`), reject on a
+  // hard registration failure (e.g. a 403 concurrency-cap denial) or after `timeoutMs`.
+  // `start()` resolves before the socket opens, so a live-task spawn calls this to confirm the
+  // app can attach BEFORE it announces the terminal — otherwise the app is told to drive a
+  // terminal that never came up and hangs. Idempotent; settling stores its result so a caller
+  // that awaits after the fact still gets it (no dangling/unhandled rejection).
+  awaitRegistered(timeoutMs: number): Promise<void> {
+    if (this.firstConnectSettled) {
+      return this.firstConnectError ? Promise.reject(this.firstConnectError) : Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const waiter = {
+        resolve: () => { clearTimeout(timer); resolve(); },
+        reject: (e: Error) => { clearTimeout(timer); reject(e); },
+      };
+      const timer = setTimeout(() => {
+        this.firstConnectWaiters = this.firstConnectWaiters.filter((w) => w !== waiter);
+        reject(new Error(`relay registration timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.firstConnectWaiters.push(waiter);
+    });
+  }
+
+  private settleFirstConnect(err?: Error): void {
+    if (this.firstConnectSettled) return;
+    this.firstConnectSettled = true;
+    this.firstConnectError = err ?? null;
+    const waiters = this.firstConnectWaiters;
+    this.firstConnectWaiters = [];
+    for (const w of waiters) err ? w.reject(err) : w.resolve();
+  }
+
   stop(): void {
     this.closed = true;
+    // Fail any awaitRegistered() waiter promptly instead of leaving it to time out — a
+    // terminal stopped before it ever registered is never coming up.
+    this.settleFirstConnect(new Error("relay stopped before registering"));
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
     if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = undefined; }
     this.bufKind = null;
@@ -344,7 +387,11 @@ export class RelayClient {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ role: "agent", termId: this.termId, label: this.label }),
       });
-      if (!res.ok) throw new Error(`relay ticket HTTP ${res.status}`);
+      if (!res.ok) {
+        const e: Error & { status?: number } = new Error(`relay ticket HTTP ${res.status}`);
+        e.status = res.status;
+        throw e;
+      }
       const { ticket } = (await res.json()) as { ticket: string };
 
       const wsUrl =
@@ -357,6 +404,7 @@ export class RelayClient {
 
       ws.on("open", () => {
         opened = true;
+        this.settleFirstConnect(); // terminal is live on the relay — awaitRegistered() resolves
         this.cb.onStatus?.("Remote access connected — drive this terminal from the Privateer app.");
       });
       ws.on("message", (data) => this.handle(data));
@@ -381,6 +429,13 @@ export class RelayClient {
       // Ticket mint failed (auth/network/route) — surface it; a silent failure
       // looks identical to "connected but ignoring me".
       const msg = err instanceof Error ? err.message : String(err);
+      // A 4xx (e.g. 403 concurrency cap) won't self-heal by retrying the same request —
+      // fail-fast any awaitRegistered() caller (a live-task spawn) so it stops hanging.
+      // The management terminal ignores this signal, so its reconnect behavior is unchanged.
+      const status = (err as { status?: number })?.status;
+      if (typeof status === "number" && status >= 400 && status < 500) {
+        this.settleFirstConnect(err instanceof Error ? err : new Error(msg));
+      }
       this.cb.onStatus?.(`Remote access couldn't reach the relay (${msg}) — retrying…`);
       this.scheduleReconnect();
     } finally {
@@ -689,6 +744,13 @@ export class RelayClient {
   // over the harbor's management relay.
   sendTaskSpawned(termId: string, label: string): void {
     this.rawSend({ type: "task_spawned", termId, label });
+  }
+
+  // Tell the app a live task spawn FAILED (reply to task_spawn), with a short reason, so the
+  // spawn screen can stop waiting and show it — a live spawn otherwise has no failure signal
+  // and the app would spin until its own timeout. Fire-and-forget over the management relay.
+  sendTaskSpawnError(reason: string): void {
+    this.rawSend({ type: "task_spawn_error", reason: safe(reason, 300) });
   }
 
   sendEvent(ev: EngineEvent): void {

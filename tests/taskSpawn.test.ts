@@ -15,7 +15,7 @@ process.env.PRIVATEER_HOME = HOME;
 const { authorizeControl } = await import("../src/remote/controlAuth.ts");
 const { pinAccountSignKey, clearAccountSignKey } = await import("../src/crypto/accountTrust.ts");
 const { taskControlArgs, deriveTaskTitle } = await import("../src/harbor/index.ts");
-const { parseTaskSpec } = await import("../src/remote/relayClient.ts");
+const { parseTaskSpec, RelayClient } = await import("../src/remote/relayClient.ts");
 const { addPendingCloud, loadPendingCloud, savePendingCloud } = await import("../src/routines/store.ts");
 
 // Inline replica of the app signer (client/services/accountSign.ts) — the same one
@@ -164,4 +164,12 @@ test("task gate: no pinned account key ⇒ refused", () => {
   const r = authorizeControl(TERM, "task_submit", args, sign(MK, { termId: TERM, ts, action: "task_submit", args }), ts);
   assert.equal(r.ok, false);
   assert.match(r.message ?? "", /re-link/i);
+});
+
+// A live spawn only announces `task_spawned` after the child terminal actually registers on
+// the relay. awaitRegistered() is that gate: with no relay reachable it must REJECT (not hang)
+// so spawnLiveTask reports task_spawn_error instead of pointing the app at a dead terminal.
+test("relay awaitRegistered rejects on timeout when the terminal never registers", async () => {
+  const relay = new RelayClient({} as any, { termId: "task-never", label: "t" });
+  await assert.rejects(relay.awaitRegistered(50), /timed out/i);
 });

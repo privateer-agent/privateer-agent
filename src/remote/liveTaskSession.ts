@@ -43,6 +43,10 @@ export interface LiveTaskDeps {
 // abandoned spawn can't run the account meter or hold resources forever).
 const ATTACH_GRACE_MS = 180_000; // 3 min to attach after spawn
 const MAX_LIFETIME_MS = 30 * 60_000; // 30 min absolute cap
+// How long to wait for the spawned terminal to actually register on the relay before we give
+// up and report the spawn as failed. `start()` resolves before the socket opens, so without
+// this confirmation the harbor would announce a terminal the app can never attach to.
+const REGISTER_TIMEOUT_MS = 20_000;
 
 export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps): Promise<LiveTaskHandle> {
   const cwd = spec.cwd && spec.cwd.trim() ? spec.cwd : process.cwd();
@@ -213,6 +217,11 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   relay = new RelayClient(bridge.callbacks, { termId, label });
   bridge.attachRelay(relay);
   await relay.start();
+  // start() resolves before the socket registers; confirm the terminal is actually live on
+  // the relay BEFORE returning (→ the harbor announces task_spawned). Rejects on a hard
+  // failure (e.g. the concurrency cap) or timeout → the catch below tears down and propagates,
+  // so the harbor reports task_spawn_error instead of pointing the app at a dead terminal.
+  await relay.awaitRegistered(REGISTER_TIMEOUT_MS);
 
   // Reap if nobody ever attaches, and cap the absolute lifetime regardless.
   attachTimer = setTimeout(() => { if (!attached) void stop(); }, ATTACH_GRACE_MS);
