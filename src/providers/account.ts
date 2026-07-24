@@ -80,7 +80,9 @@ const VALID_TIERS = new Set<PrivacyTier>([
 // upgrades it to tee-verified live via attestation (accountPosture). Everything
 // else with no server signal is "standard": we don't assert ZDR we can't back.
 function tierFromPrefix(modelId: string): PrivacyTier {
-  return modelId.startsWith("near/") || modelId.startsWith("tinfoil/") ? "tee-unverified" : "standard";
+  return modelId.startsWith("near/") || modelId.startsWith("tinfoil/") || modelId.startsWith("phala/")
+    ? "tee-unverified"
+    : "standard";
 }
 
 function normalizeTier(tier: string | undefined, modelId: string): PrivacyTier {

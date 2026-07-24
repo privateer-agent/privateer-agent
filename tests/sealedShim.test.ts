@@ -9,10 +9,10 @@ import {
 
 // ── model → sealed provider classification ────────────────────────────────────
 
-test("sealedProviderFor classifies tinfoil, not others", () => {
+test("sealedProviderFor classifies the sealed providers, not the others", () => {
   assert.equal(sealedProviderFor("tinfoil/glm-5-2"), "tinfoil");
+  assert.equal(sealedProviderFor("phala/deepseek-v4"), "phala"); // ACI E2EE, Node client ported
   assert.equal(sealedProviderFor("near/deepseek-v4"), null); // NEAR: attested-TLS, not sealed
-  assert.equal(sealedProviderFor("phala/whatever"), null); // no Node client yet
   assert.equal(sealedProviderFor("anthropic/claude-sonnet-4.6"), null);
   assert.equal(sealedProviderFor("openai/gpt-5.5"), null);
 });

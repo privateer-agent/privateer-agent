@@ -1,13 +1,15 @@
 # Green shield for proxied Tinfoil — EHBP end-to-end encryption
 
-> **Status (2026-07-24): client path implemented in privateer-agent, behind
-> `PRIVATEER_SEALED=1`, pending a live end-to-end run.** The server relay
-> (`treeview/server/routes/sealed.js`) and the treeview app's EHBP client already
-> shipped. This repo now has the Node client: `src/providers/sealedShim.ts` (loopback
-> EHBP shim over Tinfoil `SecureClient`), sealed model routing + posture flip in
-> `src/providers/account.ts`, tests in `tests/sealedShim.test.ts`. What remains is the
-> live verification checklist at the bottom — no sealed byte has crossed a real relay
-> from this CLI yet, so the flag stays off by default.
+> **Status (2026-07-24): client path implemented in privateer-agent for BOTH sealed
+> providers (Tinfoil EHBP + Phala ACI E2EE), behind `PRIVATEER_SEALED=1`, pending a live
+> end-to-end run.** The server relay (`treeview/server/routes/sealed.js`, provider-generic)
+> and the treeview app's clients already shipped. This repo now has the Node clients:
+> `src/providers/sealedShim.ts` (loopback shim + provider dispatch), `src/providers/phalaSeal.ts`
+> (ACI E2EE + TDX-quote attestation) over the vendored `src/providers/phala/aci-verifier/`,
+> sealed routing + posture flip in `src/providers/account.ts`; tests in
+> `tests/sealedShim.test.ts` + `tests/phalaE2ee.test.ts` (full seal/open round-trip on Node
+> Web Crypto). What remains is the live checklist at the bottom — no sealed byte has crossed a
+> real relay from this CLI yet, so the flag stays off by default.
 
 ## The problem, in one line
 
@@ -197,8 +199,17 @@ Mirror `docs/mcp-live-verify.md`'s discipline — each step fails in exactly one
 - **Per-enclave attestation caching / rotation:** enclaves rotate keys on redeploy. How
   long do we cache `K`, and does the shim re-verify on `tlsKeyMatched`-style mismatch
   (compare to the direct path's fresh-handshake note, `attestation.ts:176-179`)?
-- **`phala/*`:** does it expose the same EHBP/HPKE binding, or only `tinfoil/*`? Keep Phala
-  on `tee-unverified` until confirmed.
+- ~~**`phala/*`:** does it qualify?~~ **Ported + wired.** Phala uses ACI E2EE
+  (`x25519-aes-256-gcm-hkdf-sha256`, per-field, not whole-body HPKE) with a two-layer
+  attestation (`verifyReportBinding` + a TDX quote via `@phala/dcap-qvl`, fail-secure
+  `requireQuote`). Client is `src/providers/phalaSeal.ts` over the vendored `aci-verifier/`;
+  posture goes green off `attestPhala()`. Env: `PRIVATEER_PHALA_REQUIRE_QUOTE` / `_PCCS_URL` /
+  `_TCB`. **Server billing wired** (`treeview/server/routes/sealed.js`): the relay injects
+  `stream_options.include_usage=true` on streaming Phala requests (content-blind) so the
+  cleartext `usage` it bills from always arrives → `calcPhalaCost` → `chargeUsd`. **Models
+  surfaced**: all Phala TEE models load from `/v1/models` and are default-ON
+  (`SEALED_MODELS_ENABLED=0` kill-switches; loader returns [] without `PHALA_API_KEY`).
+  Remaining before flag-on-by-default: a live gateway round-trip.
 - **pi-privacy home:** ~~HPKE-match verifier upstream vs. local~~ **Decided: local.** The
   HPKE-key-match is performed by the Tinfoil SDK inside `SecureClient.ready()` (it verifies
   the attestation bundle and binds the enclave HPKE key it seals to). `accountPosture` treats
@@ -214,10 +225,17 @@ Mirror `docs/mcp-live-verify.md`'s discipline — each step fails in exactly one
   from the body model + sets `X-Sealed-Model` (full id, for the relay's cleartext billing) +
   forwards Pi's account bearer, then `client.fetch` seals it and the decrypted stream pipes
   back.
-- **`src/providers/account.ts`** — `register()` gives `tinfoil/*` a per-model `baseUrl` at the
-  shim once it's listening (re-registers on shim-ready); `accountPosture()` returns
-  `tee-verified` iff `attestSealed()` (== the shared client's `ready()`) succeeds, else
-  `tee-unverified` with the reason. Both gated on `sealedEnabled()` (`PRIVATEER_SEALED=1`).
+- **`src/providers/phalaSeal.ts`** + **`src/providers/phala/aci-verifier/`** (vendored,
+  zero-dep, pure Web Crypto) — the Phala path. `handlePhala` in the shim attests, opens a
+  per-call ACI E2EE channel, seals the request's content fields, POSTs with `X-E2EE-*` +
+  `X-Sealed-Model` + bearer, then decrypts the response (`openChunk` per SSE frame, or `open`
+  for a buffered body) and re-emits cleartext OpenAI to Pi. Two-layer attestation
+  (`verifyReportBinding` + TDX quote via `@phala/dcap-qvl`, `requireQuote` default true).
+- **`src/providers/account.ts`** — `register()` gives `tinfoil/*` **and `phala/*`** a per-model
+  `baseUrl` at the shim once it's listening (re-registers on shim-ready); `accountPosture()`
+  returns `tee-verified` iff `attestSealed()` succeeds (Tinfoil: `SecureClient.ready()`;
+  Phala: `attestPhala()`), else `tee-unverified` with the reason. Both gated on
+  `sealedEnabled()` (`PRIVATEER_SEALED=1`).
 - **Off by default:** flag off → sealed models keep the cleartext `/api/agent/v1` path and the
   honest yellow badge, exactly as before. Nothing about the working path changes until the flag
   flips.

@@ -31,12 +31,14 @@ import http from "node:http";
 import { Readable } from "node:stream";
 import { SecureClient } from "tinfoil";
 import { serverBaseUrl } from "../auth/privateer.ts";
+import { attestPhala, phalaSealedFetch } from "./phalaSeal.ts";
+import { iterateSSE } from "./phala/sse.ts";
 
-// Providers whose enclave supports EHBP body encryption + client-verified
-// attestation, and for which we have a Node client. Phala also qualifies (the
-// treeview app ships a PhalaProvider) but its E2EE client isn't ported to Node
-// here yet, so it stays on the confidential (unsealed) path for now.
-export type SealedProvider = "tinfoil";
+// Providers whose enclave supports application-layer body encryption + client-verified
+// attestation, and for which we have a Node client: Tinfoil (EHBP) and Phala (ACI
+// E2EE). NEAR does NOT — it's attested TLS only, so it stays the confidential
+// (unsealed) path, not sealed. See docs/tee-verified-tinfoil-ehbp.md §12.
+export type SealedProvider = "tinfoil" | "phala";
 
 // Sealed mode is OFF until verified end-to-end against a live relay (a real EHBP
 // round-trip needs the deployed relay + TINFOIL_API_KEY; see the live checklist in
@@ -48,9 +50,11 @@ export function sealedEnabled(): boolean {
 }
 
 // The sealed provider a model id routes through, or null if it isn't a sealed
-// model (or its client isn't available here).
+// model (or its client isn't available here). Mirrors the server's prefix routing.
 export function sealedProviderFor(modelId: string): SealedProvider | null {
-  return modelId.startsWith("tinfoil/") ? "tinfoil" : null;
+  if (modelId.startsWith("tinfoil/")) return "tinfoil";
+  if (modelId.startsWith("phala/")) return "phala";
+  return null;
 }
 
 // The blind-relay base for a provider — SecureClient fetches `${base}/attestation`
@@ -98,10 +102,12 @@ export interface SealedAttestation {
   error?: string;
 }
 
-// Drive the SecureClient's attestation (the SAME client the shim seals with). A
-// successful ready() is a quote we verified client-side, bound to the HPKE key we
-// encrypt to — that earns tee-verified.
+// Drive the provider's client-side attestation (the SAME client/keyset the shim
+// seals with). A green result is a quote we verified ourselves, bound to the key we
+// encrypt to — that earns tee-verified. Tinfoil: SecureClient.ready() (HPKE-key
+// match). Phala: verifyReportBinding + TDX quote (see phalaSeal.ts).
 export async function attestSealed(provider: SealedProvider): Promise<SealedAttestation> {
+  if (provider === "phala") return attestPhala();
   try {
     await ready(provider);
     return { ok: true, enclave: client(provider).getEnclaveURL() };
@@ -154,7 +160,7 @@ export function buildForward(
 
 // ── Loopback HTTP shim ────────────────────────────────────────────────────────
 
-const PATH_RE = /^\/(tinfoil)\/v1\/chat\/completions$/;
+const PATH_RE = /^\/(tinfoil|phala)\/v1\/chat\/completions$/;
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 let shimBase: string | null = null;
@@ -210,11 +216,17 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return;
   }
   const provider = m[1] as SealedProvider;
-
   const raw = await readBody(req);
-  const auth = req.headers["authorization"];
-  const plan = buildForward(provider, raw.toString("utf8"), typeof auth === "string" ? auth : undefined);
+  const authHeader = typeof req.headers["authorization"] === "string" ? req.headers["authorization"] : undefined;
 
+  if (provider === "phala") {
+    await handlePhala(raw.toString("utf8"), authHeader, res);
+    return;
+  }
+
+  // Tinfoil (EHBP): SecureClient.fetch seals/opens transparently, so we just pass the
+  // body through and pipe the decrypted response.
+  const plan = buildForward(provider, raw.toString("utf8"), authHeader);
   await ready(provider);
   const upstream = await client(provider).fetch(plan.url, {
     method: "POST",
@@ -222,10 +234,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     body: plan.body,
   });
 
-  const headers: Record<string, string> = {
+  res.writeHead(upstream.status, {
     "Content-Type": upstream.headers.get("content-type") ?? "application/json",
-  };
-  res.writeHead(upstream.status, headers);
+  });
   if (upstream.body) {
     const nodeStream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
     // If Pi hangs up mid-stream, stop pulling from the enclave.
@@ -237,6 +248,41 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   } else {
     res.end(await upstream.text());
   }
+}
+
+// Phala (ACI E2EE): fields are encrypted individually, so unlike Tinfoil we must
+// decrypt the response with the per-call channel — chunk by chunk for SSE, or the
+// whole JSON when non-streaming — and re-emit cleartext OpenAI to Pi.
+async function handlePhala(
+  rawBody: string,
+  authHeader: string | undefined,
+  res: http.ServerResponse,
+): Promise<void> {
+  const ac = new AbortController();
+  res.on("close", () => ac.abort());
+  const { res: up, channel, streaming } = await phalaSealedFetch(rawBody, authHeader, ac.signal);
+
+  if (!up.ok) {
+    res.writeHead(up.status, { "Content-Type": up.headers.get("content-type") ?? "application/json" });
+    res.end(await up.text());
+    return;
+  }
+
+  if (streaming && up.body) {
+    res.writeHead(up.status, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform" });
+    for await (const obj of iterateSSE(up.body as ReadableStream<Uint8Array>)) {
+      const opened = await channel.openChunk(obj as Record<string, unknown>);
+      res.write(`data: ${JSON.stringify(opened)}\n\n`);
+    }
+    res.write("data: [DONE]\n\n");
+    res.end();
+    return;
+  }
+
+  // Non-streaming: decrypt the single JSON body.
+  const opened = await channel.open((await up.json()) as Record<string, unknown>);
+  res.writeHead(up.status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(opened));
 }
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
