@@ -46,6 +46,27 @@ const privacy = makePiPrivacyExtension({
     if (provider !== "privateer") return undefined; // pi-privacy handles its own providers
     return (await accountPosture(modelId)).tier;
   },
+  // pi-privacy 0.8 added an INGEST gate: credentials arriving in a tool result are
+  // redacted before they enter context (they'd otherwise be re-sent every turn and
+  // written to the session file on disk). We already redact tool output in
+  // src/ext/permissionGate.ts, so its default "warn" would put an interactive prompt
+  // in front of something this app has always handled silently — "redact" keeps our
+  // UX and still takes the added coverage.
+  //
+  // The two redactors are COMPLEMENTARY, not duplicative, which is why we run both:
+  // ours masks the configured provider keys by exact value (from env/config) plus the
+  // provider-specific shapes (sk-/AIza/xai-/gsk_/csk-/vapi_/fw_/Z.ai, auth headers);
+  // pi-privacy's catches what shows up in USER code and shell output — AWS AKIA/ASIA,
+  // GitHub gh[pousr]_, JWTs, PEM private-key blocks, Slack, Stripe — none of which
+  // our patterns match.
+  //
+  // Order between the two is NOT guaranteed: pi discovers extensions with a bare
+  // readdirSync and never sorts, so it's filesystem-dependent (alphabetical on this
+  // box today, not by contract). "redact" makes that moot — both handlers run
+  // unconditionally and each masks its own patterns, so the surviving content is the
+  // same either way. Under "warn" the order WOULD matter, since it decides whether
+  // the prompt is raised on a raw key or one we already masked.
+  toolResultPolicy: "redact",
 });
 
 export default function privateerPrivacy(pi: any): void {
