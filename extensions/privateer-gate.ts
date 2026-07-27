@@ -28,8 +28,10 @@ import { makeSkillsControl } from "../src/remote/skillsControl.ts";
 import { agentDir } from "../src/config/paths.ts";
 import { agentVersion } from "../src/config/version.ts";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import * as priv from "../src/auth/privateer.ts";
 import { paletteFor } from "../src/ui/palette.ts";
+import { noQuarterActive, setNoQuarter } from "../src/permissions/noQuarter.ts";
 import type { PermissionMode } from "../src/config/permissionMode.ts";
 
 const MODES: PermissionMode[] = ["default", "acceptEdits", "bypass", "plan"];
@@ -169,6 +171,17 @@ async function pickModelRemote(filter: string): Promise<void> {
 // the REPL's runCommand fall-through.
 async function runRemoteCommand(text: string): Promise<void> {
   const line = text.trim();
+  // No quarter is a PHYSICAL-terminal action, like /remote-access. It's stronger than
+  // any mode — it also switches off the dangerous-command denylist and the protected-
+  // file guard — so a remote controller must not be able to reach it. (The app's own
+  // no_quarter toggle covers driven turns: ModeGate re-decides those through
+  // decideAuto(req, "bypass", …), so it IS /mode bypass — never weaker. Dangerous and
+  // destructive actions sit above bypass, so they come back to the phone for an
+  // explicit Allow there, exactly as bypass surfaces them locally.)
+  if (line === "/no-quarter" || line.startsWith("/no-quarter ")) {
+    relay?.sendNotice("/no-quarter is terminal-only — run it at the machine, or use the app's own no-quarter toggle.");
+    return;
+  }
   if (line.startsWith("/model ")) { await switchModelRemote(line.slice(7)); return; }
   if (line === "/model" || line === "/models" || line.startsWith("/models ")) {
     const filter = line.startsWith("/models ") ? line.slice(8).trim().toLowerCase() : "";
@@ -213,7 +226,9 @@ function advertiseCommands(): { name: string; description?: string }[] {
       })
       .filter(Boolean);
   } catch { /* no commands registered yet */ }
-  const seen = new Set(builtins.map((c) => c.name));
+  // Terminal-only commands are withheld rather than advertised-then-refused, so the
+  // app's composer never offers something it can't run. See runRemoteCommand.
+  const seen = new Set([...builtins.map((c) => c.name), "/no-quarter"]);
   return [...builtins, ...ext.filter((c: any) => !seen.has(c.name))];
 }
 
@@ -248,6 +263,61 @@ function refreshRemoteStatus(): void {
 function setRemoteState(s: typeof remoteState): void {
   remoteState = s;
   refreshRemoteStatus();
+}
+
+// ── no quarter (shift+tab) ────────────────────────────────────────────────────
+// The "step away from the keyboard" switch. On, the gate is fully lowered for the
+// rest of the session: every action auto-approves with no prompt, so a long task
+// runs to completion instead of stalling on the next approval. Off by default and
+// reversible with the same key; the state itself lives in src/permissions/noQuarter.ts
+// (shared with the launch flag and inherited by subagent children).
+//
+// The footer carries a permanent RED indicator while it's on — this is the one
+// setting that turns the whole moat off, so it must never be quietly in effect.
+const NO_QUARTER_STATUS_KEY = "privateer:no-quarter";
+
+function refreshNoQuarterStatus(): void {
+  const ui = uiRef;
+  if (!ui?.setStatus) return;
+  if (!noQuarterActive()) {
+    ui.setStatus(NO_QUARTER_STATUS_KEY, undefined);
+    return;
+  }
+  const p = paletteFor(ui.theme);
+  ui.setStatus(
+    NO_QUARTER_STATUS_KEY,
+    `${p.RED}${p.BOLD}⚑ no quarter — permission gate OFF${p.RESET} ${p.DIM}· shift+tab to raise the moat${p.RESET}`,
+  );
+}
+
+// Flip the state and tell the user, loudly on the way down. Takes effect from the
+// next gated action — an approval already on screen still needs an answer.
+function applyNoQuarter(on: boolean, ui: any): void {
+  setNoQuarter(on);
+  refreshNoQuarterStatus();
+  ui?.notify?.(
+    on
+      ? "⚑ No quarter — the permission gate is OFF for this session. Every action (shell, edits, destructive tools, out-of-cwd, protected files) now runs without asking. shift+tab to raise the moat again."
+      : "⚓ Moat raised — the permission gate is back on.",
+    on ? "warning" : "info",
+  );
+}
+
+// shift+tab, intercepted at the raw-input layer. Pi reserves that chord for
+// `app.thinking.cycle`, so pi.registerShortcut("shift+tab") would be dropped as a
+// conflict — a TUI input listener runs ahead of every component instead, and
+// consuming the key stops it reaching the thinking-level cycler. (Thinking level
+// stays reachable from /settings, or by binding app.thinking.cycle to another key.)
+let unsubscribeKeys: (() => void) | undefined;
+
+function bindNoQuarterKey(ui: any): void {
+  if (typeof ui?.onTerminalInput !== "function") return; // older Pi / non-TUI mode
+  unsubscribeKeys?.(); // a session replacement clears listeners — rebind, never double-bind
+  unsubscribeKeys = ui.onTerminalInput((data: string) => {
+    if (!matchesKey(data, "shift+tab")) return undefined;
+    applyNoQuarter(!noQuarterActive(), ui);
+    return { consume: true };
+  });
 }
 
 // Tear down the relay and clear the indicator. Used by `/remote-access off` AND by
@@ -353,10 +423,11 @@ const gate = makePermissionGate({
   localAsk,
   getRemote: bridge.getRemote,
   getNoQuarter: bridge.getNoQuarter,
-  // `--no-quarter` at launch (see bin/privateer-launch.mjs) sets PRIVATEER_NO_QUARTER
-  // and opts this whole session — TUI and any subagent children that inherit the env —
-  // out of the gate entirely: every action auto-approves, no prompt.
-  getSkipAllPermissions: () => process.env.PRIVATEER_NO_QUARTER === "1",
+  // Session-wide TOTAL bypass: every action auto-approves, no prompt. Set either by
+  // `--no-quarter` at launch (see bin/privateer-launch.mjs, which exports
+  // PRIVATEER_NO_QUARTER) or by shift+tab mid-session — both land in the same state,
+  // which subagent children inherit through the env. See src/permissions/noQuarter.ts.
+  getSkipAllPermissions: noQuarterActive,
   remoteAsk: bridge.remoteAsk,
 });
 
@@ -401,6 +472,13 @@ export default function privateerControl(pi: any): void {
     if (ctx?.modelRegistry) modelReg = ctx.modelRegistry;
     if (!currentSpec && ctx?.model) currentSpec = modelSpec(ctx.model);
     refreshRemoteStatus();
+    // shift+tab → no quarter, and the red footer indicator when it's already on (a
+    // `--no-quarter` launch, or a session replacement mid-run). Interactive TUI only:
+    // headless modes and subagent children have no terminal to listen to.
+    if (ctx?.mode === "tui" && ctx?.ui) {
+      bindNoQuarterKey(ctx.ui);
+      refreshNoQuarterStatus();
+    }
     if (ctx?.mode && HEADLESS.has(ctx.mode) && (process.env.PRIVATEER_MODE ?? "") === "") {
       mode = "bypass";
     }
@@ -440,6 +518,20 @@ export default function privateerControl(pi: any): void {
       if (m && MODES.includes(m)) mode = m;
       else if (m) return ctx.ui?.notify?.(`unknown mode "${m}" — use ${MODES.join(" | ")}`, "warning");
       ctx.ui?.notify?.(`permission mode: ${mode}`, "info");
+    },
+  });
+
+  // The typed equivalent of shift+tab, for anyone who'd rather not trust a chord with
+  // the whole moat. Deliberately NOT reachable from the app — see runRemoteCommand.
+  pi.registerCommand?.("no-quarter", {
+    description: "Lower the moat for this session — run unattended with no approval prompts: /no-quarter [on|off]",
+    handler: (args: string, ctx: any) => {
+      if (ctx?.ui) uiRef = ctx.ui;
+      const arg = String(args ?? "").trim().toLowerCase();
+      if (arg && arg !== "on" && arg !== "off") {
+        return ctx.ui?.notify?.(`usage: /no-quarter [on|off] (currently ${noQuarterActive() ? "on" : "off"})`, "warning");
+      }
+      applyNoQuarter(arg ? arg === "on" : !noQuarterActive(), ctx.ui);
     },
   });
 

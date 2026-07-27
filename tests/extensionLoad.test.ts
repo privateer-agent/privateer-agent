@@ -71,3 +71,50 @@ test("extensions: privateer-connect loads under Pi's real loader and registers /
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// Same real-loader check for the gate — the extension that owns the moat, and the one
+// that reaches furthest outside itself: it pulls in @earendil-works/pi-tui (for the
+// shift+tab no-quarter chord) on top of the relay/bridge tree. Any of those failing to
+// resolve under Pi's jiti loader would take the whole permission gate down with it, and
+// a direct tsx import in the other tests wouldn't notice.
+test("extensions: privateer-gate loads under Pi's real loader and registers /no-quarter", async () => {
+  const home = mkdtempSync(join(tmpdir(), "priv-extload-gate-"));
+  const agentDir = join(home, "agent");
+  const extDir = join(agentDir, "extensions");
+  mkdirSync(extDir, { recursive: true });
+  process.env.PRIVATEER_HOME = home;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  // Load as a subagent child. Same module graph and the same registerCommand calls,
+  // but the top-level session skips startParentApprovalRelay — whose channel watcher
+  // is a live timer that would keep the test runner's event loop open forever.
+  const wasChild = process.env.PI_SUBAGENT_CHILD;
+  process.env.PI_SUBAGENT_CHILD = "1";
+
+  try {
+    const target = join(REPO, "extensions", "privateer-gate.ts");
+    writeFileSync(
+      join(extDir, "privateer-gate.ts"),
+      `export { default } from ${JSON.stringify(pathToFileURL(target).href)};\n`,
+    );
+
+    const { createAgentSessionServices } = await import("@earendil-works/pi-coding-agent");
+    const services = await createAgentSessionServices({ cwd: REPO, agentDir });
+    const loaded = services.resourceLoader.getExtensions();
+
+    const errors = (loaded.errors ?? []) as Array<{ path?: string; error?: unknown }>;
+    assert.equal(errors.length, 0, `extension load errors: ${JSON.stringify(errors)}`);
+
+    const mine = loaded.extensions.filter((e: any) => String(e.path).includes("privateer-gate"));
+    assert.equal(mine.length, 1, "privateer-gate did not load");
+
+    const commands = (mine[0] as any).commands;
+    const names = commands instanceof Map ? [...commands.keys()] : Object.keys(commands ?? {});
+    for (const cmd of ["mode", "no-quarter", "remote-access"]) {
+      assert.ok(names.includes(cmd), `expected /${cmd}, got: ${names.join(", ") || "(none)"}`);
+    }
+  } finally {
+    if (wasChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = wasChild;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

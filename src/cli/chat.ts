@@ -11,6 +11,7 @@
 import "../boot.ts"; // env + attestation dispatcher, before any Pi import
 import { fileURLToPath } from "node:url"; // builtin, safe pre-boot
 import { cliPalette } from "../ui/palette.ts"; // no Pi deps → safe pre-boot
+import { noQuarterActive, setNoQuarter } from "../permissions/noQuarter.ts"; // no Pi deps → safe pre-boot
 import type { GateController } from "../ext/permissionGate.ts"; // type-only → erased, safe pre-boot
 
 // This lean REPL has no Pi TUI (and so no Theme), so it detects the terminal background
@@ -307,8 +308,9 @@ async function main() {
     },
     getRemote: bridge.getRemote,
     getNoQuarter: bridge.getNoQuarter,
-    // `--no-quarter` at launch (env PRIVATEER_NO_QUARTER) → total gate bypass, no prompts.
-    getSkipAllPermissions: () => process.env.PRIVATEER_NO_QUARTER === "1",
+    // Total gate bypass, no prompts — from `--no-quarter` at launch or shift+tab /
+    // `/no-quarter` mid-session. One shared state (../permissions/noQuarter.ts).
+    getSkipAllPermissions: noQuarterActive,
     remoteAsk: bridge.remoteAsk,
     // Subagents (and their child-only intercom tools) can't be driven from the app
     // yet — pi-subagents runs each in a child session whose gate/UI bypass the relay,
@@ -322,7 +324,37 @@ async function main() {
     },
   };
 
+  // ── no quarter (shift+tab) ──────────────────────────────────────────────────
+  // The "step away from the keyboard" switch: lower the moat for the rest of the
+  // session so a long task runs to completion instead of stalling on the next
+  // approval prompt. Same state the `--no-quarter` launch flag sets, and the same
+  // chord the full TUI uses (extensions/privateer-gate.ts). Reversible with the
+  // same key; takes effect from the next gated action, so an approval already on
+  // screen still needs an answer.
+  function applyNoQuarter(on: boolean): void {
+    setNoQuarter(on);
+    flushOut(); // land streamed output above the notice
+    console.log(
+      on
+        ? `\n${RED}⚑ No quarter — the permission gate is OFF for this session.${RESET}\n` +
+          `${DIM}  Every action (shell, edits, destructive tools, out-of-cwd, protected files) runs without asking.\n` +
+          `  shift+tab (or /no-quarter off) raises the moat again.${RESET}`
+        : `\n${GREEN}⚓ Moat raised — the permission gate is back on.${RESET}`,
+    );
+  }
+
+  // readline already emits keypress events for a TTY input, so we just listen. Node
+  // decodes shift+tab (CSI Z) as {name: "tab", shift: true}. We don't swallow it —
+  // readline still runs its own tab handler, which for a non-`@mention` line
+  // completes to nothing.
+  if (process.stdin.isTTY) {
+    process.stdin.on("keypress", (_s: string, key: any) => {
+      if (key?.name === "tab" && key.shift && !key.ctrl && !key.meta) applyNoQuarter(!noQuarterActive());
+    });
+  }
+
   console.log(`${DIM}privateer-agent — lean REPL. Loading ${provider}/${modelId}…${RESET}`);
+  if (noQuarterActive()) applyNoQuarter(true); // launched with --no-quarter: say so up front
 
   const services = await createAgentSessionServices({
     cwd,
@@ -533,8 +565,9 @@ async function main() {
       : `${DIM}Not signed in. /login to enable remote access & the account provider.${RESET}`,
   );
 
-  const HELP = "Commands: /remote-access <on|off>  /login  /model <provider/id>  /models [filter]  /verify  /mode <…>  /quit";
+  const HELP = "Commands: /remote-access <on|off>  /login  /model <provider/id>  /models [filter]  /verify  /mode <…>  /no-quarter [on|off]  /quit";
   console.log(`${DIM}Ready. Type a prompt — reference a file with @path (Tab completes). ${HELP}${RESET}`);
+  console.log(`${DIM}shift+tab toggles no quarter — unattended mode, no approval prompts.${RESET}`);
   await showPosture();
 
   // The available model catalog as sorted "provider/id" specs. Same source the
@@ -620,6 +653,24 @@ async function main() {
       console.log(items.length ? items.map((s) => `  ${s.name}${s.disabled ? ` ${DIM}(disabled)${RESET}` : ""}${s.editable ? "" : ` ${DIM}(read-only)${RESET}`} — ${s.description}`).join("\n") : `${DIM}No skills yet. Create them from the Privateer app.${RESET}`);
       return true;
     }
+    // The typed equivalent of shift+tab. A PHYSICAL-terminal action, like
+    // /remote-access: it's stronger than any mode (it also switches off the
+    // dangerous-command denylist and the protected-file guard), so a remote
+    // controller must not be able to reach it. The app's own no-quarter toggle
+    // covers driven turns and is `bypass` exactly — never weaker than /mode bypass.
+    if (line === "/no-quarter" || line.startsWith("/no-quarter ")) {
+      if (remote) {
+        relay?.sendNotice("/no-quarter is terminal-only — run it at the machine, or use the app's own no-quarter toggle.");
+        return true;
+      }
+      const arg = line.slice(11).trim().toLowerCase();
+      if (arg && arg !== "on" && arg !== "off") {
+        console.log(`${YELLOW}usage: /no-quarter [on|off] (currently ${noQuarterActive() ? "on" : "off"})${RESET}`);
+        return true;
+      }
+      applyNoQuarter(arg ? arg === "on" : !noQuarterActive());
+      return true;
+    }
     if (line.startsWith("/mode ")) { mode = line.slice(6).trim() as typeof mode; const m = `mode → ${mode}`; console.log(`${DIM}${m}${RESET}`); if (remote) relay?.sendNotice(m); return true; }
     // Bare /mode → the picker (remote) or a hint (local).
     if (line === "/mode") {
@@ -648,6 +699,7 @@ async function main() {
     const builtins = [
       { name: "/model", description: "Switch the model" },
       { name: "/mode", description: "Change the approval mode (default/acceptEdits/plan/bypass)" },
+      // /no-quarter is deliberately absent — terminal-only, see runCommand.
       { name: "/models", description: "List available models" },
       { name: "/extensions", description: "Manage installed Pi extensions" },
       { name: "/skills", description: "Manage the terminal's skills" },

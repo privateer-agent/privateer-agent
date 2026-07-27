@@ -179,6 +179,32 @@ test("no-quarter has no effect on local turns", async () => {
   assert.equal(g.asks(), 1); // local prompt still runs as usual
 });
 
+// No quarter must never be WEAKER than /mode bypass. The remote branch re-decides a
+// driven turn through decideAuto(req, "bypass", …), so the app's no-quarter toggle and
+// a local `/mode bypass` have to agree request-for-request — same decision AND the same
+// set of actions that still stop for an approval. Asserted over both answers, so a
+// change that quietly downgraded either side (or made one prompt where the other
+// doesn't) fails here rather than in someone's unattended run.
+test("remote no-quarter decides exactly as /mode bypass does", async () => {
+  const cases: PermissionRequest[] = [
+    edit,
+    bash("npm test"),
+    bash("rm -rf /"), // dangerous shell sits above bypass — still prompts, on both sides
+    { ...bash("drop everything"), alwaysAsk: true }, // ditto for destructive tools
+    { ...edit, detail: ".env", protected: true }, // bypass allows guarded files
+    { ...edit, detail: "/elsewhere/a.ts", outside: true, path: "/elsewhere/a.ts" },
+  ];
+  for (const answer of ["allow", "deny"] as AskOutcome[]) {
+    for (const req of cases) {
+      const local = makeGate("bypass", answer); // /mode bypass, typed at the terminal
+      const driven = makeGate("default", answer, true, true); // app-driven turn, no quarter on
+      const [d, l] = [await driven.gate.request(req), await local.gate.request(req)];
+      assert.equal(d, l, `decision differs for "${req.detail}" (answer=${answer})`);
+      assert.equal(driven.asks(), local.asks(), `prompt count differs for "${req.detail}" (answer=${answer})`);
+    }
+  }
+});
+
 // ── --no-quarter (getSkipAllPermissions): session-wide TOTAL bypass ──
 // The strongest override: set by the `--no-quarter` launch flag. Auto-allows every
 // request, above mode/allowlist/denylist AND the remote/plan branches — no prompt.

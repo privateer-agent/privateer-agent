@@ -388,20 +388,35 @@ live in plaintext in `config.json` on your machine, and every channel action is 
 Switch with **`/mode`**. Even in `bypass`, a danger filter blocks destructive shell commands,
 and protected files (`.env`, shell rc files…) are guarded — the gate is never fully off.
 
-### `--no-quarter` — lower the moat entirely
-
-For an unattended run in a directory and on a task you fully trust, launch with:
-
-```bash
-privateer --no-quarter
-```
+### No quarter — lower the moat entirely
 
 This is the one exception to "the gate is never fully off." It disables the permission
 gate for the **whole session** — every action auto-approves with no prompt, including
 destructive shell commands, out-of-cwd access, and protected files. Subagents spawned
-by the session inherit it. There is no `/mode` equivalent; it's a deliberate launch-time
-opt-out (env `PRIVATEER_NO_QUARTER=1`) and prints a red warning banner so it's never a
-surprise. Use it sparingly.
+after it goes on inherit it (env `PRIVATEER_NO_QUARTER=1`). Only for a directory and a
+task you fully trust.
+
+Three ways in, all the same switch:
+
+| | |
+|---|---|
+| **shift+tab** | toggle it mid-session — hit it and walk away, and the agent runs the task to the end instead of stopping at the next approval |
+| `/no-quarter [on\|off]` | the typed equivalent |
+| `privateer --no-quarter` | start a session with the moat already down |
+
+It's never quietly in effect: the launch flag prints a red warning banner, the toggle
+posts a warning to the transcript, and while it's on the footer carries a permanent red
+`⚑ no quarter — permission gate OFF` indicator. shift+tab again raises the moat.
+
+Toggling takes effect from the next gated action — an approval already on screen still
+needs an answer. It's a physical-terminal switch: a phone driving this terminal over
+`/remote-access` can't reach it. The app has its own no-quarter toggle for driven turns,
+which is `bypass` exactly — never less — so dangerous shell and destructive actions
+still surface an Allow there, precisely as they do under `/mode bypass` locally.
+
+> shift+tab is Pi's default "cycle thinking level" chord; Privateer takes it for this.
+> Thinking level is still under `/settings`, or bind `app.thinking.cycle` to another key
+> in `~/.privateer/agent/keybindings.json`.
 
 ## Extend it
 
@@ -428,6 +443,7 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 |---|---|
 | `/model` · `/models` | switch model; `/models` is a searchable picker with TEE/ZDR privacy shields |
 | `/mode` | switch permission mode |
+| `/no-quarter` | lower the moat for this session and run unattended (**shift+tab**) |
 | `/verify` | fetch and check the TEE attestation for the current model |
 | `/signin` · `/signout` | sign in to a Privateer account (device flow) / sign out |
 | `/remote-access` | link this terminal to the app and allow it to drive (off by default) |

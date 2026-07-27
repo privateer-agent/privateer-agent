@@ -38,6 +38,7 @@ export type Palette = {
   DIM: string; // secondary / muted prose
   GREEN: string; // success (connected, verified, context loaded)
   YELLOW: string; // warning (not-signed-in, unconfirmed, update available)
+  RED: string; // alarm (the moat lowered — no-quarter)
 };
 
 // Last-resort palette for when no theme is reachable (headless surfaces have no banner,
@@ -52,6 +53,7 @@ export const FALLBACK: Palette = {
   DIM: `${ESC}90m`,
   GREEN: `${ESC}32m`,
   YELLOW: `${ESC}33m`,
+  RED: `${ESC}31m`,
 };
 
 // Build a Palette from a Pi Theme. getFgAnsi(name) returns the raw SGR foreground escape
@@ -76,6 +78,7 @@ export function paletteFor(theme: any): Palette {
     DIM: g("dim", FALLBACK.DIM),
     GREEN: g("success", FALLBACK.GREEN),
     YELLOW: g("warning", FALLBACK.YELLOW),
+    RED: g("error", FALLBACK.RED),
   };
 }
 

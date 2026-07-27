@@ -60,6 +60,7 @@ if (NO_QUARTER) {
       "  ⚓ \x1b[1;31mNo quarter\x1b[0m — permission gate DISABLED for this session.",
       "     Every action (shell, edits, destructive tools, out-of-cwd) runs WITHOUT a prompt.",
       "     Only use this in a directory and with a task you fully trust.",
+      "     shift+tab (or /no-quarter off) raises the moat again.",
       "",
     ].join("\n") + "\n",
   );
