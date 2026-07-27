@@ -40,8 +40,9 @@ import {
 const DEFAULT_MODELS = [
   ACCOUNT_DEFAULT_MODEL_ID,
   ACCOUNT_NEAR_MODEL_ID,
-  "anthropic/claude-sonnet-4.6",
-  "openai/gpt-5.5",
+  "anthropic/claude-opus-5",
+  "anthropic/claude-sonnet-5",
+  "openai/gpt-5.6-sol",
   "deepseek/deepseek-v4-flash",
 ];
 

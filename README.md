@@ -210,7 +210,7 @@ export PRIVATEER_API_KEY=sk-priv-...      # Privateer developer API (privateer.p
 ```
 
 Pick a model with **`/model`** (browse each configured provider's live catalog) or pass one
-directly as `provider/model` — e.g. `openrouter/anthropic/claude-opus-4.8`,
+directly as `provider/model` — e.g. `openrouter/anthropic/claude-opus-5`,
 `ollama/qwen3-coder`, `nearai/zai-org/GLM-5.1-FP8`. Any OpenAI-compatible server (LM Studio,
 vLLM, llama.cpp) works as a custom provider — just give it a base URL.
 
