@@ -91,7 +91,7 @@ Most real workflows are near-linear, so this covers the 80% and stays honest abo
 
 ## 4. Screen inventory (mirrors the manager pattern)
 
-Entry point: a **Workflows** row on the "Privateer Routines" terminal card in
+Entry point: a **Workflows** row on the "Privateer Local Harbor" terminal card in
 `client/components/LiveTerminalsList.tsx`, next to Routines/Channels (all harbor-owned).
 
 | Screen | Purpose |

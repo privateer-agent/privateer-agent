@@ -42,7 +42,7 @@ content.
 
 ## 2. The harbor
 
-`src/harbor/index.ts` is the resident process behind the **"Privateer Routines"**
+`src/harbor/index.ts` is the resident process behind the **"Privateer Local Harbor"**
 terminal. It does two jobs:
 
 ### 2.1 Scheduled routines
@@ -59,7 +59,7 @@ terminal. It does two jobs:
 ### 2.2 App-facing management (over its always-on relay)
 Since the routines memory landed, the harbor **connects its relay whenever the
 account is signed in** (`syncRelay`), not only when a routine wants `relay` delivery.
-That makes the "Privateer Routines" terminal a general, always-reachable **management
+That makes the "Privateer Local Harbor" terminal a general, always-reachable **management
 terminal** — the app can create the very first routine, or configure channels, before
 either harbor has otherwise done anything.
 
@@ -171,7 +171,7 @@ agent, a `*_*` frame family, and a screen in the app:
 | Extensions | `extensionsControl.ts` (per interactive terminal) | `ExtensionsScreen` |
 | Live drive | `RemoteBridge` | `RemoteSessionScreen` |
 
-The **Channels** and **Routines** actions live on the "Privateer Routines" terminal
+The **Channels** and **Routines** actions live on the "Privateer Local Harbor" terminal
 card in `LiveTerminalsList`; Skills/Extensions/Drive live on interactive terminals.
 
 ### 5.3 The channels flow, end to end
@@ -373,7 +373,7 @@ Follow principle §7.4 — **one control, one frame family, one screen**:
 - **Control:** `src/remote/workflowsControl.ts` (UI-agnostic, no React/relay import,
   like `routinesControl.ts`): `list / save / remove / setEnabled / run`.
 - **Frames:** a `workflows_*` family, `workflowsControl` on the **harbor relay**.
-- **Screen:** a `WorkflowsScreen`, on the "Privateer Routines" terminal card next to
+- **Screen:** a `WorkflowsScreen`, on the "Privateer Local Harbor" terminal card next to
   Routines/Channels.
 
 ### 8.4 Security — the load-bearing part

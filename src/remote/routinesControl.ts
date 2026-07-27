@@ -9,7 +9,7 @@
  * Unlike those two, routines are owned by the HARBOR (not an interactive Pi
  * session): they live in routines.json (see routines/store.ts) and fire from the
  * resident scheduler. So this control is wired into the harbor's own relay
- * connection (the "Privateer Routines" terminal), not the REPL/TUI. Running a
+ * connection (the "Privateer Local Harbor" terminal), not the REPL/TUI. Running a
  * routine now is the one action that needs the harbor itself, so it's injected as
  * `runNow` rather than reaching back into the store.
  *

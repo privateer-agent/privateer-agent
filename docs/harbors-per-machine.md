@@ -17,7 +17,7 @@ Concrete failures with two harbors online (machine A + machine B):
    listed first; the second harbor can't be reached from this surface at all. The code
    comment even assumes "there's normally one per machine."
 2. **Identical labels.** Both harbors connect with the hardcoded relay label
-   `"Privateer Routines"` (`src/harbor/index.ts:344`), so `LiveTerminalsList` shows two
+   `"Privateer Local Harbor"` (`src/harbor/index.ts:344`), so `LiveTerminalsList` shows two
    indistinguishable rows until the user manually renames each.
 3. **Outbox results carry no origin.** The sealed envelope is
    `{ v, kind, name, status, at, content }` (`src/harbor/index.ts` `postOutbox`, decoded
@@ -81,8 +81,8 @@ No new storage, no new privacy surface — same data `/auth/sessions` already ex
 
   Each strip carries its own `familyId`/`machineId` into the navigation params so the
   drive session targets the right harbor.
-- The harbor keeps the constant relay label `"Privateer Routines"`; the app composes
-  `Privateer Routines · <machineLabel>`. Relay frame stays non-PII, user still sees the box.
+- The harbor keeps the constant relay label `"Privateer Local Harbor"`; the app composes
+  `Privateer Local Harbor · <machineLabel>`. Relay frame stays non-PII, user still sees the box.
 
 ### 3. Outbox origin — the one genuinely new field, and it is E2EE
 

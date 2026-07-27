@@ -263,7 +263,7 @@ export class Harbor {
   private syncRelay(): void {
     if (this.relay || this.relayTerminated) return;
     // Connect whenever the account is signed in — not only when a routine wants
-    // `relay` delivery — so the "Privateer Routines" terminal is always reachable
+    // `relay` delivery — so the "Privateer Local Harbor" terminal is always reachable
     // from the app for management (including creating the very first routine).
     if (!hasCredentials()) return;
     this.relay = new RelayClient(
@@ -352,7 +352,10 @@ export class Harbor {
           this.controllerAttached = false;
         },
       },
-      { termId: routineRelayId(), label: "Privateer Routines" },
+      // The name the app shows for this terminal when it has nothing better (no
+      // machine label yet). "Local Harbor" is the product name for the always-on
+      // agent on the user's own machine — as opposed to hosted Harbor.
+      { termId: routineRelayId(), label: "Privateer Local Harbor" },
     );
     void this.relay.start();
     log("relay connection starting (account signed in — routines terminal reachable from the app)");

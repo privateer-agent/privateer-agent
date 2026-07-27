@@ -31,7 +31,7 @@ callbacks firing, the adapter really spawning a server, and MCP tools passing th
 - A computer signed in to Privateer with the harbor running: `privateer harbor`
   (or `privateer harbor install` for the always-on service).
 - The phone or web app signed in to the **same account**, with that machine linked.
-- The harbor's terminal appears in the app as **Privateer Routines** (`routines-…`).
+- The harbor's terminal appears in the app as **Privateer Local Harbor** (`routines-…`).
 
 Useful throughout — watch the harbor while you drive from the phone:
 

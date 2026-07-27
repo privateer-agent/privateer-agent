@@ -227,6 +227,12 @@ export interface RelayCallbacks {
 }
 
 const RECONNECT_MS = 3000;
+// Retry cadence after the relay REFUSES us (4xx — in practice the plan's live-agent
+// cap). Slow, because only an account change can clear it, but not never: the harbor
+// should come up on its own once a slot frees. Kept well under the server's denial
+// record TTL so the app's "blocked" row stays warm between attempts rather than
+// flickering in and out of the plan-limit state.
+const REFUSED_RECONNECT_MS = 60_000;
 // File-transfer ceilings for app→CLI attachments. The app enforces its own caps
 // before sending; these are a defensive backstop so a controller can't exhaust
 // memory with a lying `size` or a flood of concurrent transfers.
@@ -285,13 +291,15 @@ export class RelayClient {
   private closed = false;
   private connecting = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  // Last refusal reason reported, so a 4xx is logged once instead of on every retry.
+  private refusal: string | null = null;
   // Ordered delta buffer (text/reasoning) coalesced into one frame per flush.
   private bufKind: "text" | "reasoning" | null = null;
   private buf = "";
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
   // Stable for this process so reconnects keep the same terminal identity. Callers
   // may pass a persisted id/label (e.g. the routines harbor, so it shows up as one
-  // recognizable "Privateer Routines" terminal across restarts instead of a fresh
+  // recognizable "Privateer Local Harbor" terminal across restarts instead of a fresh
   // random one each time).
   private readonly termId: string;
   private readonly label: string;
@@ -388,7 +396,19 @@ export class RelayClient {
         body: JSON.stringify({ role: "agent", termId: this.termId, label: this.label }),
       });
       if (!res.ok) {
-        const e: Error & { status?: number } = new Error(`relay ticket HTTP ${res.status}`);
+        // Carry the server's reason, not just the status. A 403 here is almost always
+        // the plan's live-agent cap, and a bare "relay ticket HTTP 403" in a harbor log
+        // tells the operator nothing about which knob to turn.
+        let detail = "";
+        try {
+          const body = (await res.json()) as { message?: string; code?: string };
+          detail = body?.message || body?.code || "";
+        } catch {
+          /* non-JSON body — the status stands on its own */
+        }
+        const e: Error & { status?: number } = new Error(
+          detail ? `relay ticket HTTP ${res.status}: ${detail}` : `relay ticket HTTP ${res.status}`,
+        );
         e.status = res.status;
         throw e;
       }
@@ -404,6 +424,7 @@ export class RelayClient {
 
       ws.on("open", () => {
         opened = true;
+        this.refusal = null; // a later refusal is news again
         this.settleFirstConnect(); // terminal is live on the relay — awaitRegistered() resolves
         this.cb.onStatus?.("Remote access connected — drive this terminal from the Privateer app.");
       });
@@ -431,11 +452,27 @@ export class RelayClient {
       const msg = err instanceof Error ? err.message : String(err);
       // A 4xx (e.g. 403 concurrency cap) won't self-heal by retrying the same request —
       // fail-fast any awaitRegistered() caller (a live-task spawn) so it stops hanging.
-      // The management terminal ignores this signal, so its reconnect behavior is unchanged.
       const status = (err as { status?: number })?.status;
-      if (typeof status === "number" && status >= 400 && status < 500) {
+      const refused = typeof status === "number" && status >= 400 && status < 500;
+      if (refused) {
         this.settleFirstConnect(err instanceof Error ? err : new Error(msg));
+        // A refusal is a decision, not a hiccup: hammering the same request every few
+        // seconds can't change it, and for a harbor — whose onStatus goes to a log file,
+        // not to a person — that is thousands of identical lines a day. Say it once, in
+        // full, then retry on a slow timer so the terminal still comes up by itself the
+        // moment the account frees a slot or changes plan.
+        if (this.refusal !== msg) {
+          this.refusal = msg;
+          this.cb.onStatus?.(
+            `Remote access refused: ${msg} — this terminal will not be drivable from the app until that is resolved. ` +
+              `Retrying every ${Math.round(REFUSED_RECONNECT_MS / 1000)}s.`,
+          );
+        }
+        this.scheduleReconnect(REFUSED_RECONNECT_MS);
+        return;
       }
+      // Transient (network/route/5xx): stay on the fast retry.
+      this.refusal = null;
       this.cb.onStatus?.(`Remote access couldn't reach the relay (${msg}) — retrying…`);
       this.scheduleReconnect();
     } finally {
@@ -447,12 +484,12 @@ export class RelayClient {
     if (process.env.PRIVATEER_RELAY_DEBUG) this.cb.onStatus?.(`relay: ${msg}`);
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(delayMs: number = RECONNECT_MS): void {
     if (this.closed || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.connect();
-    }, RECONNECT_MS);
+    }, delayMs);
   }
 
   private handle(data: WebSocket.RawData): void {

@@ -21,7 +21,7 @@ function slug(name: string): string {
 }
 
 // A stable relay terminal id for the harbor, persisted so it reappears as the same
-// "Privateer Routines" terminal in the app across restarts (rather than a fresh
+// "Privateer Local Harbor" terminal in the app across restarts (rather than a fresh
 // random terminal each boot). Random on first use so it stays unique per install —
 // the relay routes on this id with no user namespacing, so a shared constant could
 // collide across accounts. Matches the server's isValidTermId (`[A-Za-z0-9_-]{8,64}`).
