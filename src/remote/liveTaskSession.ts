@@ -20,7 +20,12 @@ import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { makePermissionGate, isRemoteUnsafeTool, type GateController } from "../ext/permissionGate.ts";
 import { makePiPrivacyExtension } from "pi-privacy";
-import { makeAccountProvider, privateerChannel } from "../providers/account.ts";
+import {
+  makeAccountProvider,
+  privateerChannel,
+  rememberAccountCredential,
+  dropPersistedAccountCredential,
+} from "../providers/account.ts";
 import { RelayClient, type TaskSpec } from "./relayClient.ts";
 import { RemoteBridge } from "./remoteBridge.ts";
 import { spawnAccountCredentials, revokeAccountSession, hasCredentials } from "../auth/privateer.ts";
@@ -62,7 +67,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   let initialPromptSent = false;
   let stopped = false;
   let spawnedAccount = false;
-  let servicesRef: { authStorage?: { remove?: (p: string) => void } } | null = null;
+  let servicesRef: { authStorage?: { remove?: (p: string) => void; get?: (p: string) => unknown } } | null = null;
 
   let attachTimer: ReturnType<typeof setTimeout> | undefined;
   let lifeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -77,7 +82,9 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     // app's Linked Devices; the harbor's own child session stays alive. Best-effort.
     if (spawnedAccount) {
       try { await revokeAccountSession(); } catch { /* server TTL is the fallback */ }
-      try { servicesRef?.authStorage?.remove?.("privateer"); } catch { /* nothing persisted */ }
+      // Ownership-checked: auth.json is shared machine-wide, so a live task's teardown
+      // must not delete an interactive terminal's entry (see providers/account.ts).
+      try { dropPersistedAccountCredential({ modelRegistry: { authStorage: servicesRef?.authStorage } }); } catch { /* nothing persisted */ }
     }
     deps.onClosed(termId);
     deps.log(`live task ${termId} closed`);
@@ -160,6 +167,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     try {
       const creds = await spawnAccountCredentials();
       (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+      rememberAccountCredential(creds); // claim it, so stop() drops OUR entry only
       spawnedAccount = true;
     } catch (e) {
       deps.log(`live task ${termId} account channel unavailable: ${(e as Error).message}`);

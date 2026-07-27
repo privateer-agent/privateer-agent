@@ -1,5 +1,5 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index e223ce1..3615d74 100644
+index e223ce1..cc853e7 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 @@ -163,6 +163,14 @@ export class AgentSession {
@@ -33,6 +33,25 @@ index e223ce1..3615d74 100644
          }
          if (await this._checkCompaction(msg)) {
              return true;
+@@ -1996,6 +2013,18 @@ export class AgentSession {
+         // Context overflow is handled by compaction, not retry.
+         if (isContextOverflow(message, this.model?.contextWindow ?? 0))
+             return false;
++        // Privateer patch: a Privateer ACCOUNT CAP is not a throttle. Daily/monthly
++        // message or token limits (and an exhausted balance) come back from the account
++        // channel as a 429 carrying the backend's machine `code` and a ready-to-show
++        // message. pi classifies anything containing "429" as transient, so the agent
++        // spent its whole retry budget — with exponential backoff — on a limit that
++        // cannot clear, and only then showed the user the one message that says what to
++        // do (upgrade, top up, or /login keys for a BYO key). Scoped to the `privateer`
++        // provider and to the backend's own cap wording so no other provider's transient
++        // rate limit is affected. Mirrors isAccountCapCode in src/engine/errors.ts.
++        if (this.model?.provider === "privateer" &&
++            /"code"\s*:\s*"[A-Z0-9_]*(?:CAP|QUOTA|LIMIT_REACHED|INSUFFICIENT|TOP_?UP)[A-Z0-9_]*"|limit of [^.]*reached|upgrade or top ?up|usage limit reached/i.test(message.errorMessage ?? ""))
++            return false;
+         return isRetryableAssistantError(message);
+     }
+     /**
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
 index 197bccc..27f6429 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js

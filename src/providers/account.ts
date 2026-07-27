@@ -14,12 +14,17 @@ import {
   type AccountCredential,
   serverBaseUrl,
   hasCredentials,
+  currentUser,
+  logout,
   runDeviceLogin,
   authedFetch,
   acquireAccountCredential,
   refreshAccountCredentials,
   notifySignedIn,
 } from "../auth/privateer.ts";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { globalDir } from "../config/paths.ts";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
 import {
@@ -36,7 +41,8 @@ import {
 // found" warning, which matters more than ever now that a signed-OUT terminal also
 // launches on it. The first two entries are the TEE tiers (Tinfoil, then NEAR); the
 // rest are the familiar names. Also the fallback list if the live listing is
-// unreachable.
+// unreachable. It is the FLOOR of the synchronous seed, not the whole of it — a launch
+// that has seen the live catalog before seeds from the cache too (see seedCatalogIds).
 const DEFAULT_MODELS = [
   ACCOUNT_DEFAULT_MODEL_ID,
   ACCOUNT_NEAR_MODEL_ID,
@@ -56,6 +62,72 @@ function seedModel(id: string) {
     contextWindow: 128000,
     maxTokens: 16384,
   };
+}
+
+// ── Catalog cache ────────────────────────────────────────────────────────────
+//
+// The live catalog (241 models and counting) can only be registered once the network
+// fetch resolves, and a registration made after extension load does NOT reach the model
+// registry immediately: pi queues it (extensions/loader.js pendingProviderRegistrations)
+// and flushes it when the session BINDS. Everything that resolves a model at LAUNCH runs
+// before that — Pi's findInitialModel (saved settings default) and its session-model
+// restore both call modelRegistry.find() while only the synchronous seed exists. So a
+// model outside DEFAULT_MODELS was un-resolvable at launch and Pi fell through to "first
+// model with configured auth", i.e. a BYO provider — measurably `openrouter/*` on a
+// machine with an OpenRouter key. That is the dead end defaultModel.ts exists to prevent,
+// re-entered through the back door.
+//
+// So: remember the ids the live catalog last returned, and seed from them SYNCHRONOUSLY
+// on the next launch. The live fetch still re-registers the authoritative list moments
+// later, so a model the server drops disappears on the next launch rather than lingering.
+//
+// Deliberately ids ONLY. Privacy tiers are never cached: the tier drives the shield in
+// /models, and a stale privacy claim is exactly the thing not to render from disk. The
+// picker keeps fetching them live (accountCatalogLoaded stays false until it does).
+const CATALOG_CACHE_MAX = 2000; // bound what a corrupted/hostile file can register
+
+function catalogCachePath(): string {
+  return join(globalDir(), "account-models.json");
+}
+
+// Best effort in both directions: this cache is an optimization, and a launch must never
+// fail because it couldn't be read or written.
+function saveCachedCatalogIds(ids: string[]): void {
+  try {
+    mkdirSync(globalDir(), { recursive: true });
+    const payload = { v: 1, fetchedAt: new Date().toISOString(), ids: ids.slice(0, CATALOG_CACHE_MAX) };
+    writeFileSync(catalogCachePath(), JSON.stringify(payload) + "\n", "utf8");
+  } catch {
+    /* unwritable home — we just seed from DEFAULT_MODELS next launch */
+  }
+}
+
+export function loadCachedCatalogIds(): string[] {
+  try {
+    const path = catalogCachePath();
+    if (!existsSync(path)) return [];
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { ids?: unknown };
+    if (!Array.isArray(parsed.ids)) return [];
+    return parsed.ids.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, CATALOG_CACHE_MAX);
+  } catch {
+    return []; // absent, unreadable, or garbage — the seed list still works
+  }
+}
+
+// The ids to register synchronously at load. DEFAULT_MODELS FIRST and always: the account
+// default has to be index 0 both because it must always resolve and because Pi clones the
+// provider's first/default model when it synthesizes a custom model id
+// (model-resolver.js buildFallbackModel).
+export function seedCatalogIds(): string[] {
+  const ids = [...DEFAULT_MODELS];
+  const seen = new Set(ids);
+  for (const id of loadCachedCatalogIds()) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
 }
 
 // One catalog entry with its server-asserted baseline privacy tier.
@@ -129,6 +201,9 @@ export async function fetchAccountCatalog(): Promise<AccountModelInfo[]> {
       const parsed = (data.models ?? [])
         .map((m) => (m.modelId ? { id: m.modelId, tier: normalizeTier(m.privacy?.tier, m.modelId) } : null))
         .filter((x): x is AccountModelInfo => !!x);
+      // Cache only a real LIVE listing — never the fallback, which would freeze the six
+      // seed ids on disk and read back as though it were the catalog.
+      if (parsed.length) saveCachedCatalogIds(parsed.map((p) => p.id));
       infos = parsed.length ? parsed : fallback();
     }
   } catch {
@@ -144,6 +219,23 @@ export async function fetchAccountModels(): Promise<string[]> {
   return (await fetchAccountCatalog()).map((m) => m.id);
 }
 
+// The device-code verification link, as an ABSOLUTE url.
+//
+// The server sends it scheme-less ("www.privateer.pro/settings/link-terminal?code=…"),
+// and both surfaces that show it treat it as a URL: Pi's login dialog wraps it in an
+// OSC-8 terminal hyperlink, and our own /login widget prints it for the user to open.
+// Without a scheme an OSC-8 target isn't a valid URI, so terminals decline to linkify
+// it — the one link in the sign-in flow becomes unclickable text. Prefix https:// when
+// the value has no scheme of its own, and leave a well-formed (or empty) value alone.
+// Only http/https are honoured: a scheme-looking prefix we don't expect is treated as a
+// hostname rather than passed through to a terminal as a clickable link.
+export function verificationLink(raw: string | undefined): string {
+  const uri = (raw ?? "").trim();
+  if (!uri) return "";
+  if (/^https?:\/\//i.test(uri)) return uri;
+  return `https://${uri.replace(/^\/+/, "")}`;
+}
+
 // The Pi OAuth provider (Omit<OAuthProviderInterface, "id"> — Pi supplies the id from
 // the provider name). login/refreshToken/getApiKey are the whole contract.
 export const privateerOAuthProvider = {
@@ -155,12 +247,40 @@ export const privateerOAuthProvider = {
   // promise never settles, and Pi never restores the editor: the "Waiting for
   // authentication…" screen hangs with no way out. See auth/privateer.ts
   // pollForToken, which checks the signal and rejects with "Login cancelled.".
-  async login(cb: { onDeviceCode?: (info: unknown) => void; signal?: AbortSignal }) {
+  async login(cb: {
+    onDeviceCode?: (info: unknown) => void;
+    onSelect?: (prompt: { message: string; options: { id: string; label: string }[] }) => Promise<string | undefined>;
+    signal?: AbortSignal;
+  }) {
     // Fresh machine? The device-code flow below fires notifySignedIn itself (via
     // pollForToken). Already linked? No device code runs — so we announce the
     // completed subscription login ourselves at the end, or the header/badge would
     // keep showing "not signed in" until the next launch.
-    const wasLinked = hasCredentials();
+    //
+    // Already linked AND the user wants a DIFFERENT account is the third case, and it
+    // used to be unreachable: login() short-circuited on hasCredentials(), so choosing
+    // "Privateer account" while linked silently re-armed the account already signed in
+    // and reported success — there was no way to switch accounts from here at all. Pi
+    // hands us an `onSelect` callback for exactly this, so ask. Switching means signing
+    // this machine out first (logout revokes the machine's whole token family), which
+    // the prompt says plainly; the device flow then runs as if fresh.
+    let wasLinked = hasCredentials();
+    if (wasLinked && cb.onSelect) {
+      const user = currentUser();
+      const who = user?.email ?? user?.id ?? "this account";
+      const choice = await cb.onSelect({
+        message: `Already signed in as ${who}.`,
+        options: [
+          { id: "keep", label: `Stay signed in as ${who}` },
+          { id: "switch", label: "Sign in as a different account (signs this machine out first)" },
+        ],
+      });
+      if (choice === undefined) throw new Error("Login cancelled"); // selector dismissed
+      if (choice === "switch") {
+        await logout(); // revokes this machine's sessions and wipes local auth state
+        wasLinked = false; // fall through to the device flow as a fresh machine
+      }
+    }
     if (!wasLinked) {
       try {
         await runDeviceLogin({
@@ -168,7 +288,9 @@ export const privateerOAuthProvider = {
           onCode: (code) =>
             cb.onDeviceCode?.({
               userCode: code.user_code,
-              verificationUri: code.verification_uri_complete ?? code.verification_uri ?? "",
+              // Absolute url — the server's value is scheme-less and Pi renders this as
+              // a terminal hyperlink. See verificationLink.
+              verificationUri: verificationLink(code.verification_uri_complete ?? code.verification_uri),
               intervalSeconds: code.interval,
               expiresInSeconds: code.expires_in,
             }),
@@ -207,9 +329,19 @@ export const privateerOAuthProvider = {
     return creds;
   },
   async refreshToken(creds: { refresh: string }) {
+    // Rotate THIS process's own session, never another terminal's. Pi keeps one
+    // credential per provider in auth.json and that file is machine-global, so the
+    // credential handed to us here can belong to a different, still-running terminal
+    // (see the ownership note above rememberAccountCredential). Rotating that one
+    // would take over its session and invalidate the copy it still holds — the exact
+    // reuse hazard the child-session split exists to avoid (auth/privateer.ts). When
+    // the incoming token isn't ours, rotate ours instead: Pi gets a valid credential
+    // either way, and the other terminal keeps its own.
+    const mine = armSlot().cred?.refresh;
+    const refresh = mine && creds.refresh !== mine ? mine : creds.refresh;
     let next: AccountCredential;
     try {
-      next = await refreshAccountCredentials(creds.refresh);
+      next = await refreshAccountCredentials(refresh);
     } catch {
       // Child token expired/reused → get another. acquire (not spawn) so a terminal
       // that already holds the device's last session slot can reclaim an orphan
@@ -334,7 +466,10 @@ export function makeAccountProvider() {
       const shim = sealedShimBase();
       return provider && shim ? { ...base, baseUrl: `${shim}/${provider}/v1` } : base;
     };
-    let lastIds: string[] = DEFAULT_MODELS;
+    // Seed with the last live catalog when we have one (see seedCatalogIds): this is the
+    // list Pi resolves a saved default / a restored session model against at launch,
+    // before the live re-registration can reach the registry.
+    let lastIds: string[] = seedCatalogIds();
     const register = (ids: string[]): void => {
       lastIds = ids;
       pi.registerProvider!("privateer", {
@@ -345,7 +480,7 @@ export function makeAccountProvider() {
         models: ids.map(modelEntry),
       });
     };
-    register(DEFAULT_MODELS); // immediate: provider exists this tick
+    register(lastIds); // immediate: provider exists this tick, with a resolvable catalog
     // Bring up the sealed shim, then re-register so sealed models pick up their shim
     // baseUrl. Registration re-runs anyway after the catalog fetch; this just makes
     // sure the switch lands even if the fetch is slow or fails.
@@ -373,6 +508,32 @@ export function makeAccountProvider() {
     // though the banner says "connected". The REPL (cli/chat.ts) and the harbor
     // already spawn one at startup; this gives the TUI the same seed.
     pi.on?.("session_start", (_e, ctx) => void armAccountCredential(ctx));
+
+    // Two safety nets around the account channel, both OUTSIDE the request path —
+    // they read Pi's in-memory auth map and its finished messages, and never touch the
+    // inference request itself, so a healthy prompt behaves exactly as before.
+    //
+    // before_agent_start: re-arm if Pi's persisted credential vanished mid-session.
+    // Awaited (Pi awaits extension handlers), so the turn starts with a key rather than
+    // failing and asking the user to resend. See ensureAccountArmed.
+    pi.on?.("before_agent_start", async (_e, ctx) => {
+      try {
+        await ensureAccountArmed(ctx);
+      } catch {
+        /* the turn's own error path reports better than a diagnostic here */
+      }
+    });
+
+    // message_end: an assistant turn that ended in an auth error on the account channel
+    // means our session token is dead server-side. Pi has no reactive-401 refresh, so
+    // replace the session now instead of failing every prompt until `expires`.
+    // See recoverAccountSession.
+    pi.on?.("message_end", (e, ctx) => {
+      const msg = (e as { message?: { role?: string; stopReason?: string; errorMessage?: string } })?.message;
+      if (msg?.role !== "assistant" || msg.stopReason !== "error" || !msg.errorMessage) return;
+      if ((ctx as SeedContext)?.model?.provider !== "privateer") return;
+      void recoverAccountSession(ctx, msg.errorMessage);
+    });
   };
 }
 
@@ -394,7 +555,12 @@ export function makeAccountProvider() {
 // which Pi would happily reuse and 401 on.
 const ARMED = Symbol.for("privateer.accountCredential");
 type ArmedSlot = {
-  [ARMED]?: { cred?: AccountCredential; inFlight?: Promise<AccountCredential> };
+  [ARMED]?: {
+    cred?: AccountCredential;
+    inFlight?: Promise<AccountCredential>;
+    // When we last replaced a failed session (recoverAccountSession's cooldown).
+    recoveredAt?: number;
+  };
 };
 
 function armSlot(): NonNullable<ArmedSlot[typeof ARMED]> {
@@ -405,8 +571,27 @@ function armSlot(): NonNullable<ArmedSlot[typeof ARMED]> {
 // Record a credential this process minted so nothing mints a second one. Exported for
 // the OAuth login path, which acquires its credential for Pi to own and would
 // otherwise leave the next arm() with nothing to reuse.
+//
+// This memo is also the OWNERSHIP record for Pi's persisted credential, which matters
+// because auth.json holds exactly one `privateer` entry and is shared by every
+// Privateer terminal on the machine. Each terminal mints its own session at launch, so
+// the last one to start wins on disk and the entry any terminal reads back may belong
+// to a different, still-running terminal. Two rules follow, both keyed off this memo:
+//
+//   1. Only DROP the persisted entry when it's the one we minted
+//      (dropPersistedAccountCredential). The exit hooks used to remove it
+//      unconditionally, so quitting one terminal deleted a live terminal's credential.
+//      That terminal kept working from Pi's in-memory copy until `expires`, then Pi
+//      reloaded auth.json, found nothing, and every prompt dead-ended on "No API key
+//      found for privateer" — with nothing to re-arm it before the next session_start.
+//   2. Only ROTATE our own refresh token (privateerOAuthProvider.refreshToken).
 export function rememberAccountCredential(cred: AccountCredential): void {
   armSlot().cred = cred;
+}
+
+// The credential this process minted, if any. Ownership probe for the two rules above.
+export function ownedAccountCredential(): AccountCredential | undefined {
+  return armSlot().cred;
 }
 
 // The remembered credential, if it's still usable. A minute of headroom: handing back
@@ -437,7 +622,14 @@ async function accountCredential(): Promise<AccountCredential> {
 // `ctx` is Pi's ExtensionContext; the auth store hangs off its model registry (the same
 // path privateer-brand uses to DROP the credential on sign-out).
 type SeedContext = {
-  modelRegistry?: { authStorage?: { set?: (provider: string, cred: unknown) => void } };
+  modelRegistry?: {
+    authStorage?: {
+      set?: (provider: string, cred: unknown) => void;
+      get?: (provider: string) => unknown;
+      remove?: (provider: string) => void;
+    };
+  };
+  model?: { provider?: string; id?: string };
   hasUI?: boolean;
   ui?: { notify?: (message: string, level: string) => void };
 };
@@ -473,4 +665,121 @@ export async function armAccountCredential(
     }
     return false;
   }
+}
+
+// Drop Pi's PERSISTED account credential (the `privateer` entry in auth.json) — but
+// ONLY when it's the one this process minted. Every exit path pairs a session revoke
+// with this drop (the contract in auth/privateer.ts): Pi reuses the persisted
+// credential on the next launch and refreshes it only on expiry, never reactively on a
+// 401, so leaving a revoked token behind dead-ends the next run.
+//
+// The ownership check is what keeps that teardown from harming a CONCURRENT terminal.
+// auth.json is machine-global with one entry per provider, so the entry on disk is
+// whichever terminal armed last; an unconditional remove here deleted a live
+// terminal's key and stranded it (see the note above rememberAccountCredential).
+// Returns true only if the entry was actually removed.
+//
+// `force` is for the teardowns where ownership is irrelevant because NOTHING on this
+// machine can use the entry any more: an explicit sign-out and a detected
+// expiry/revocation both go through logout()/clearCredentials(), which revoke the
+// machine's whole token family — every terminal's session included. Those callers have
+// also already wiped the local credentials, so the ownership memo is gone by then and an
+// ownership-checked drop would refuse and strand a dead entry on disk.
+export function dropPersistedAccountCredential(ctx: unknown, opts: { force?: boolean } = {}): boolean {
+  const store = (ctx as SeedContext)?.modelRegistry?.authStorage;
+  const mine = ownedAccountCredential()?.access;
+  // Every caller revokes this process's session immediately before calling us, so drop
+  // the memo whatever happens to the entry on disk — otherwise a later arm() in this
+  // process (a harbor run's session_start, say) could re-persist the revoked token.
+  armSlot().cred = undefined;
+  if (typeof store?.remove !== "function") return false;
+  try {
+    if (opts.force) {
+      /* whole family revoked — the entry is dead for every terminal, drop it */
+    } else if (typeof store.get === "function") {
+      const persisted = store.get("privateer") as { access?: unknown } | undefined;
+      if (!persisted) return false; // nothing persisted — nothing to drop
+      // Some other terminal's session. Leave it: it's the key that terminal is using.
+      if (typeof persisted.access === "string" && persisted.access !== mine) return false;
+    } else if (!mine) {
+      // Older Pi with no readable auth store AND we never minted anything — we have no
+      // basis to claim the entry, so leave it alone rather than break another terminal.
+      return false;
+    }
+    store.remove("privateer");
+    return true;
+  } catch {
+    return false; // older Pi shape / unwritable store — the server TTL is the fallback
+  }
+}
+
+// Make sure Pi still HAS an account credential before a turn goes out. Normally
+// session_start's arm is enough and this is a free in-memory lookup. It exists for the
+// case session_start can't cover: the persisted entry disappearing mid-session, which
+// another terminal's exit could do (and still can, for a terminal running an older
+// build without the ownership check above). Once the entry is gone Pi has no path back
+// — getApiKey returns undefined and nothing re-arms until the next session_start — so
+// every prompt fails on "No API key found for privateer".
+//
+// An entry that exists but has EXPIRED is deliberately left alone: that's Pi's own
+// refresh path (refreshToken), and pre-empting it would mint a second session row.
+export async function ensureAccountArmed(ctx: unknown): Promise<void> {
+  if (!hasCredentials()) return;
+  const store = (ctx as SeedContext)?.modelRegistry?.authStorage;
+  if (typeof store?.get !== "function") return; // can't tell — leave it to session_start
+  try {
+    if (store.get("privateer")) return;
+  } catch {
+    return;
+  }
+  await armAccountCredential(ctx, { notify: false });
+}
+
+// Errors that mean "the token we're presenting is no longer accepted", as opposed to a
+// cap, a network blip, or a model error. Matched against the provider error text Pi
+// surfaces (the OpenAI SDK prefixes the status, and our backend sends `code` +
+// `message`), so a revoked or dead session is recognizable without parsing internals.
+// "No API key ... privateer" covers both wordings that mean the channel wasn't armed:
+// pi-ai's "No API key for provider: privateer" (thrown when getApiKey resolves to
+// undefined, which is also what a swallowed refresh failure looks like — pi-ai flattens
+// our reason into "Failed to refresh OAuth token") and Pi's own "No API key found for
+// privateer." guidance text.
+const ACCOUNT_AUTH_FAILURE =
+  /\b401\b|SESSION_REVOKED|Authentication required|Invalid token|Failed to refresh OAuth token|No API key\b[^\n]*privateer/i;
+
+// Don't spin: if the account itself is gone, one replacement attempt per window is
+// plenty, and the user gets a clear message instead of a retry loop.
+const RECOVERY_COOLDOWN_MS = 30_000;
+
+// Replace a dead account session after an auth failure, so the NEXT prompt works.
+//
+// This is the client-side answer to a gap in Pi's OAuth contract: inference goes out
+// over Pi's own HTTP path (provider baseUrl + the bearer from getApiKey), which has no
+// reactive-401 hook — unlike authedFetch, which refreshes and retries in place. Pi
+// refreshes on `expires` alone, so a session that dies server-side early (revoked from
+// the app's Linked Devices, or cascaded by another device's logout) stays dead for the
+// remaining lifetime of the access token — up to ~24h — with every prompt failing.
+// Detecting the failure after the fact and re-arming turns that into a single failed
+// turn the user can resend.
+export async function recoverAccountSession(ctx: unknown, errorMessage: string): Promise<boolean> {
+  if (!hasCredentials()) return false; // signed out: onSessionExpired owns that message
+  if (!ACCOUNT_AUTH_FAILURE.test(errorMessage)) return false;
+  const slot = armSlot();
+  const now = Date.now();
+  if (slot.recoveredAt !== undefined && now - slot.recoveredAt < RECOVERY_COOLDOWN_MS) return false;
+  slot.recoveredAt = now;
+  // The credential we hold is the one that just failed — forget it so the arm below
+  // reclaims or spawns a live session instead of handing back the dead token.
+  slot.cred = undefined;
+  const armed = await armAccountCredential(ctx, { notify: false });
+  const c = ctx as SeedContext;
+  if (c?.hasUI) {
+    c.ui?.notify?.(
+      armed
+        ? "Your Privateer account session had expired — opened a new one. Send that message again."
+        : "Your Privateer account session isn't valid any more and couldn't be renewed. Run /login to sign back in.",
+      armed ? "warning" : "error",
+    );
+  }
+  return armed;
 }

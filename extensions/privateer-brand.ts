@@ -28,7 +28,12 @@ import { readFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import * as priv from "../src/auth/privateer.ts";
-import { armAccountCredential, makeAccountProvider } from "../src/providers/account.ts";
+import {
+  armAccountCredential,
+  dropPersistedAccountCredential,
+  makeAccountProvider,
+  verificationLink,
+} from "../src/providers/account.ts";
 import { resolveSignedInModel } from "../src/providers/defaultModel.ts";
 import { discoverContextFiles, onContextChanged } from "../src/context.ts";
 import { type Palette, paletteFor } from "../src/ui/palette.ts";
@@ -317,12 +322,15 @@ export default function privateerBrand(pi: any): void {
   // and dead-ends on the first inference. Removing it makes the next /signin spawn a
   // fresh session. Reached via the model registry (constructed with the auth
   // storage; see session.ts). Best-effort: nothing persisted → nothing to do.
-  const dropPersistedAccount = (ctx: any): void => {
-    try {
-      ctx?.modelRegistry?.authStorage?.remove?.("privateer");
-    } catch {
-      /* no persisted credential / older Pi without this shape — nothing to do */
-    }
+  //
+  // Two flavours, because auth.json is machine-global and shared by every Privateer
+  // terminal (see providers/account.ts dropPersistedAccountCredential):
+  //   - `force` for sign-out / expiry, where the whole token family is revoked and the
+  //     entry is dead for every terminal;
+  //   - the default ownership-checked drop for THIS process's exit, which must not
+  //     delete the credential another running terminal is using.
+  const dropPersistedAccount = (ctx: any, opts: { force?: boolean } = {}): void => {
+    dropPersistedAccountCredential(ctx, opts);
   };
 
   // /update — run the global npm install in a child process and report the outcome via
@@ -370,7 +378,9 @@ export default function privateerBrand(pi: any): void {
       const p = paletteFor(ctx?.ui?.theme);
       const user = await priv.runDeviceLogin({
         onCode: (code: any) => {
-          const uri = clean(code.verification_uri_complete ?? code.verification_uri ?? "");
+          // Absolute url: the server sends it scheme-less, and this line is what the
+          // user copies into a browser. See providers/account.ts verificationLink.
+          const uri = clean(verificationLink(code.verification_uri_complete ?? code.verification_uri));
           const userCode = clean(code.user_code);
           ctx?.ui?.setWidget?.(
             "privateer-signin",
@@ -412,7 +422,7 @@ export default function privateerBrand(pi: any): void {
     const u = priv.currentUser();
     ctx?.ui?.notify?.("Signing out of Privateer…", "info");
     await priv.logout(); // never throws: local state is wiped whatever the network did
-    dropPersistedAccount(ctx);
+    dropPersistedAccount(ctx, { force: true }); // the whole family is revoked, not just ours
     refresh(ctx);
     ctx?.ui?.notify?.(
       `Signed out${u?.email ? ` (${u.email})` : ""} — this machine and its terminals. Drop anchor for now.`,
@@ -594,6 +604,8 @@ export default function privateerBrand(pi: any): void {
     // server-side, so leaving the persisted copy behind would make the NEXT launch
     // reuse a token that's already dead and dead-end on its first prompt (Pi doesn't
     // refresh on a 401). Mirrors the harbor's shutdown (harbor/index.ts).
+    // Ownership-checked (no force): revokeLocalSessions killed OUR sessions only, so a
+    // persisted entry belonging to another running terminal must survive our exit.
     dropPersistedAccount(ctxRef);
   });
 
@@ -602,8 +614,9 @@ export default function privateerBrand(pi: any): void {
   priv.onSessionExpired(() => {
     // clearCredentials() has already wiped the local machine login; also drop Pi's
     // persisted account credential so the next prompt/launch doesn't reuse a token
-    // that's now dead server-side (see dropPersistedAccount).
-    dropPersistedAccount(ctxRef);
+    // that's now dead server-side (see dropPersistedAccount). Forced: the machine login
+    // is gone, so the entry can't be useful to any terminal on this machine.
+    dropPersistedAccount(ctxRef, { force: true });
     refresh(ctxRef);
     ctxRef?.ui?.notify?.("Your Privateer session expired. Run /login to sign back in.", "warning");
   });

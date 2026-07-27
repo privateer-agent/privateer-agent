@@ -149,10 +149,12 @@ let _refreshInFlight: Promise<ChildSession> | null = null;
 // copy in place would let the next run send a token that still looks valid but is dead
 // server-side → inference fails with a dead-end `401 {code: SESSION_REVOKED}`.
 // The fix is to revoke it AND drop the persisted credential together: the caller must
-// remove the "privateer" entry from Pi's authStorage (authStorage.remove("privateer"))
-// right after revokeLocalSessions() so the next launch spawns a fresh session instead
-// of reusing the revoked one. Doing both is safe; doing only one is not. See
-// revokeLocalSessions and its callers (cli/chat.ts, harbor/index.ts).
+// drop the "privateer" entry from Pi's authStorage — via
+// providers/account.ts dropPersistedAccountCredential(), NOT a bare
+// authStorage.remove(), because auth.json is machine-global and the entry may belong to
+// another running terminal — right after revokeLocalSessions(), so the next launch
+// spawns a fresh session instead of reusing the revoked one. Doing both is safe; doing
+// only one is not. See revokeLocalSessions and its callers (cli/chat.ts, harbor/index.ts).
 //
 // That pairing only covers a CLEAN exit, though. A terminal killed without running its
 // shutdown hook leaves its row alive server-side for the full TTL, and the next launch
@@ -195,6 +197,21 @@ export function saveCredentials(creds: Credentials): void {
   shared().cache = creds;
 }
 
+// The account-provider credential this process armed is memoized on a registered
+// symbol by providers/account.ts (one slot across jiti's per-extension module copies).
+// Clearing it from here — rather than importing account.ts, which would make a cycle —
+// keeps a single rule: local credentials gone ⇒ armed credential gone.
+//
+// Without this, /logout followed by signing in as a DIFFERENT account reused the old
+// account's memoized session: logout() revokes that whole token family, so the new
+// sign-in armed Pi with a token already dead server-side and the first prompt 401'd.
+const ARMED_SLOT = Symbol.for("privateer.accountCredential");
+
+function forgetArmedAccountCredential(): void {
+  const slot = (globalThis as { [ARMED_SLOT]?: { cred?: unknown } })[ARMED_SLOT];
+  if (slot) slot.cred = undefined;
+}
+
 export function clearCredentials(): void {
   try {
     rmSync(credentialsPath(), { force: true });
@@ -207,6 +224,7 @@ export function clearCredentials(): void {
   shared().cache = null;
   _child = null;
   _account = null;
+  forgetArmedAccountCredential();
 }
 
 export function hasCredentials(): boolean {
@@ -623,7 +641,8 @@ export async function revokeAccountSession(timeoutMs = 1500): Promise<void> {
  *
  * IMPORTANT: the account session is persisted by Pi (auth.json) and reused on the next
  * launch without a reactive-on-401 refresh, so the caller MUST also drop the persisted
- * copy right after this resolves — `authStorage.remove("privateer")` — or the next run
+ * copy right after this resolves — `dropPersistedAccountCredential(ctx)` from
+ * providers/account.ts, which drops it only if THIS process minted it — or the next run
  * will reuse the token we just revoked and dead-end on a 401 (see the _account note).
  * Callers: cli/chat.ts cleanup() and harbor/index.ts shutdown().
  */

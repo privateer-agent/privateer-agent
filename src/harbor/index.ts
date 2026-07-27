@@ -14,7 +14,12 @@ import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { makePermissionGate, type GateController } from "../ext/permissionGate.ts";
 import { makePiPrivacyExtension } from "pi-privacy";
-import { makeAccountProvider, privateerChannel } from "../providers/account.ts";
+import {
+  makeAccountProvider,
+  privateerChannel,
+  rememberAccountCredential,
+  dropPersistedAccountCredential,
+} from "../providers/account.ts";
 import { resolveDefaultModel } from "../providers/defaultModel.ts";
 import { RelayClient, type TaskSpec } from "../remote/relayClient.ts";
 import { createLiveTaskSession, type LiveTaskHandle } from "../remote/liveTaskSession.ts";
@@ -718,7 +723,7 @@ export class Harbor {
     let out = "";
     let status: "ok" | "error" = "ok";
     let error: string | undefined;
-    let servicesRef: { authStorage?: { remove?: (p: string) => void } } | null = null;
+    let servicesRef: { authStorage?: { remove?: (p: string) => void; get?: (p: string) => unknown } } | null = null;
     let spawnedAccount = false;
     try {
       const gate: GateController = {
@@ -765,6 +770,7 @@ export class Harbor {
         try {
           const creds = await acquireAccountCredential();
           (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+          rememberAccountCredential(creds); // claim it, so the teardown drops OUR entry only
           spawnedAccount = true;
         } catch (e) {
           log(`  account channel unavailable: ${(e as Error).message}`);
@@ -803,7 +809,9 @@ export class Harbor {
       // too so a later run's fallback never reuses a revoked token. Best-effort.
       if (spawnedAccount) {
         try { await revokeAccountSession(); } catch { /* best effort — server TTL is the fallback */ }
-        try { servicesRef?.authStorage?.remove?.("privateer"); } catch { /* nothing persisted */ }
+        // Ownership-checked: an interactive terminal on this machine shares auth.json,
+        // and its entry must survive a harbor run's teardown (see providers/account.ts).
+        try { dropPersistedAccountCredential({ modelRegistry: { authStorage: servicesRef?.authStorage } }); } catch { /* nothing persisted */ }
       }
     }
     return { out, status, error };

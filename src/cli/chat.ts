@@ -39,7 +39,13 @@ async function main() {
   const { authorizeControl } = await import("../remote/controlAuth.ts");
   const { resolveMentions, completeMention, searchFiles } = await import("../util/fileMentions.ts");
   const priv = await import("../auth/privateer.ts");
-  const { makeAccountProvider, accountPosture, privateerChannel } = await import("../providers/account.ts");
+  const {
+    makeAccountProvider,
+    accountPosture,
+    privateerChannel,
+    rememberAccountCredential,
+    dropPersistedAccountCredential,
+  } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
   const { resolveDefaultModel, resolveSignedInModel } = await import("../providers/defaultModel.ts");
 
@@ -397,7 +403,9 @@ async function main() {
     cleanedUp = true;
     try { relay?.stop(); } catch { /* already stopped */ }
     try { await priv.revokeLocalSessions(); } catch { /* best effort — server TTL is the fallback */ }
-    try { (services.authStorage as any).remove?.("privateer"); } catch { /* nothing persisted */ }
+    // Ownership-checked: auth.json is machine-global, so removing an entry another
+    // running terminal minted would strand it (see providers/account.ts).
+    try { dropPersistedAccountCredential({ modelRegistry: { authStorage: services.authStorage } }); } catch { /* nothing persisted */ }
   }
   const onSignal = (): void => { void cleanup().finally(() => process.exit(0)); };
   process.once("SIGINT", onSignal);
@@ -409,6 +417,7 @@ async function main() {
     try {
       const creds = await priv.acquireAccountCredential();
       (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+      rememberAccountCredential(creds); // claim it, so cleanup drops OUR entry and only ours
     } catch (e) {
       console.log(`${RED}Account channel unavailable: ${(e as Error).message}${RESET}`);
     }
