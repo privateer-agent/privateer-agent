@@ -98,6 +98,33 @@ test("web_search asks the account API for raw results and renders them", async (
   );
 });
 
+// Caught by the first live run against production, not by any stub: Brave returns
+// descriptions as HTML — query terms in <strong>, apostrophes as &#x27;. A model
+// handed that will copy the markup into the answer.
+test("web_search strips HTML and entities out of provider text", async () => {
+  await withStub(
+    () =>
+      new Response(
+        JSON.stringify({
+          query: "q",
+          results: [{
+            title: "Graham&#x27;s funeral &amp; more",
+            url: "https://a.example/1",
+            description: "<strong>Republican Senator</strong> Lindsay Graham&#x27;s funeral is  bringing leaders&nbsp;to town",
+          }],
+        }),
+        { status: 200 },
+      ),
+    async () => {
+      const t = out(await webSearchToolDefinition.execute("t9", { query: "q" }));
+      assert.doesNotMatch(t, /<strong>|<\/strong>/);
+      assert.doesNotMatch(t, /&#x27;|&amp;|&nbsp;/);
+      assert.match(t, /Graham's funeral & more/);
+      assert.match(t, /Republican Senator Lindsay Graham's funeral is bringing leaders to town/);
+    },
+  );
+});
+
 test("web_search omits count when the caller didn't pick one", async () => {
   await withStub(
     () => new Response(JSON.stringify({ query: "q", results: [] }), { status: 200 }),
