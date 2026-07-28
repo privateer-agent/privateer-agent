@@ -46,6 +46,9 @@
 
 import "../boot.ts"; // env + attestation dispatcher, before any Pi import
 import { AsyncLocalStorage } from "node:async_hooks";
+// Names only — the factory itself is imported lazily in main() like every other
+// module here. Safe statically: this evaluates after boot.ts and pulls in no Pi.
+import { WEB_TOOL_NAMES } from "../tools/web.ts";
 
 // Read-only default toolset — same rationale as the routines harbor's SAFE_TOOLS:
 // a turn nobody is watching can't mutate the filesystem or shell out. Now that the
@@ -53,6 +56,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 // channel via `channels.tools` — e.g. add "edit","write","bash" and each risky call
 // prompts in-chat for a yes/no.
 const SAFE_TOOLS = ["read", "grep", "find", "ls"];
+
+// Web tools join the default set when the agent has web access — see
+// config/hosted.ts. Kept out of SAFE_TOOLS proper because they're the one "read-only"
+// capability that still sends a query off the machine.
+const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES];
 
 // A channel's posture governs how an ADMIN's risky actions are handled (members are
 // always capped to read-only — see effectivePosture). Config + restart only; there
@@ -111,6 +119,8 @@ async function main() {
   const { makePiPrivacyExtension } = await import("pi-privacy");
   const { makeAccountProvider, privateerChannel } = await import("../providers/account.ts");
   const { hasCredentials } = await import("../auth/privateer.ts");
+  const { makeWebTools } = await import("../tools/web.ts");
+  const { webEnabled } = await import("../config/hosted.ts");
   const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
   const { agentDir, configPath, globalDir } = await import("../config/paths.ts");
   const { redactText, collectSecrets } = await import("../util/redact.ts");
@@ -133,7 +143,10 @@ async function main() {
   }
   const ch = cfg.channels ?? {};
   const defaultModel: string = resolveDefaultModel({ explicit: ch.model ?? cfg.defaultModel });
-  const defaultTools: string[] = Array.isArray(ch.tools) && ch.tools.length ? ch.tools : SAFE_TOOLS;
+  const web = webEnabled();
+  const defaultTools: string[] = Array.isArray(ch.tools) && ch.tools.length
+    ? (web ? ch.tools : ch.tools.filter((t: string) => !WEB_TOOLS.includes(t)))
+    : (web ? [...SAFE_TOOLS, ...WEB_TOOLS] : [...SAFE_TOOLS]);
   const defaultPosture: Posture = normalizePosture(ch.posture) ?? "approve";
   const cwd: string = ch.cwd ?? process.cwd();
   const secrets = collectSecrets(cfg.providers);
@@ -190,6 +203,10 @@ async function main() {
           privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
         }),
         makeAccountProvider(),
+        // Web access (src/tools/web.ts) — same wiring as the harbor: registered here
+        // because this path builds its session explicitly, and omitted entirely when
+        // the agent isn't allowed the web.
+        ...(webEnabled() ? [makeWebTools()] : []),
       ] as any,
     },
   });

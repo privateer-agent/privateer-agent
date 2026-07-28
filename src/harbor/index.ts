@@ -56,14 +56,33 @@ import { deliver, type RelayPusher, type CloudPusher } from "../routines/deliver
 import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, HarborAlreadyRunningError, type IpcRequest, type IpcResponse } from "./ipc.ts";
-import { isHosted, publishRelayPub } from "../config/hosted.ts";
+import { isHosted, publishRelayPub, webEnabled } from "../config/hosted.ts";
+import { makeWebTools, WEB_TOOL_NAMES } from "../tools/web.ts";
 
 // The safe, read-only toolset for unattended runs — Pi builtins with no
 // write/edit/bash, so a routine firing with nobody watching can't mutate the
-// filesystem or shell out. (0.2's web_fetch/web_search return once the web tools
-// land in Phase 5.) Safety is the tool restriction; the gate auto-approves what's
-// allowed but still fail-closes a dangerous shell command headlessly.
+// filesystem or shell out. Safety is the tool restriction; the gate auto-approves
+// what's allowed but still fail-closes a dangerous shell command headlessly.
 const SAFE_TOOLS = ["read", "grep", "find", "ls"];
+
+// Read-only in the same sense — they can't touch the filesystem or the shell — but
+// they do send a derived query out to Privateer's servers, so they are a switch
+// (webEnabled) rather than part of the unconditional safe set. When the switch is on
+// they join the DEFAULT allow-list: the overwhelmingly common unattended request
+// ("summarize today's news at 7pm") needs the live web and nothing else, and making
+// the user hand-write an allow-list for it was the whole friction.
+const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES];
+
+// Resolve a run's builtin allow-list. An explicit list wins, minus any web tools when
+// web access is off — a routine saved while it was on must not silently reference a
+// tool that no longer registers.
+function builtinToolsFor(explicit: string[]): string[] {
+  const web = webEnabled();
+  if (explicit.length > 0) {
+    return web ? explicit : explicit.filter((t) => !WEB_TOOLS.includes(t));
+  }
+  return web ? [...SAFE_TOOLS, ...WEB_TOOLS] : [...SAFE_TOOLS];
+}
 
 const TICK_MS = 60_000; // scan for due routines once a minute
 // Harbor hosted mode (isHosted): suspend after this much idle time with no work,
@@ -684,8 +703,7 @@ export class Harbor {
     // registers them from the shared mcp.json, and the routine's SIGNED tool list is the
     // authorization boundary under the bypass gate (same as builtin tools). An http/OAuth
     // connector that never completed its browser flow simply errors at call time.
-    const builtinAllow = split.builtin.length > 0 ? split.builtin : SAFE_TOOLS;
-    const allowedTools = [...builtinAllow, ...split.mcp];
+    const allowedTools = [...builtinToolsFor(split.builtin), ...split.mcp];
     if (routine.delivery.includes("email")) {
       log("  note: email delivery is not wired yet (Phase 5) — skipping it");
     }
@@ -762,6 +780,12 @@ export class Harbor {
               privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
             }),
             makeAccountProvider(),
+            // Web access (src/tools/web.ts), when the agent is allowed it. Registered
+            // here rather than picked up from extensions/ because the harbor never
+            // installs the launcher's shims. Omitting the factory — not just dropping
+            // the names from the allow-list — is what makes "web off" mean the tools
+            // don't exist for this run at all.
+            ...(webEnabled() ? [makeWebTools()] : []),
             mcpAdapter,
           ] as any,
         },
@@ -831,7 +855,7 @@ export class Harbor {
     const cwd = spec.cwd && spec.cwd.trim() ? spec.cwd : process.cwd();
     const modelSpec = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
     const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
-    const allowedTools = [...(split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS), ...(split?.mcp ?? [])];
+    const allowedTools = [...builtinToolsFor(split?.builtin ?? []), ...(split?.mcp ?? [])];
     const title = deriveTaskTitle(spec);
     const key = `task:${title}`;
     if (this.running.has(key)) {
@@ -1015,7 +1039,7 @@ export class Harbor {
     const config = loadHarborConfig();
     const model = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
     const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
-    const tools = [...(split && split.builtin.length > 0 ? split.builtin : SAFE_TOOLS), ...(split?.mcp ?? [])];
+    const tools = [...builtinToolsFor(split?.builtin ?? []), ...(split?.mcp ?? [])];
     const { out, status, error } = await this.runSession({ prompt: spec.prompt, cwd: spec.cwd, model, tools });
     let output: Record<string, unknown> = {};
     try { const p = JSON.parse(out.trim()); if (p && typeof p === "object" && !Array.isArray(p)) output = p as Record<string, unknown>; } catch { /* non-JSON → raw text only */ }

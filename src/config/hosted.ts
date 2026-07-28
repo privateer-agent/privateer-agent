@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { globalDir } from "./paths.ts";
 import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
+import { hasCredentials } from "../auth/privateer.ts";
 
 // Harbor hosted mode.
 //
@@ -15,6 +16,26 @@ import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
 // Read via process.env at call time, mirroring PRIVATEER_HOME / PRIVATEER_SERVER_URL.
 export function isHosted(): boolean {
   return process.env.HARBOR_HOSTED === "1";
+}
+
+/**
+ * Is this agent allowed to reach the live web (web_search / web_fetch)?
+ *
+ * Both tools are served by the account API, so credentials are a hard prerequisite —
+ * without them there is nothing to authenticate with and every call would 401.
+ *
+ * `HARBOR_WEB` is authoritative when set. Hosted agents always set it explicitly, from
+ * the per-agent switch in the app (harborOrchestrator/tenants.js → tenantEnv), because
+ * a search sends the derived query out of the enclave to our servers and that has to be
+ * the user's call. Unset — a daemon on someone's own laptop — defaults to on once
+ * signed in: the same account, the same billing, and nothing to disclose beyond what
+ * the tool description already says.
+ */
+export function webEnabled(): boolean {
+  const flag = process.env.HARBOR_WEB;
+  if (flag === "1") return hasCredentials();
+  if (flag === "0") return false;
+  return hasCredentials();
 }
 
 /**
