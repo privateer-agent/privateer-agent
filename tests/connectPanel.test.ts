@@ -251,14 +251,57 @@ test("connect: a custom entry infers transport from what you type", async () => 
   d.send("mine", ENTER); // name
   d.send("https://mcp.example.com/sse", ENTER); // target → inferred http
   d.send(ENTER); // env is optional
+  d.send(ENTER); // bearer token is optional → OAuth
+  d.send(ENTER); // headers are optional
   d.send(ESC);
   await d.done;
 
   const proj = readProj().mcpServers.mine;
   assert.ok(proj, "custom connector not projected");
   assert.equal(proj.url, "https://mcp.example.com/sse");
-  assert.equal(proj.oauth, true);
+  // The adapter's own vocabulary: `auth: "oauth"`, NOT a boolean in its `oauth` slot
+  // (which is an OAuthConfig object). See mcpControl.toStandard.
+  assert.equal(proj.auth, "oauth");
+  assert.equal(proj.oauth, undefined, "the legacy boolean must never reach the file");
   assert.equal(proj.command, undefined, "an http entry must not carry a command");
+});
+
+test("connect: a bearer token makes an http connector auth:bearer, not oauth", async () => {
+  freshHome();
+  const d = openPanel();
+  d.send("a", "c", "u", "s", "t", "o", "m", ENTER);
+  d.send("tokened", ENTER); // name
+  d.send("https://mcp.example.com/mcp", ENTER); // target → inferred http
+  d.send(ENTER); // env
+  d.send("sk_live_abc123", ENTER); // bearer token
+  d.send("X-Api-Version=2", ENTER); // extra headers
+  d.send(ESC);
+  await d.done;
+
+  const proj = readProj().mcpServers.tokened;
+  assert.ok(proj, "custom connector not projected");
+  // Load-bearing: server-manager.ts only attaches the Authorization header when auth
+  // is exactly "bearer". A stored token with auth unset is a token that never sends.
+  assert.equal(proj.auth, "bearer");
+  assert.equal(proj.bearerToken, "sk_live_abc123");
+  assert.deepEqual(proj.headers, { "X-Api-Version": "2" });
+});
+
+test("connect: the auth steps are skipped entirely for a local command", async () => {
+  freshHome();
+  const d = openPanel();
+  d.send("a", "c", "u", "s", "t", "o", "m", ENTER);
+  d.send("localish", ENTER); // name
+  d.send("npx -y @modelcontextprotocol/server-memory", ENTER); // target → stdio
+  d.send(ENTER); // env is the LAST step for stdio — this saves
+  d.send(ESC);
+  await d.done;
+
+  const proj = readProj().mcpServers.localish;
+  assert.ok(proj, "stdio connector not projected — the bearer/header steps were not skipped");
+  assert.equal(proj.command, "npx");
+  assert.equal(proj.auth, undefined, "a local command authenticates to nothing");
+  assert.equal(proj.bearerToken, undefined);
 });
 
 test("connect: closing without changes does not reload", async () => {

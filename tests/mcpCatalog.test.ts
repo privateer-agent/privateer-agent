@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MCP_CATALOG, catalogEntry, draftFromCatalog, promptOrder } from "../src/mcp/catalog.ts";
+import { MCP_CATALOG, catalogEntry, draftFromCatalog, promptOrder, hostedCapable } from "../src/mcp/catalog.ts";
 import { makeMcpControl } from "../src/remote/mcpControl.ts";
 
 // The catalog's own header says it: "a broken command in the catalog is worse than an
@@ -76,9 +76,38 @@ test("catalog: an oauth entry drafts as http with no env", () => {
   const draft = draftFromCatalog(catalogEntry("linear")!);
   assert.equal(draft.transport, "http");
   assert.equal(draft.url, "https://mcp.linear.app/sse");
-  assert.equal(draft.oauth, true);
+  // The adapter's vocabulary, not the legacy boolean — its own `oauth` field is an
+  // OAuthConfig object, so a boolean there was always an abuse of the schema.
+  assert.equal(draft.auth, "oauth");
+  assert.equal(draft.oauth, undefined);
   assert.equal(draft.env, undefined);
   assert.equal(draft.command, undefined);
+});
+
+// Option B (docs/HARBOR_CONNECTORS_PLAN.md §2): a hosted agent gets remote HTTP OAuth
+// connectors and nothing else — no stdio (it would execute unmeasured third-party code
+// inside an attested enclave) and no static token (it would need a durable secret at
+// rest we could read). This is the picker filter; if it ever admits a stdio entry,
+// the hosted picker is offering something the runtime cannot hold.
+test("catalog: hostedCapable admits exactly the remote OAuth connectors", () => {
+  const hosted = MCP_CATALOG.filter(hostedCapable);
+  assert.ok(hosted.length > 0, "no hosted-capable connectors at all");
+  for (const e of hosted) {
+    assert.equal(e.transport, "http", `${e.id} is not remote HTTP`);
+    assert.equal(e.oauth, true, `${e.id} is not an OAuth connector`);
+    assert.equal(e.command, undefined, `${e.id} would spawn a local process`);
+    assert.deepEqual(Object.keys(e.env ?? {}), [], `${e.id} needs a stored credential`);
+  }
+  for (const e of MCP_CATALOG.filter((x) => !hostedCapable(x))) {
+    assert.ok(e.transport === "stdio" || e.oauth !== true, `${e.id} was excluded for no reason`);
+  }
+});
+
+test("catalog: an explicit hosted flag overrides the derived answer", () => {
+  const oauthEntry = MCP_CATALOG.find((e) => hostedCapable(e))!;
+  assert.equal(hostedCapable({ ...oauthEntry, hosted: false }), false);
+  const stdioEntry = MCP_CATALOG.find((e) => e.transport === "stdio")!;
+  assert.equal(hostedCapable({ ...stdioEntry, hosted: true }), true);
 });
 
 // The end-to-end shape the /connect panel actually produces: catalog → draft →

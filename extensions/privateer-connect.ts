@@ -126,6 +126,11 @@ interface Step {
   // A step that may be submitted empty. For an edit, an empty secret means "keep
   // the value already on disk" — mcpControl's env merge rule makes that free.
   optional?: boolean;
+  // Ask this step only when the answers so far say it's relevant — the auth questions
+  // are meaningless for a local command, and three dead optional prompts in a row is
+  // how a wizard teaches people to hammer Enter without reading. Predicates may only
+  // read answers from EARLIER steps.
+  when?: (answers: Record<string, string>) => boolean;
 }
 
 type View = "list" | "catalog" | "form";
@@ -147,6 +152,8 @@ interface Pending {
 // from the answer rather than asked as a separate question: an https:// answer is an
 // http server, anything else is a stdio command line. That matches mcpControl's own
 // inference (`draft.url || prev.url ? "http" : "stdio"`), so there's one rule, not two.
+const isHttpTarget = (answers: Record<string, string>) => /^https?:\/\//i.test((answers.target ?? "").trim());
+
 function customSteps(existing?: RemoteMcpServer): Step[] {
   const target = existing
     ? existing.transport === "http"
@@ -172,6 +179,25 @@ function customSteps(existing?: RemoteMcpServer): Step[] {
       hint: "KEY=value, comma-separated. Leave blank for none.",
       optional: true,
     },
+    {
+      key: "bearerToken",
+      prompt: "Bearer token (optional)",
+      hint: existing?.bearerTokenSet
+        ? "Leave blank to keep the token already saved."
+        : "Leave blank to sign in through the browser instead (OAuth).",
+      secret: true,
+      optional: true,
+      when: isHttpTarget,
+    },
+    {
+      key: "headers",
+      prompt: "Extra HTTP headers (optional)",
+      hint: "KEY=value, comma-separated — e.g. X-Api-Version=2. Leave blank for none.",
+      // Header values are credentials as often as not, so this is masked like a token.
+      secret: true,
+      optional: true,
+      when: isHttpTarget,
+    },
   ];
 }
 
@@ -196,7 +222,22 @@ function buildCustomDraft(answers: Record<string, string>): McpDraft {
   if (/^https?:\/\//i.test(target)) {
     draft.transport = "http";
     draft.url = target;
-    draft.oauth = true;
+    const token = (answers.bearerToken ?? "").trim();
+    const headers = parseEnv(answers.headers ?? "");
+    const hasHeaders = Object.keys(headers).length > 0;
+    if (hasHeaders) draft.headers = headers;
+    if (token) {
+      // A static token: the adapter only sends the Authorization header when auth is
+      // explicitly "bearer", so this pairing is not optional.
+      draft.auth = "bearer";
+      draft.bearerToken = token;
+    } else if (hasHeaders) {
+      // Custom headers ARE the credential here — the adapter's supportsOAuth() refuses
+      // OAuth once headers are configured, so claiming "oauth" would be a lie.
+      draft.auth = "none";
+    } else {
+      draft.auth = "oauth";
+    }
   } else {
     draft.transport = "stdio";
     const parts = target.split(/\s+/).filter(Boolean);
@@ -359,6 +400,36 @@ class ConnectPanel extends Container {
     return this.pending?.steps[this.stepIndex];
   }
 
+  // A step is asked only when its `when` predicate (if any) passes against the answers
+  // collected so far. Navigation walks over the hidden ones in both directions, and
+  // the position counter reports the VISIBLE steps so "2/3" doesn't count a question
+  // the user will never see.
+  private stepVisible(i: number): boolean {
+    const step = this.pending?.steps[i];
+    if (!step) return false;
+    return step.when ? step.when(this.answers) : true;
+  }
+
+  private seekStep(from: number, dir: 1 | -1): number | undefined {
+    const total = this.pending?.steps.length ?? 0;
+    for (let i = from; i >= 0 && i < total; i += dir) {
+      if (this.stepVisible(i)) return i;
+    }
+    return undefined;
+  }
+
+  private visiblePosition(): { at: number; of: number } {
+    const total = this.pending?.steps.length ?? 0;
+    let at = 0;
+    let of = 0;
+    for (let i = 0; i < total; i++) {
+      if (!this.stepVisible(i)) continue;
+      of++;
+      if (i <= this.stepIndex) at = of;
+    }
+    return { at, of };
+  }
+
   // -- rendering ------------------------------------------------------------
 
   private refresh(): void {
@@ -458,7 +529,8 @@ class ConnectPanel extends Container {
     const t = this.theme;
     const p = this.pending!;
     const step = this.currentStep()!;
-    const counter = p.steps.length > 1 ? `  ${this.stepIndex + 1}/${p.steps.length}` : "";
+    const pos = this.visiblePosition();
+    const counter = pos.of > 1 ? `  ${pos.at}/${pos.of}` : "";
     this.body.addChild(new Text(t.fg("accent", t.bold(p.title)) + t.fg("muted", counter), 1, 0));
     this.body.addChild(new Spacer(1));
     this.body.addChild(new Text(`  ${t.fg("text", step.prompt)}`, 1, 0));
@@ -557,8 +629,9 @@ class ConnectPanel extends Container {
     }
     this.answers[step.key] = value;
     this.status = "";
-    if (this.stepIndex < this.pending!.steps.length - 1) {
-      this.stepIndex++;
+    const next = this.seekStep(this.stepIndex + 1, 1);
+    if (next !== undefined) {
+      this.stepIndex = next;
       this.loadStep();
       return;
     }
@@ -701,8 +774,9 @@ class ConnectPanel extends Container {
     const step = this.currentStep()!;
     if (kb.matches(data, "tui.select.cancel")) {
       // Back a step, or out of the form entirely from the first one.
-      if (this.stepIndex > 0) {
-        this.stepIndex--;
+      const prev = this.stepIndex > 0 ? this.seekStep(this.stepIndex - 1, -1) : undefined;
+      if (prev !== undefined) {
+        this.stepIndex = prev;
         this.loadStep();
       } else {
         this.view = this.pending?.origin ?? "list";

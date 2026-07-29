@@ -36,6 +36,29 @@ export interface CatalogEntry {
   fill?: string;
   // Where to get the credential, shown as a hint in the form.
   credUrl?: string;
+  // Can this connector run on a HOSTED (Harbor) agent? Leave unset to take the derived
+  // answer from hostedCapable() below; set it explicitly only to say "no" to something
+  // that would otherwise qualify.
+  hosted?: boolean;
+}
+
+/**
+ * Whether an entry can run on a hosted agent, as opposed to a local daemon/desktop.
+ *
+ * The rule is not a preference, it is the runtime: a Harbor tenant is `--read-only`,
+ * `--cap-drop ALL`, has no `uv`/`uvx`/Python/browser, and its home is tmpfs wiped on
+ * every suspend. A stdio entry would have to download and execute unmeasured
+ * third-party code inside an attested enclave at runtime, which defeats the point of
+ * the measurement; and a token-bearing entry would need a durable secret at rest,
+ * which we decided against (Option B — see treeview/docs/HARBOR_CONNECTORS_PLAN.md §2).
+ * What is left is remote HTTP + OAuth.
+ *
+ * Callers filter the picker with this rather than showing 21 options of which 16
+ * cannot work.
+ */
+export function hostedCapable(e: CatalogEntry): boolean {
+  if (e.hosted !== undefined) return e.hosted;
+  return e.transport === "http" && e.oauth === true;
 }
 
 export const MCP_CATALOG: CatalogEntry[] = [
@@ -327,7 +350,10 @@ export function draftFromCatalog(
     draft.args = (e.args ?? []).map((a) => (e.fill && a === e.fill && filled ? filled : a));
   } else {
     draft.url = e.url;
-    draft.oauth = e.oauth ?? true;
+    // Every http entry in this catalog is an OAuth connector. Emit the adapter's own
+    // vocabulary (`auth`) rather than the legacy boolean, so the projection carries
+    // `auth: "oauth"` and not a bogus boolean in the adapter's OAuthConfig slot.
+    draft.auth = (e.oauth ?? true) ? "oauth" : "none";
   }
 
   const keys = Object.keys(e.env ?? {});

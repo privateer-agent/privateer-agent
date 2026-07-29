@@ -52,6 +52,8 @@ export const Routine = z
     // may be builtin names ("read") or MCP selectors — "<server>__<tool>" exact or
     // "<server>__*" for a whole server (see routines/toolSelect.ts). Selected MCP
     // tools run unattended under the auto-approve gate, so grant the minimum needed.
+    // The selector is NOT the tool name Pi sees; the harbor translates it at run time
+    // (mcp/toolNames.ts). This stored vocabulary is stable — don't "fix" it to match.
     tools: z.array(z.string()).optional(),
     // Paused routines stay in the file but never fire.
     enabled: z.boolean().default(true),

@@ -1,5 +1,6 @@
 import type { Server } from "node:net";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 // Pi session stack. The harbor MUST be launched after ./boot.ts (env +
@@ -25,7 +26,7 @@ import { RelayClient, type TaskSpec } from "../remote/relayClient.ts";
 import { createLiveTaskSession, type LiveTaskHandle } from "../remote/liveTaskSession.ts";
 import { makeRoutinesControl } from "../remote/routinesControl.ts";
 import { makeChannelsControl } from "../remote/channelsControl.ts";
-import { makeMcpControl } from "../remote/mcpControl.ts";
+import { makeMcpControl, mergeSealedMcpSecrets } from "../remote/mcpControl.ts";
 import { makeWorkflowsControl } from "../remote/workflowsControl.ts";
 import { runWorkflow as executeWorkflow, type RunnerDeps, type AgentRunSpec, type AgentRunResult, type ScriptRunResult } from "../workflows/runner.ts";
 import type { Workflow, Step } from "../workflows/schema.ts";
@@ -52,6 +53,7 @@ import {
 import type { Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigger.ts";
 import { splitRoutineTools } from "../routines/toolSelect.ts";
+import { resolveMcpSelection, readMcpInventory, type ResolvedMcpTools } from "../mcp/toolNames.ts";
 import { deliver, type RelayPusher, type CloudPusher } from "../routines/delivery.ts";
 import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
@@ -94,6 +96,11 @@ const MAX_CLOUD_PLAINTEXT = 45_000;
 // answer before it fail-closes to "no response" (the runner then defers the run). Bounds
 // a stuck graph from pinning a `running` slot forever when the controller wanders off.
 const GATE_TIMEOUT_MS = 5 * 60_000;
+// How long a run waits for a newly-selected connector to hand over its tool list
+// before giving up and saying so in the result (see warmMcpCache). Bounds a dead
+// endpoint or an expired OAuth token from stalling a scheduled run.
+const WARM_TIMEOUT_MS = Number(process.env.PRIVATEER_MCP_WARM_MS) || 30_000;
+const WARM_POLL_MS = 250;
 
 interface HarborConfig {
   defaultModel: string;
@@ -132,11 +139,33 @@ function log(msg: string): void {
   process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`);
 }
 
-function formatResult(routine: Routine, body: string, status: "ok" | "error", error?: string): string {
+// Connector notes are things the RUN could not do — a selected connector that isn't
+// configured, or one that wouldn't hand over a tool list. They ride the result
+// because the alternative is the failure mode RoutineIssues exists to prevent: an
+// empty answer three mornings running with no clue why.
+function formatNotes(notes: string[]): string {
+  if (notes.length === 0) return "";
+  return `\n---\n\n${notes.map((n) => `> ⚠︎ ${n}`).join("\n>\n")}\n`;
+}
+
+function formatResult(routine: Routine, body: string, status: "ok" | "error", error?: string, notes: string[] = []): string {
   const when = new Date().toISOString();
   const head = `# ${routine.name}\n\n_${when} · ${status}${routine.model ? ` · ${routine.model}` : ""}_\n\n`;
-  if (status === "error") return `${head}**Run failed:** ${error ?? "unknown error"}\n\n${body}`.trimEnd() + "\n";
-  return `${head}${body.trim() || "(no output)"}\n`;
+  if (status === "error") return `${head}**Run failed:** ${error ?? "unknown error"}\n\n${body}${formatNotes(notes)}`.trimEnd() + "\n";
+  return `${head}${body.trim() || "(no output)"}\n${formatNotes(notes)}`;
+}
+
+// Session CONSTRUCTION is serialized across the harbor. pi-mcp-adapter decides which
+// MCP tools to register directly at extension-activation time, and the only knob for
+// that is the MCP_DIRECT_TOOLS env var — process-global state we set per run to keep
+// each unattended session to its own connector allow-list. Serializing the (short)
+// build window is what stops two concurrent routines from reading each other's value.
+// Prompting is NOT serialized — only the build.
+let buildLock: Promise<unknown> = Promise.resolve();
+function serializeBuild<T>(fn: () => Promise<T>): Promise<T> {
+  const run = buildLock.then(fn, fn);
+  buildLock = run.catch(() => {});
+  return run;
 }
 
 // A short human title for an ad-hoc task: the app's explicit title, else the first
@@ -148,11 +177,11 @@ export function deriveTaskTitle(spec: TaskSpec): string {
   return firstLine.slice(0, 80);
 }
 
-function formatTaskResult(title: string, body: string, status: "ok" | "error", error?: string, model?: string): string {
+function formatTaskResult(title: string, body: string, status: "ok" | "error", error?: string, model?: string, notes: string[] = []): string {
   const when = new Date().toISOString();
   const head = `# ${title}\n\n_${when} · ${status}${model ? ` · ${model}` : ""}_\n\n`;
-  if (status === "error") return `${head}**Task failed:** ${error ?? "unknown error"}\n\n${body}`.trimEnd() + "\n";
-  return `${head}${body.trim() || "(no output)"}\n`;
+  if (status === "error") return `${head}**Task failed:** ${error ?? "unknown error"}\n\n${body}${formatNotes(notes)}`.trimEnd() + "\n";
+  return `${head}${body.trim() || "(no output)"}\n${formatNotes(notes)}`;
 }
 
 // Render a finished workflow run into the delivery/outbox markdown: the terminal status,
@@ -193,6 +222,8 @@ export class Harbor {
   // + no live work rather than on controllerAttached, which never resets while the
   // socket stays open).
   private lastActivityAt = Date.now();
+  // In-flight MCP tool-inventory rebuild, shared by every run that needs one.
+  private warmInFlight?: Promise<void>;
   // Live, app-drivable sessions spawned on demand (task_spawn). Each has its OWN relay
   // terminal (task-<uuid>); the harbor just keeps handles so it can reap them on shutdown.
   private readonly liveTasks = new Map<string, LiveTaskHandle>();
@@ -401,7 +432,9 @@ export class Harbor {
   // envelope (action "mcp_save", args {draft, sealedSecrets}) — the action tag stops a
   // signature made for any other frame from being replayed as an MCP save. Fail-closed:
   // an unsigned/forged/stale frame returns the refusal message and NOTHING is written.
-  // The sealed box opens to { termId, env } — a token the relay never sees in the clear.
+  // The sealed box opens to { termId, env?, headers?, bearerToken? } — credentials the
+  // relay never sees in the clear. mergeSealedMcpSecrets enforces that those three may
+  // arrive NO OTHER WAY: a signature proves authorship, not confidentiality.
   private applyMcpSave(draft: Record<string, unknown>, sealedSecrets?: string, sig?: string, ts?: number): string | undefined {
     const auth = authorizeControl(
       routineRelayId(),
@@ -412,20 +445,22 @@ export class Harbor {
     );
     if (!auth.ok) return auth.message;
 
-    let withEnv = draft;
+    let opened:
+      | { termId?: string; env?: Record<string, string>; headers?: Record<string, string>; bearerToken?: string }
+      | undefined;
     if (sealedSecrets) {
-      let opened: { termId?: string; env?: Record<string, string> };
       try {
         opened = openJsonFromApp(sealedSecrets);
       } catch {
         return "Couldn't decrypt the connector credentials — they may have been sealed to a different terminal.";
       }
-      if (opened.termId !== routineRelayId()) {
+      if (opened?.termId !== routineRelayId()) {
         return "These credentials were addressed to a different terminal.";
       }
-      withEnv = { ...draft, env: opened.env ?? {} };
     }
-    return this.mcp.save(withEnv as any).message;
+    const prepared = mergeSealedMcpSecrets(draft, opened);
+    if (!prepared.ok) return prepared.message;
+    return this.mcp.save(prepared.draft as any).message;
   }
 
   // Push the current workflow summaries to an attached controller (its workflows
@@ -698,24 +733,18 @@ export class Harbor {
 
     const config = loadHarborConfig();
     const modelSpec = routine.model ?? config.defaultModel;
-    const split = splitRoutineTools(routine.tools);
-    // MCP tools (server__tool) join the allow-list: the mcpAdapter loaded in runSession
-    // registers them from the shared mcp.json, and the routine's SIGNED tool list is the
-    // authorization boundary under the bypass gate (same as builtin tools). An http/OAuth
-    // connector that never completed its browser flow simply errors at call time.
-    const allowedTools = [...builtinToolsFor(split.builtin), ...split.mcp];
     if (routine.delivery.includes("email")) {
       log("  note: email delivery is not wired yet (Phase 5) — skipping it");
     }
 
-    const { out, status, error } = await this.runSession({
+    const { out, status, error, notes } = await this.runSession({
       prompt: routine.prompt,
       cwd: routine.cwd,
       model: modelSpec,
-      tools: allowedTools,
+      tools: routine.tools ?? [],
     });
 
-    const content = formatResult(routine, out, status, error);
+    const content = formatResult(routine, out, status, error, notes);
     const report = await deliver(routine, content, status, {
       pushRelay: this.pushRelay,
       pushCloud: this.pushCloud,
@@ -734,25 +763,24 @@ export class Harbor {
     return { ok: status === "ok", message: report.delivered.join(", ") || undefined };
   }
 
-  // Drive one headless Pi turn to completion and return its collected text + status.
-  // The shared core of BOTH a scheduled routine and an app-submitted ad-hoc task: an
-  // auto-approve (bypass) gate whose safety is the restricted `tools` list — a dangerous
-  // shell command still fail-closes headlessly (localAsk denies) — plus per-run account
-  // credentials that are revoked in the finally so they never linger as an orphaned
-  // "device" in the app's Linked Devices.
-  private async runSession(spec: { prompt: string; cwd: string; model: string; tools: string[] }): Promise<{ out: string; status: "ok" | "error"; error?: string }> {
-    let out = "";
-    let status: "ok" | "error" = "ok";
-    let error: string | undefined;
-    let servicesRef: { authStorage?: { remove?: (p: string) => void; get?: (p: string) => unknown } } | null = null;
-    let spawnedAccount = false;
-    try {
+  // Build the Pi services for one unattended run: the auto-approve gate, the account
+  // provider, web tools when the agent has them, and the MCP adapter.
+  //
+  // `directTools` is the ONLY way to make per-tool MCP names exist at all. Without it
+  // pi-mcp-adapter exposes every connector through a single proxy tool named "mcp" —
+  // one grant, all servers, all tools — which is exactly what a per-routine allow-list
+  // is supposed to prevent. The adapter reads it from process.env at extension
+  // activation, so the build is serialized (serializeBuild) and the previous value is
+  // restored. "__none__" is its sentinel for "register none": an unattended run with
+  // no connector selectors gets no direct tools, whatever a shared mcp.json says.
+  private buildSessionServices(cwd: string, directTools: string[]): Promise<any> {
+    return serializeBuild(async () => {
       const gate: GateController = {
         getMode: () => "bypass",
         setMode: () => {},
         allowlist: [],
         allowedOutsideRoots: [],
-        cwd: spec.cwd,
+        cwd,
         confineToCwd: true,
         async localAsk() {
           return "deny";
@@ -766,30 +794,149 @@ export class Harbor {
       // adapter's own .ts into our typecheck — same intent as the desktop's agentImport.
       const mcpAdapterSpec = "pi-mcp-adapter";
       const { default: mcpAdapter } = await import(mcpAdapterSpec);
-      const services = await createAgentSessionServices({
-        cwd: spec.cwd,
-        agentDir: agentDir(),
-        resourceLoaderOptions: {
-          extensionFactories: [
-            makePermissionGate(gate),
-            // Per-model verified-TEE capability for pi-privacy's /models picker: show
-            // Privateer's TEE-channel models (near/tinfoil/phala) as "◆ Verifiable TEE"
-            // when logged in; ZDR-channel models stay at their honest floor. The live
-            // verdict still comes from accountPosture on select — this only lifts the label.
-            makePiPrivacyExtension({
-              privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
-            }),
-            makeAccountProvider(),
-            // Web access (src/tools/web.ts), when the agent is allowed it. Registered
-            // here rather than picked up from extensions/ because the harbor never
-            // installs the launcher's shims. Omitting the factory — not just dropping
-            // the names from the allow-list — is what makes "web off" mean the tools
-            // don't exist for this run at all.
-            ...(webEnabled() ? [makeWebTools()] : []),
-            mcpAdapter,
-          ] as any,
-        },
-      });
+      const prevDirect = process.env.MCP_DIRECT_TOOLS;
+      process.env.MCP_DIRECT_TOOLS = directTools.length > 0 ? directTools.join(",") : "__none__";
+      try {
+        return await createAgentSessionServices({
+          cwd,
+          agentDir: agentDir(),
+          resourceLoaderOptions: {
+            extensionFactories: [
+              makePermissionGate(gate),
+              // Per-model verified-TEE capability for pi-privacy's /models picker: show
+              // Privateer's TEE-channel models (near/tinfoil/phala) as "◆ Verifiable TEE"
+              // when logged in; ZDR-channel models stay at their honest floor. The live
+              // verdict still comes from accountPosture on select — this only lifts the label.
+              makePiPrivacyExtension({
+                privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
+              }),
+              makeAccountProvider(),
+              // Web access (src/tools/web.ts), when the agent is allowed it. Registered
+              // here rather than picked up from extensions/ because the harbor never
+              // installs the launcher's shims. Omitting the factory — not just dropping
+              // the names from the allow-list — is what makes "web off" mean the tools
+              // don't exist for this run at all.
+              ...(webEnabled() ? [makeWebTools()] : []),
+              mcpAdapter,
+            ] as any,
+          },
+        });
+      } finally {
+        if (prevDirect === undefined) delete process.env.MCP_DIRECT_TOOLS;
+        else process.env.MCP_DIRECT_TOOLS = prevDirect;
+      }
+    });
+  }
+
+  // Turn a routine's stored tool list into what Pi will actually accept.
+  //
+  // Builtins pass through builtinToolsFor (explicit list, or the safe read/web set).
+  // MCP entries are SELECTORS — "<server>__<tool>" / "<server>__*" — and have to be
+  // translated into the adapter's registered names before Pi's exact-match `tools:`
+  // Set can grant anything at all. A "<server>__*" needs the adapter's metadata cache
+  // to enumerate; when that is cold we warm it (below) and re-resolve once.
+  private async resolveRunTools(
+    raw: string[],
+    cwd: string,
+    modelSpec: string,
+  ): Promise<{ tools: string[]; directToolsEnv: string[]; notes: string[] }> {
+    const split = splitRoutineTools(raw);
+    const builtin = builtinToolsFor(split.builtin);
+    if (split.mcp.length === 0) return { tools: builtin, directToolsEnv: [], notes: [] };
+
+    let resolved: ResolvedMcpTools = resolveMcpSelection(split.mcp);
+    if (resolved.coldServers.length > 0) {
+      await this.warmMcpCache(cwd, modelSpec, resolved.coldServers);
+      resolved = resolveMcpSelection(split.mcp);
+    }
+
+    const notes: string[] = [];
+    for (const server of resolved.coldServers) {
+      notes.push(
+        `Connector "${server}" didn't provide a tool list, so none of its tools were available to this run. ` +
+          `Check it is configured and, if it uses OAuth, that it is still authorized.`,
+      );
+    }
+    for (const selector of resolved.unknownTools) {
+      notes.push(`Connector tool "${selector}" doesn't exist on that connector, so it was not available to this run.`);
+    }
+    if (resolved.names.length > 0) {
+      log(`  connectors: ${resolved.servers.join(", ")} → ${resolved.names.length} tools`);
+    }
+    for (const note of notes) log(`  ${note}`);
+    return { tools: [...builtin, ...resolved.names], directToolsEnv: resolved.directToolsEnv, notes };
+  }
+
+  // Make pi-mcp-adapter build a fresh tool inventory for every configured connector.
+  //
+  // The adapter only connects to ALL of them when agent/mcp-cache.json is absent
+  // (init.ts → bootstrapAll); with the file present it connects lazily, so a connector
+  // added since the last session never gets an inventory and a "<server>__*" selector
+  // over it expands to nothing, for ever. Dropping the cache is safe — it is a cache —
+  // and makes this one throwaway session rebuild it. The session is never prompted
+  // (empty allow-list) and its MCP connections close on the adapter's idle timeout.
+  //
+  // The adapter does NOT await its own initialization from session_start — it stashes
+  // the promise and returns — so session creation resolving means nothing here. We
+  // watch the cache file instead, and give up after WARM_TIMEOUT_MS: a connector that
+  // never answers (dead endpoint, expired OAuth) must not hold a scheduled run open.
+  //
+  // A warm rebuilds the inventory for EVERY configured connector, so two runs that
+  // both hit a cold selector share one pass rather than racing to wipe the file out
+  // from under each other.
+  private warmMcpCache(cwd: string, modelSpec: string, servers: string[]): Promise<void> {
+    if (this.warmInFlight) return this.warmInFlight;
+    const p = this.doWarmMcpCache(cwd, modelSpec, servers).finally(() => {
+      if (this.warmInFlight === p) this.warmInFlight = undefined;
+    });
+    this.warmInFlight = p;
+    return p;
+  }
+
+  private async doWarmMcpCache(cwd: string, modelSpec: string, servers: string[]): Promise<void> {
+    log(`  warming connector tool lists: ${servers.join(", ")}`);
+    try {
+      rmSync(join(agentDir(), "mcp-cache.json"), { force: true });
+      const services = await this.buildSessionServices(cwd, []);
+      const { provider, modelId } = parseSpec(modelSpec);
+      const model = (services.modelRegistry as any).find(provider, modelId);
+      if (!model) return;
+      const { session } = await createAgentSessionFromServices({
+        services,
+        sessionManager: SessionManager.inMemory(cwd),
+        model,
+        tools: [],
+      } as any);
+      try {
+        const deadline = Date.now() + WARM_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+          const inventory = readMcpInventory(agentDir());
+          if (servers.every((s) => (inventory[s]?.length ?? 0) > 0)) break;
+          await new Promise((r) => setTimeout(r, WARM_POLL_MS));
+        }
+      } finally {
+        session.dispose?.();
+      }
+    } catch (e) {
+      log(`  connector warm-up failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Drive one headless Pi turn to completion and return its collected text + status.
+  // The shared core of BOTH a scheduled routine and an app-submitted ad-hoc task: an
+  // auto-approve (bypass) gate whose safety is the restricted `tools` list — a dangerous
+  // shell command still fail-closes headlessly (localAsk denies) — plus per-run account
+  // credentials that are revoked in the finally so they never linger as an orphaned
+  // "device" in the app's Linked Devices.
+  private async runSession(spec: { prompt: string; cwd: string; model: string; tools: string[] }): Promise<{ out: string; status: "ok" | "error"; error?: string; notes: string[] }> {
+    let out = "";
+    let status: "ok" | "error" = "ok";
+    let error: string | undefined;
+    let servicesRef: { authStorage?: { remove?: (p: string) => void; get?: (p: string) => unknown } } | null = null;
+    let spawnedAccount = false;
+    const { tools: allowedTools, directToolsEnv, notes } = await this.resolveRunTools(spec.tools, spec.cwd, spec.model);
+    try {
+      const services = await this.buildSessionServices(spec.cwd, directToolsEnv);
       servicesRef = services as any;
 
       const { provider, modelId } = parseSpec(spec.model);
@@ -813,7 +960,7 @@ export class Harbor {
           services,
           sessionManager: SessionManager.inMemory(spec.cwd),
           model,
-          tools: spec.tools,
+          tools: allowedTools,
         } as any);
         const adapter = createEngineEventAdapter();
         session.subscribe((ev: any) => {
@@ -841,7 +988,7 @@ export class Harbor {
         try { dropPersistedAccountCredential({ modelRegistry: { authStorage: servicesRef?.authStorage } }); } catch { /* nothing persisted */ }
       }
     }
-    return { out, status, error };
+    return { out, status, error, notes };
   }
 
   // Run an app-submitted AD-HOC task (task_submit): one restricted headless turn whose
@@ -854,8 +1001,6 @@ export class Harbor {
     const config = loadHarborConfig();
     const cwd = spec.cwd && spec.cwd.trim() ? spec.cwd : process.cwd();
     const modelSpec = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
-    const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
-    const allowedTools = [...builtinToolsFor(split?.builtin ?? []), ...(split?.mcp ?? [])];
     const title = deriveTaskTitle(spec);
     const key = `task:${title}`;
     if (this.running.has(key)) {
@@ -865,8 +1010,8 @@ export class Harbor {
     this.running.add(key);
     log(`running task "${title}"`);
     try {
-      const { out, status, error } = await this.runSession({ prompt: spec.prompt, cwd, model: modelSpec, tools: allowedTools });
-      const content = redactText(formatTaskResult(title, out, status, error, modelSpec), collectSecrets(config.providers));
+      const { out, status, error, notes } = await this.runSession({ prompt: spec.prompt, cwd, model: modelSpec, tools: spec.tools ?? [] });
+      const content = redactText(formatTaskResult(title, out, status, error, modelSpec, notes), collectSecrets(config.providers));
       const at = new Date().toISOString();
       // Durable delivery: seal to the outbox. If we can't seal yet (no verified pubkey /
       // offline), queue it with kind:"task" so the flush re-seals it correctly later.
@@ -1038,12 +1183,13 @@ export class Harbor {
   private async runWorkflowAgent(spec: AgentRunSpec): Promise<AgentRunResult> {
     const config = loadHarborConfig();
     const model = spec.model && spec.model.trim() ? spec.model : config.defaultModel;
-    const split = spec.tools && spec.tools.length ? splitRoutineTools(spec.tools) : undefined;
-    const tools = [...builtinToolsFor(split?.builtin ?? []), ...(split?.mcp ?? [])];
-    const { out, status, error } = await this.runSession({ prompt: spec.prompt, cwd: spec.cwd, model, tools });
+    const { out, status, error, notes } = await this.runSession({ prompt: spec.prompt, cwd: spec.cwd, model, tools: spec.tools ?? [] });
     let output: Record<string, unknown> = {};
     try { const p = JSON.parse(out.trim()); if (p && typeof p === "object" && !Array.isArray(p)) output = p as Record<string, unknown>; } catch { /* non-JSON → raw text only */ }
-    return { text: out, output, status, error };
+    // A step's `text` is what a later step interpolates and what the run report shows,
+    // so an unreachable connector has to be visible there too — silently returning a
+    // thinner answer is how a broken graph looks like a working one.
+    return { text: notes.length > 0 ? `${out}${formatNotes(notes)}` : out, output, status, error };
   }
 
   private persistRun(id: string, patch: Partial<Routine>): void {
