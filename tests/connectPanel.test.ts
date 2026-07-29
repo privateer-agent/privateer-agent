@@ -304,6 +304,105 @@ test("connect: the auth steps are skipped entirely for a local command", async (
   assert.equal(proj.bearerToken, undefined);
 });
 
+// ── Hosted agents ────────────────────────────────────────────────────────────
+//
+// A Harbor tenant can hold remote OAuth connectors and nothing else (Option B —
+// treeview/docs/HARBOR_CONNECTORS_PLAN.md §2). The picker has to reflect that at the
+// question, not at first call: a connector that saves cleanly and then never works is
+// the failure these tests exist to prevent.
+//
+// isHosted() reads process.env at call time, so flipping it per test is enough.
+function hosted(fn: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    const prev = process.env.HARBOR_HOSTED;
+    process.env.HARBOR_HOSTED = "1";
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) delete process.env.HARBOR_HOSTED;
+      else process.env.HARBOR_HOSTED = prev;
+    }
+  };
+}
+
+test(
+  "connect: a hosted picker offers the remote OAuth connectors",
+  hosted(async () => {
+    freshHome();
+    const d = openPanel();
+    // Linear is http + OAuth, so it survives the filter and has nothing to ask.
+    d.send("a", "l", "i", "n", "e", "a", ENTER);
+    d.send(ESC);
+    await d.done;
+
+    const proj = readProj().mcpServers.linear;
+    assert.ok(proj, `linear not projected — got ${JSON.stringify(readProj())}`);
+    assert.equal(proj.auth, "oauth");
+  }),
+);
+
+test(
+  "connect: a hosted picker hides the connectors the runtime cannot hold",
+  hosted(async () => {
+    freshHome();
+    const d = openPanel();
+    // Memory is stdio: no match at all here, so enter has nothing to choose and the
+    // panel stays in the catalog. Two escapes (catalog → list → close) end the run.
+    //
+    // Spelled out in full because the search is a SUBSEQUENCE match — "memo" alone
+    // still hits Stripe ("...ite**m**s from your Strip**e** account" and so on), which
+    // would quietly turn this into a test that saves a connector.
+    d.send("a", "m", "e", "m", "o", "r", "y", ENTER);
+    d.send(ESC, ESC);
+    const res: any = await d.done;
+
+    assert.equal(readProj().mcpServers.memory, undefined, "a stdio connector was offered anyway");
+    assert.equal(res.reloads, 0, "nothing should have been written");
+  }),
+);
+
+test(
+  "connect: a hosted custom connector refuses a local command",
+  hosted(async () => {
+    freshHome();
+    const d = openPanel();
+    d.send("a", "c", "u", "s", "t", "o", "m", ENTER);
+    d.send("localish", ENTER); // name
+    d.send("npx -y @modelcontextprotocol/server-memory", ENTER); // rejected: not a URL
+    // Still on the target step, which is the proof: escaping needs FOUR steps back
+    // out (target → name → catalog → list → close). Had the answer been accepted the
+    // form would have saved and closed, and these would over-escape.
+    d.send(ESC, ESC, ESC, ESC);
+    const res: any = await d.done;
+
+    assert.equal(readProj().mcpServers.localish, undefined, "a stdio connector was saved on a hosted agent");
+    assert.equal(res.reloads, 0);
+  }),
+);
+
+test(
+  "connect: a hosted custom connector is name + URL, and never asks for a token",
+  hosted(async () => {
+    freshHome();
+    const d = openPanel();
+    d.send("a", "c", "u", "s", "t", "o", "m", ENTER);
+    d.send("remoteish", ENTER); // name
+    // The URL is the LAST hosted step — env/bearer/headers are all skipped, so this
+    // one enter saves. If any of them were still asked, nothing would be written yet.
+    d.send("https://mcp.example.com/sse", ENTER);
+    d.send(ESC);
+    await d.done;
+
+    const proj = readProj().mcpServers.remoteish;
+    assert.ok(proj, "the URL step did not complete the form — a secret step is still being asked");
+    assert.equal(proj.url, "https://mcp.example.com/sse");
+    assert.equal(proj.auth, "oauth");
+    assert.equal(proj.bearerToken, undefined, "a hosted agent must not store a token");
+    assert.equal(proj.env, undefined);
+    assert.equal(proj.headers, undefined);
+  }),
+);
+
 test("connect: closing without changes does not reload", async () => {
   freshHome({ github: GITHUB }); // a populated list, so this isn't just an empty no-op
   const d = openPanel();

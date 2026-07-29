@@ -37,9 +37,11 @@ import {
 import {
   MCP_CATALOG,
   draftFromCatalog,
+  hostedCapable,
   promptOrder,
   type CatalogEntry,
 } from "../src/mcp/catalog.ts";
+import { isHosted } from "../src/config/hosted.ts";
 
 // Minimal views of Pi's theme + TUI handle, mirroring privateer-models.ts — enough to
 // color text and request a redraw without coupling this file to Pi internals.
@@ -131,6 +133,10 @@ interface Step {
   // how a wizard teaches people to hammer Enter without reading. Predicates may only
   // read answers from EARLIER steps.
   when?: (answers: Record<string, string>) => boolean;
+  // Reject an answer before it becomes an answer, returning the reason to show. For
+  // rules mcpControl can't check because it never sees the raw form input, or that it
+  // would only catch after the user has typed three more fields for nothing.
+  validate?: (value: string) => string | undefined;
 }
 
 type View = "list" | "catalog" | "form";
@@ -155,6 +161,12 @@ interface Pending {
 const isHttpTarget = (answers: Record<string, string>) => /^https?:\/\//i.test((answers.target ?? "").trim());
 
 function customSteps(existing?: RemoteMcpServer): Step[] {
+  // A hosted agent takes remote OAuth connectors and nothing else (Option B —
+  // treeview/docs/HARBOR_CONNECTORS_PLAN.md §2), so the custom form drops to that
+  // shape: no local command, and no stored token. Both are refused at the question
+  // rather than at first call, because a connector that saves cleanly and then never
+  // works is the worse of the two failures.
+  const hosted = isHosted();
   const target = existing
     ? existing.transport === "http"
       ? existing.url
@@ -169,15 +181,26 @@ function customSteps(existing?: RemoteMcpServer): Step[] {
     },
     {
       key: "target",
-      prompt: "Launch command, or an https:// URL",
-      hint: "e.g. npx -y @modelcontextprotocol/server-memory  ·  or  https://mcp.example.com/sse",
+      prompt: hosted ? "Server URL" : "Launch command, or an https:// URL",
+      hint: hosted
+        ? "e.g. https://mcp.example.com/sse — a hosted agent can't run a local command."
+        : "e.g. npx -y @modelcontextprotocol/server-memory  ·  or  https://mcp.example.com/sse",
       initial: target,
+      validate: hosted
+        ? (v) =>
+            /^https?:\/\//i.test(v.trim())
+              ? undefined
+              : "A hosted agent can only reach remote connectors — this needs an https:// URL."
+        : undefined,
     },
     {
       key: "env",
       prompt: "Environment variables (optional)",
       hint: "KEY=value, comma-separated. Leave blank for none.",
       optional: true,
+      // Nothing to set them ON when there is no local process to spawn, and their
+      // values are credentials at rest — both reasons a hosted agent skips this.
+      when: () => !hosted,
     },
     {
       key: "bearerToken",
@@ -187,16 +210,19 @@ function customSteps(existing?: RemoteMcpServer): Step[] {
         : "Leave blank to sign in through the browser instead (OAuth).",
       secret: true,
       optional: true,
-      when: isHttpTarget,
+      // Never asked on a hosted agent: the home is tmpfs and a stored token would have
+      // to rest somewhere we can read. OAuth is the only credential it may hold.
+      when: (a) => !hosted && isHttpTarget(a),
     },
     {
       key: "headers",
       prompt: "Extra HTTP headers (optional)",
       hint: "KEY=value, comma-separated — e.g. X-Api-Version=2. Leave blank for none.",
-      // Header values are credentials as often as not, so this is masked like a token.
+      // Header values are credentials as often as not, so this is masked like a token
+      // — and for the same reason a hosted agent is never offered it.
       secret: true,
       optional: true,
-      when: isHttpTarget,
+      when: (a) => !hosted && isHttpTarget(a),
     },
   ];
 }
@@ -306,8 +332,16 @@ const NEEDS_LABEL: Record<string, string> = {
   none: "no setup",
 };
 
+// On a hosted (Harbor) agent the picker offers only what the runtime can actually
+// hold — see hostedCapable(). Offering the other 16 would be offering a connector that
+// installs nothing, keeps nothing, and fails at first call: the tenant is `--read-only`
+// with no uv/uvx/Python and a tmpfs home wiped on every suspend. Filtering here rather
+// than letting them fail later is the difference between "not available on a hosted
+// agent" and "I set it up and it just doesn't work."
 function catalogRows(): CatalogRow[] {
-  const rows: CatalogRow[] = MCP_CATALOG.map((e) => ({
+  const hosted = isHosted();
+  const entries = hosted ? MCP_CATALOG.filter(hostedCapable) : MCP_CATALOG;
+  const rows: CatalogRow[] = entries.map((e) => ({
     entry: e,
     label: e.label,
     blurb: e.blurb,
@@ -315,7 +349,9 @@ function catalogRows(): CatalogRow[] {
   }));
   rows.push({
     label: "Custom…",
-    blurb: "Any stdio command or http URL.",
+    // Custom survives the filter because a custom REMOTE OAuth connector is fine here;
+    // it's stdio and stored tokens that aren't. customSteps enforces that.
+    blurb: hosted ? "Any https:// URL with browser sign-in." : "Any stdio command or http URL.",
     needsLabel: "",
   });
   return rows;
@@ -500,6 +536,13 @@ class ConnectPanel extends Container {
   private renderCatalog(): void {
     const t = this.theme;
     this.body.addChild(new Text(t.fg("accent", t.bold("Add a connector")), 1, 0));
+    // Say why the list is short before the user goes looking for GitHub. A filter with
+    // no explanation reads as a missing connector, which is a support question.
+    if (isHosted()) {
+      this.body.addChild(
+        new Text(t.fg("muted", "  Hosted agent — remote connectors with browser sign-in only."), 1, 0),
+      );
+    }
     this.body.addChild(new Spacer(1));
     this.body.addChild(this.search);
     this.body.addChild(new Spacer(1));
@@ -624,6 +667,14 @@ class ConnectPanel extends Container {
     const value = step.secret ? this.secret.value : this.field.getValue().trim();
     if (!value && !step.optional) {
       this.status = "That one's required.";
+      this.refresh();
+      return;
+    }
+    // Validate only what was actually typed: a blank optional answer means "skip", and
+    // a rule about the shape of a value has nothing to say about its absence.
+    const bad = value && step.validate ? step.validate(value) : undefined;
+    if (bad) {
+      this.status = bad;
       this.refresh();
       return;
     }

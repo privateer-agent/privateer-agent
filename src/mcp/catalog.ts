@@ -53,8 +53,13 @@ export interface CatalogEntry {
  * which we decided against (Option B — see treeview/docs/HARBOR_CONNECTORS_PLAN.md §2).
  * What is left is remote HTTP + OAuth.
  *
- * Callers filter the picker with this rather than showing 21 options of which 16
- * cannot work.
+ * The `/connect` picker filters on this (extensions/privateer-connect.ts →
+ * catalogRows) rather than showing 21 options of which 16 cannot work. It shapes the
+ * custom-connector form there too: no local command, no stored token.
+ *
+ * It does NOT gate mcpControl.save() — the app-over-relay path can still write a
+ * connector this returns false for. Fixing that means teaching mcpControl about
+ * hosted mode, which is a bigger change than a picker filter.
  */
 export function hostedCapable(e: CatalogEntry): boolean {
   if (e.hosted !== undefined) return e.hosted;
