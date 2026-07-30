@@ -1,5 +1,7 @@
 import { resolve, isAbsolute, relative, dirname, join, basename } from "node:path";
 import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { isProtectedPath } from "./protected.ts";
 import type { PermissionRequest } from "./gate.ts";
 
@@ -42,8 +44,57 @@ function realBase(abs: string): string {
   }
 }
 
+// ⚠️ SECURITY-CRITICAL: this MUST resolve a path string to exactly the same place
+// Pi's file tools do, or the gate judges one file and the tool touches another.
+//
+// Pi resolves every tool path through `resolveToCwd` → `resolvePath` →
+// `normalizePath` (node_modules/@earendil-works/pi-coding-agent/dist/utils/paths.js
+// and dist/core/tools/path-utils.js), which EXPANDS `~`, STRIPS a leading `@`, and
+// converts `file://` URLs. `node:path` treats all three as RELATIVE, so a classifier
+// using bare resolve() computed `<cwd>/~/.ssh/authorized_keys` — comfortably "inside"
+// the working directory — while `write` truly targeted `$HOME/.ssh/authorized_keys`.
+// That made `outside` false and `protected` false (isProtectedPath matches basenames,
+// and `authorized_keys` isn't one), so:
+//   • reads returned null from classifyToolCall — NO gate at all, in every posture
+//     including plan/readonly, at the default read-only tool ceiling; and
+//   • writes auto-allowed under acceptEdits / bypass / no-quarter.
+// The adversary here is the MODEL (prompt injection), not the user, so "the operator
+// could read that file anyway" does not apply.
+//
+// Pi does not export normalizePath (package exports are "." and "./rpc-entry" only),
+// so it is mirrored here. KEEP IN SYNC — tests/classifyPathParity.test.ts asserts this
+// function agrees with Pi's own resolver, so a Pi upgrade that changes normalization
+// fails the suite instead of silently reopening the hole.
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+function normalizeLikePi(input: string, opts: { unicodeSpaces?: boolean; stripAt?: boolean } = {}): string {
+  let s = input;
+  if (opts.unicodeSpaces) s = s.replace(UNICODE_SPACES, " ");
+  if (opts.stripAt && s.startsWith("@")) s = s.slice(1);
+  const home = homedir();
+  if (s === "~") return home;
+  if (s.startsWith("~/") || (process.platform === "win32" && s.startsWith("~\\"))) return join(home, s.slice(2));
+  if (/^file:\/\//.test(s)) {
+    // Pi lets fileURLToPath throw here, which fails the tool call. We must not throw
+    // (that would break the gate), so fall back to the raw string: it then resolves
+    // inside cwd, but the tool errors on the same input, so there is no divergence
+    // a caller can exploit.
+    try {
+      return fileURLToPath(s);
+    } catch {
+      return s;
+    }
+  }
+  return s;
+}
+
 function resolveInCwd(cwd: string, p: string): string {
-  return realBase(isAbsolute(p) ? p : resolve(cwd, p));
+  // Mirrors resolvePath(): the TARGET gets the tools' options
+  // ({normalizeUnicodeSpaces, stripAtPrefix}); the BASE gets normalizePath's defaults
+  // (tilde/file:// only), because Pi normalizes baseDir with no options.
+  const target = normalizeLikePi(p, { unicodeSpaces: true, stripAt: true });
+  const base = normalizeLikePi(cwd);
+  return realBase(isAbsolute(target) ? resolve(target) : resolve(base, target));
 }
 
 function isInsideDir(root: string, abs: string): boolean {
