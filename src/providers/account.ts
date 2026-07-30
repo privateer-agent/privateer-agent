@@ -429,6 +429,51 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
   }
 }
 
+// A model entry, with a per-model baseUrl override once the EHBP shim is listening:
+// `tinfoil/*` then route through the loopback shim (which seals to the blind relay)
+// instead of the cleartext `/api/agent/v1` proxy. Everything else keeps the provider
+// baseUrl. Until the shim is up (or when sealed mode is off) sealed models fall back to
+// the cleartext path — and the badge stays honestly `tee-unverified` (see accountPosture).
+function modelEntry(id: string) {
+  const base = seedModel(id);
+  const provider = sealedEnabled() ? sealedProviderFor(id) : null;
+  const shim = sealedShimBase();
+  return provider && shim ? { ...base, baseUrl: `${shim}/${provider}/v1` } : base;
+}
+
+// The Pi provider config for the account channel, over a given set of model ids.
+export function accountProviderConfig(ids: string[]): Record<string, unknown> {
+  return {
+    name: "Privateer account",
+    baseUrl: `${serverBaseUrl()}/api/agent/v1`,
+    api: "openai-completions",
+    oauth: privateerOAuthProvider,
+    models: ids.map(modelEntry),
+  };
+}
+
+// Re-assert the account channel's registration from ANOTHER extension.
+//
+// pi-privacy also ships a `privateer` provider (its PRIVACY_PROVIDERS catalog) — the
+// PUBLIC developer-key channel: baseUrl api.privateer.pro/v1, `${PRIVATEER_API_KEY}`,
+// and a single seed model (near/zai-org/GLM-5.1-FP8). Pi's registerProvider FULLY
+// REPLACES a provider's model list and its request config, so whichever registration
+// lands last wins — and pi extensions are discovered with an unsorted readdirSync, which
+// on a typical box puts privateer-privacy after privateer-account. The account channel's
+// whole catalog was then replaced by that one model, so the default `tinfoil/glm-5-2` no
+// longer resolved ("not found for provider privateer. Using custom model id") and the
+// synthesized model inherited the PUBLIC endpoint instead of `/api/agent/v1`.
+//
+// So privateer-privacy.ts calls this right after pi-privacy runs, exactly as it re-widens
+// `tinfoil`. Idempotent and order-independent: if privacy happens to load first, the
+// account extension's own registration lands afterwards with the same config, and the
+// live-catalog fetch re-registers over both moments later either way.
+export function registerAccountModels(pi: {
+  registerProvider?: (name: string, config: unknown) => void;
+}): void {
+  pi.registerProvider?.("privateer", accountProviderConfig(seedCatalogIds()));
+}
+
 // Extension factory: registers the account provider so `/login` can offer it.
 //
 // We register UNCONDITIONALLY (not only when a machine login already exists). Pi's
@@ -454,31 +499,13 @@ export function makeAccountProvider() {
     on?: (event: string, handler: (e: unknown, ctx: unknown) => void) => void;
   }): void => {
     if (typeof pi.registerProvider !== "function") return;
-    // A model entry, with a per-model baseUrl override for sealed models once the
-    // EHBP shim is listening: `tinfoil/*` then route through the loopback shim (which
-    // seals to the blind relay) instead of the cleartext `/api/agent/v1` proxy.
-    // Everything else keeps the provider baseUrl below. Until the shim is up (or when
-    // sealed mode is off) sealed models fall back to the cleartext path — and the
-    // badge stays honestly `tee-unverified` (see accountPosture).
-    const modelEntry = (id: string) => {
-      const base = seedModel(id);
-      const provider = sealedEnabled() ? sealedProviderFor(id) : null;
-      const shim = sealedShimBase();
-      return provider && shim ? { ...base, baseUrl: `${shim}/${provider}/v1` } : base;
-    };
     // Seed with the last live catalog when we have one (see seedCatalogIds): this is the
     // list Pi resolves a saved default / a restored session model against at launch,
     // before the live re-registration can reach the registry.
     let lastIds: string[] = seedCatalogIds();
     const register = (ids: string[]): void => {
       lastIds = ids;
-      pi.registerProvider!("privateer", {
-        name: "Privateer account",
-        baseUrl: `${serverBaseUrl()}/api/agent/v1`,
-        api: "openai-completions",
-        oauth: privateerOAuthProvider,
-        models: ids.map(modelEntry),
-      });
+      pi.registerProvider!("privateer", accountProviderConfig(ids));
     };
     register(lastIds); // immediate: provider exists this tick, with a resolvable catalog
     // Bring up the sealed shim, then re-register so sealed models pick up their shim

@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { globalDir } from "../config/paths.ts";
-import { harborIsRunning } from "./ipc.ts";
+import { harborIsRunning, sendToHarbor, describeRelay, formatDuration, type IpcResponse } from "./ipc.ts";
 
 const LABEL = "pro.privateer.harbor"; // launchd label / reverse-dns id
 const UNIT = "privateer-harbor.service"; // systemd --user unit name
@@ -62,7 +62,13 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function launchdPlist(): string {
+// KeepAlive is `{ SuccessfulExit: false }`, NOT plain `true` — restart on a crash,
+// but leave a CLEAN exit alone. A bare `true` restarts unconditionally, which turns
+// the two clean-exit paths into loops: the harbor that finds another one already
+// holding the machine lock (exit 0 every ~10s, appending the same line to harbor.log
+// forever — this is what produced a 7 MB log of "already running"), and a deliberate
+// shutdown, which launchd would undo. Matches the systemd unit's Restart=on-failure.
+export function launchdPlist(): string {
   const args = [nodeBinaryPath(), harborLauncherPath(), "run"];
   const envVars = forwardedEnv();
   const argXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
@@ -83,7 +89,10 @@ ${argXml}
 ${envVars.PRIVATEER_HOME || envVars.PRIVATEER_SERVER_URL ? `  <key>EnvironmentVariables</key>\n  <dict>\n${envXml}\n  </dict>\n` : ""}  <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>StandardOutPath</key>
   <string>${log}</string>
   <key>StandardErrorPath</key>
@@ -199,6 +208,24 @@ export interface ServiceInfo {
   installed: boolean;
   unitPath: string;
   logPath: string;
+  /** Installed unit predates a fix and should be rewritten — see needsRefresh(). */
+  needsRefresh: boolean;
+}
+
+// Does the INSTALLED unit need rewriting? Deliberately narrow: a full text compare
+// against what we'd generate today would flag every service installed by a different
+// copy of the CLI (a dev checkout resolves a different launcher path), which is not a
+// problem and not something the user should be nagged about. The one thing worth
+// flagging is the pre-fix launchd `KeepAlive: true`, which restarts the harbor even
+// after a clean exit — the log-spam loop described above launchdPlist().
+export function unitNeedsRefresh(platform: NodeJS.Platform, unitPath: string): boolean {
+  if (platform !== "darwin" || !existsSync(unitPath)) return false;
+  try {
+    const plist = readFileSync(unitPath, "utf8");
+    return /<key>KeepAlive<\/key>\s*<true\s*\/>/.test(plist);
+  } catch {
+    return false;
+  }
 }
 
 function unitPathFor(platform: NodeJS.Platform): string {
@@ -216,6 +243,7 @@ export function serviceInfo(): ServiceInfo {
     installed: !!unitPath && existsSync(unitPath),
     unitPath,
     logPath: harborLogPath(),
+    needsRefresh: unitNeedsRefresh(platform, unitPath),
   };
 }
 
@@ -236,20 +264,40 @@ export function uninstallService(): ServiceInfo {
   return serviceInfo();
 }
 
-// Human-readable status line for `privateer harbor status`: whether the service is
-// installed AND whether a harbor is actually answering on the IPC socket right now.
+// Human-readable status for `privateer harbor status`: whether the service is
+// installed, whether a harbor is answering on the IPC socket, and — the part that
+// actually answers "why does the app say inactive?" — whether that harbor is
+// connected to the relay. Answering IPC only proves a local process is alive; the
+// app lists a harbor from the server's presence registry, which a dead relay socket
+// drops within ~60s. Reporting the first as if it implied the second is what made a
+// stale harbor look healthy from the terminal and offline from the phone.
 export async function statusReport(): Promise<string> {
   const info = serviceInfo();
-  const live = await harborIsRunning();
+  let status: IpcResponse | null = null;
+  try {
+    status = await sendToHarbor({ cmd: "status" }, 3_000);
+  } catch {
+    status = null; // not running, or wedged — harborIsRunning() below tells them apart
+  }
+  const live = status ? status.ok : await harborIsRunning();
+  const up = status && typeof status.uptimeSec === "number" ? `, up ${formatDuration(status.uptimeSec)}` : "";
+  const pid = status?.pid ? `pid ${status.pid}${up}` : "answering IPC";
   const lines = [
     `platform:  ${info.platform}${info.supported ? "" : " (auto-start unsupported — run `privateer harbor` manually)"}`,
     `service:   ${info.installed ? `installed (${info.unitPath})` : "not installed"}`,
-    `harbor:    ${live ? "running (answering IPC)" : "not reachable"}`,
-    `logs:      ${info.logPath}`,
+    `harbor:    ${live ? `running (${pid})` : "not reachable"}`,
   ];
+  if (live) lines.push(`relay:     ${describeRelay(status?.relay)}`);
+  lines.push(`logs:      ${info.logPath}`);
   // Surface a stale-unit hint: file present but nothing answering usually means it
   // failed to boot — the log path above is where to look.
   if (info.installed && !live) lines.push("hint:      service is installed but not answering — check the log for a boot error.");
+  if (live && status?.relay && !status.relay.connected) {
+    lines.push("hint:      Harbor is running but not reachable from the app. Restart it (`privateer harbor uninstall && privateer harbor install`) once the cause above is resolved.");
+  }
+  if (info.needsRefresh) {
+    lines.push("hint:      the installed login service restarts Harbor even after a clean exit (older install) — run `privateer harbor install` to refresh it.");
+  }
   return lines.join("\n");
 }
 

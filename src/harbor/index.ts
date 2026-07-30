@@ -57,7 +57,7 @@ import { resolveMcpSelection, readMcpInventory, type ResolvedMcpTools } from "..
 import { deliver, type RelayPusher, type CloudPusher } from "../routines/delivery.ts";
 import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
-import { startIpcServer, HarborAlreadyRunningError, type IpcRequest, type IpcResponse } from "./ipc.ts";
+import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
 import { isHosted, publishRelayPub, webEnabled } from "../config/hosted.ts";
 import { makeWebTools, WEB_TOOL_NAMES } from "../tools/web.ts";
 
@@ -807,6 +807,16 @@ export class Harbor {
               // Privateer's TEE-channel models (near/tinfoil/phala) as "◆ Verifiable TEE"
               // when logged in; ZDR-channel models stay at their honest floor. The live
               // verdict still comes from accountPosture on select — this only lifts the label.
+              //
+              // ORDER MATTERS: pi-privacy's own catalog registers a `privateer`
+              // provider (its PUBLIC developer-key channel, one seed model), and Pi's
+              // registerProvider REPLACES a provider's models and request config. It
+              // must stay ABOVE makeAccountProvider() so the ACCOUNT channel lands last
+              // — otherwise the default model stops resolving and requests go to
+              // api.privateer.pro/v1 instead of /api/agent/v1. (The TUI hits this
+              // through extension discovery, where the order isn't ours to choose;
+              // extensions/privateer-privacy.ts re-asserts the account registration
+              // there. See registerAccountModels.)
               makePiPrivacyExtension({
                 privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
               }),
@@ -1192,6 +1202,31 @@ export class Harbor {
     return { text: notes.length > 0 ? `${out}${formatNotes(notes)}` : out, output, status, error };
   }
 
+  // What the app can actually see. A harbor is only drivable while its relay socket
+  // is up, and every way that can fail — signed out, turned off from the app, refused
+  // by the plan's agent cap, a socket that died without closing — used to be visible
+  // ONLY as a line in a log file nobody reads. Reported alongside pid/uptime so
+  // `privateer harbor status` can never again say "running" about a harbor the app
+  // shows as offline.
+  private relayStatus(): RelayStatus {
+    const termId = routineRelayId();
+    if (this.relayTerminated) {
+      return { termId, connected: false, detail: "remote access was turned off from the app — restart the harbor to re-enable it" };
+    }
+    if (!this.relay) {
+      return {
+        termId,
+        connected: false,
+        detail: hasCredentials()
+          ? "relay not started"
+          : "no account signed in on this machine — run `privateer` and /login, then restart the harbor",
+      };
+    }
+    const conn = this.relay.connectionStatus();
+    if (!conn.connected) return { termId, connected: false, detail: "connecting…" };
+    return { termId, connected: true, upSec: conn.upSec, quietSec: conn.quietSec };
+  }
+
   private persistRun(id: string, patch: Partial<Routine>): void {
     const current = findRoutine(loadRoutines(), id);
     if (!current) return;
@@ -1201,7 +1236,13 @@ export class Harbor {
   private async handleIpc(req: IpcRequest): Promise<IpcResponse> {
     switch (req.cmd) {
       case "status":
-        return { ok: true, pid: process.pid, uptimeSec: Math.round((Date.now() - this.startedAt) / 1000), routines: loadRoutines() };
+        return {
+          ok: true,
+          pid: process.pid,
+          uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
+          relay: this.relayStatus(),
+          routines: loadRoutines(),
+        };
       case "list":
         return { ok: true, routines: loadRoutines() };
       case "add": {
@@ -1254,11 +1295,29 @@ export function runHarbor(): void {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-  harbor.start().catch((err) => {
+  harbor.start().catch(async (err) => {
     if (err instanceof HarborAlreadyRunningError) {
       // A resident harbor already owns this machine — leave it in charge. Exit 0 so a
       // manual `privateer harbor run` beside the installed login service isn't an error.
+      //
+      // Say WHICH harbor, and whether it is actually reachable from the app: the
+      // incumbent can be a stale process that still answers IPC while its relay socket
+      // is long dead, and "leaving the existing one in charge" then reads as reassurance
+      // for a harbor the app shows as offline. The incumbent knows — ask it.
       process.stderr.write("A Harbor is already running on this machine — leaving the existing one in charge.\n");
+      try {
+        const status = await sendToHarbor({ cmd: "status" }, 3_000);
+        const up = typeof status.uptimeSec === "number" ? `, up ${formatDuration(status.uptimeSec)}` : "";
+        process.stderr.write(`  incumbent: pid ${status.pid ?? "?"}${up}\n`);
+        process.stderr.write(`  relay:     ${describeRelay(status.relay)}\n`);
+        if (status.relay && !status.relay.connected) {
+          process.stderr.write("  Stop that process (or `privateer harbor uninstall && privateer harbor install`) to hand the machine to a fresh Harbor.\n");
+        }
+      } catch {
+        // It held the lock a moment ago but won't answer now — a wedged process is
+        // worth naming too, since nothing else will start while it holds the socket.
+        process.stderr.write("  incumbent: holds the lock but is not answering IPC — it may be wedged; stop it and start again.\n");
+      }
       process.exit(0);
     }
     process.stderr.write(`Harbor failed to start: ${err instanceof Error ? err.message : String(err)}\n`);

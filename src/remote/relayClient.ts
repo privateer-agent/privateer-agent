@@ -233,6 +233,24 @@ const RECONNECT_MS = 3000;
 // record TTL so the app's "blocked" row stays warm between attempts rather than
 // flickering in and out of the plan-limit state.
 const REFUSED_RECONNECT_MS = 60_000;
+// ── Liveness ────────────────────────────────────────────────────────────────────
+// A TCP socket can die without either side being told: a server instance restarts,
+// a NAT/idle timer drops the flow, a laptop sleeps. The kernel keeps reporting
+// ESTABLISHED, `ws` never fires 'close', and the reconnect path above — which only
+// runs on close/error — never runs. That failure mode is invisible AND permanent:
+// the server prunes the terminal from its presence registry after ~60s, so the app
+// shows the harbor as offline while the harbor's own log says "connected", forever.
+//
+// So don't wait to be told. The server pings every 25s, so an alive socket sees
+// inbound traffic at least that often; we ping on our own timer too (the peer's pong
+// counts as inbound). If nothing arrives for LIVENESS_TIMEOUT_MS — three missed
+// server pings — the socket is dead: terminate it and take the normal reconnect path.
+const HEARTBEAT_MS = 20_000;
+const LIVENESS_TIMEOUT_MS = 75_000;
+// Cap the opening handshake too. Without this a black-holed connect leaves `this.ws`
+// set with no open/close/error ever firing, and connect()'s `if (this.ws) return`
+// guard then blocks every future attempt — the same permanent silence by another route.
+const HANDSHAKE_TIMEOUT_MS = 15_000;
 // File-transfer ceilings for app→CLI attachments. The app enforces its own caps
 // before sending; these are a defensive backstop so a controller can't exhaust
 // memory with a lying `size` or a flood of concurrent transfers.
@@ -291,6 +309,11 @@ export class RelayClient {
   private closed = false;
   private connecting = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  // Liveness watchdog for the open socket (see HEARTBEAT_MS): our own ping timer plus
+  // the epoch of the last thing we heard from the server — any frame, ping or pong.
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  private lastInboundAt = 0;
+  private connectedAt = 0;
   // Last refusal reason reported, so a 4xx is logged once instead of on every retry.
   private refusal: string | null = null;
   // Ordered delta buffer (text/reasoning) coalesced into one frame per flush.
@@ -377,6 +400,8 @@ export class RelayClient {
     this.settleFirstConnect(new Error("relay stopped before registering"));
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
     if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = undefined; }
+    this.stopHeartbeat();
+    this.connectedAt = 0;
     this.bufKind = null;
     this.buf = "";
     this.incoming.clear();
@@ -417,7 +442,7 @@ export class RelayClient {
       const wsUrl =
         serverBaseUrl().replace(/^http/, "ws") + `/relay?ticket=${encodeURIComponent(ticket)}`;
       this.debug(`connecting → ${wsUrl}`);
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(wsUrl, { handshakeTimeout: HANDSHAKE_TIMEOUT_MS });
       this.ws = ws;
       let opened = false;
       let lastErr = "";
@@ -425,12 +450,20 @@ export class RelayClient {
       ws.on("open", () => {
         opened = true;
         this.refusal = null; // a later refusal is news again
+        this.connectedAt = Date.now();
+        this.startHeartbeat(ws);
         this.settleFirstConnect(); // terminal is live on the relay — awaitRegistered() resolves
         this.cb.onStatus?.("Remote access connected — drive this terminal from the Privateer app.");
       });
-      ws.on("message", (data) => this.handle(data));
+      // Anything the server sends counts as proof of life for the watchdog. `ws`
+      // answers server pings with a pong for us, and answers our pings with 'pong'.
+      ws.on("message", (data) => { this.lastInboundAt = Date.now(); this.handle(data); });
+      ws.on("ping", () => { this.lastInboundAt = Date.now(); });
+      ws.on("pong", () => { this.lastInboundAt = Date.now(); });
       ws.on("close", () => {
+        this.stopHeartbeat();
         if (this.ws === ws) this.ws = null;
+        this.connectedAt = 0;
         this.cb.onDisconnected?.();
         if (!this.closed) {
           this.cb.onStatus?.(
@@ -482,6 +515,37 @@ export class RelayClient {
 
   private debug(msg: string): void {
     if (process.env.PRIVATEER_RELAY_DEBUG) this.cb.onStatus?.(`relay: ${msg}`);
+  }
+
+  // Watch one open socket: ping on a timer, and terminate it if the server has gone
+  // quiet for longer than any healthy connection ever is (see LIVENESS_TIMEOUT_MS).
+  // `terminate()` (not close()) because the point is that the peer may be gone — a
+  // close handshake would wait for a reply that never comes. The 'close' it fires
+  // takes the ordinary reconnect path, so recovery needs no separate machinery.
+  private startHeartbeat(ws: WebSocket): void {
+    this.stopHeartbeat();
+    this.lastInboundAt = Date.now();
+    this.heartbeatTimer = setInterval(() => {
+      // A socket we've since replaced or dropped isn't ours to police anymore.
+      if (this.ws !== ws) { this.stopHeartbeat(); return; }
+      if (ws.readyState !== WebSocket.OPEN) return; // closing — 'close' will clean up
+      const quietMs = Date.now() - this.lastInboundAt;
+      if (quietMs > LIVENESS_TIMEOUT_MS) {
+        this.cb.onStatus?.(
+          `Remote access went silent for ${Math.round(quietMs / 1000)}s (the connection died without closing) — dropping it and reconnecting…`,
+        );
+        this.stopHeartbeat();
+        try { ws.terminate(); } catch (_) { /* already gone — 'close' still fires */ }
+        return;
+      }
+      try { ws.ping(); } catch (_) { /* socket dying — the next tick or 'close' handles it */ }
+    }, HEARTBEAT_MS);
+    // Never hold the process open for a heartbeat alone.
+    this.heartbeatTimer.unref?.();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = undefined; }
   }
 
   private scheduleReconnect(delayMs: number = RECONNECT_MS): void {
@@ -744,6 +808,21 @@ export class RelayClient {
   // attached" — the server forwards to a controller only when one is present.)
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  // Connection health, for `privateer harbor status` / the IPC status reply. `quietSec`
+  // is how long since the server last said anything: a connected socket that has been
+  // quiet for longer than the server's 25s ping cadence is the shape of the half-open
+  // failure the watchdog exists to catch, so it is worth showing rather than a bare
+  // "connected".
+  connectionStatus(): { connected: boolean; upSec?: number; quietSec?: number } {
+    if (!this.isConnected()) return { connected: false };
+    const now = Date.now();
+    return {
+      connected: true,
+      upSec: this.connectedAt ? Math.round((now - this.connectedAt) / 1000) : undefined,
+      quietSec: this.lastInboundAt ? Math.round((now - this.lastInboundAt) / 1000) : undefined,
+    };
   }
 
   // Push a finished routine result to any attached controller as a text event, so

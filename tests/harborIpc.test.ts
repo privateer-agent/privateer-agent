@@ -33,6 +33,16 @@ test("harbor IPC: add/list/pause/resume/remove over the socket", async () => {
     assert.equal(status.ok, true);
     assert.equal(status.pid, process.pid);
 
+    // …and whether the app can actually SEE this harbor, which is a different
+    // question from "is a process alive": the app lists a harbor off the server's
+    // relay presence registry, so a harbor answering IPC with a dead (or never
+    // started) relay socket shows up as inactive there. Reporting only the former
+    // is what let a stale harbor look healthy from the terminal for two days.
+    assert.ok(status.relay, "status carries a relay block");
+    assert.match(status.relay!.termId, /^routines-/, "the terminal id the app looks for");
+    assert.equal(status.relay!.connected, false, "no account signed in in this temp home");
+    assert.match(status.relay!.detail ?? "", /login/i, "and says what to do about it");
+
     // A far-future schedule so the tick loop never actually fires a model run.
     const routine = Routine.parse({
       id: "r-1",

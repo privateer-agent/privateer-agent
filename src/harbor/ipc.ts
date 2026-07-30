@@ -22,6 +22,28 @@ export type IpcRequest =
   | { cmd: "run-now"; idOrName: string }
   | { cmd: "reload" };
 
+/**
+ * The harbor's view of its own relay connection, reported by `status`.
+ *
+ * A harbor answering on this socket is running; that is NOT the same as being
+ * reachable from the app, which needs the relay socket up (the server drops a
+ * terminal from its presence registry ~60s after it stops hearing from it). The two
+ * used to be conflated — "running (answering IPC)" while the app showed the same
+ * harbor as offline — so every liveness report carries both now.
+ */
+export interface RelayStatus {
+  /** The relay terminal id the app looks for ("routines-…"). */
+  termId: string;
+  /** Socket open right now, i.e. the app can see and drive this harbor. */
+  connected: boolean;
+  /** Seconds the current connection has been up. */
+  upSec?: number;
+  /** Seconds since the server last sent anything (frame, ping or pong). */
+  quietSec?: number;
+  /** Why it isn't connected, when we know: signed out, turned off from the app, … */
+  detail?: string;
+}
+
 export interface IpcResponse {
   ok: boolean;
   message?: string;
@@ -29,6 +51,8 @@ export interface IpcResponse {
   // Harbor liveness/uptime for `status`.
   pid?: number;
   uptimeSec?: number;
+  // Relay reachability for `status` — see RelayStatus.
+  relay?: RelayStatus;
 }
 
 export type IpcHandler = (req: IpcRequest) => Promise<IpcResponse> | IpcResponse;
@@ -162,6 +186,32 @@ export class HarborAlreadyRunningError extends Error {
     super("A Harbor is already running on this machine.");
     this.name = "HarborAlreadyRunningError";
   }
+}
+
+// One-line, human rendering of a status reply's relay block — shared by
+// `privateer harbor status` and the second-instance notice so both tell the same
+// story. `undefined` means the harbor answering us predates this field.
+export function describeRelay(relay?: RelayStatus): string {
+  if (!relay) return "unknown (this harbor is an older build)";
+  if (!relay.connected) {
+    return `NOT connected — the app shows this Harbor as inactive${relay.detail ? ` (${relay.detail})` : ""}`;
+  }
+  const up = typeof relay.upSec === "number" ? `, up ${formatDuration(relay.upSec)}` : "";
+  // A connected socket the server hasn't spoken on in a while is the half-open shape;
+  // the watchdog drops it within ~75s, so say so rather than reporting a flat "connected".
+  const quiet = typeof relay.quietSec === "number" && relay.quietSec > 40 ? `, quiet for ${relay.quietSec}s — checking` : "";
+  return `connected — drivable from the Privateer app (${relay.termId}${up}${quiet})`;
+}
+
+export function formatDuration(totalSec: number): string {
+  const s = Math.max(0, Math.round(totalSec));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${s}s`;
 }
 
 // Convenience: is the harbor reachable right now?

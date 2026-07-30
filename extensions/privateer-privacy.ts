@@ -5,15 +5,25 @@
 // over-warning), and a zdr account model as zdr-policy. Replaces loading pi-privacy's
 // default entry directly.
 //
-// It also WIDENS the tinfoil provider's model list. pi-privacy registers `tinfoil` with
-// a single seed model, so any other Tinfoil model — notably our default `tinfoil/glm-5-2`
-// — resolves as a "custom model id" with a startup warning and never shows in the picker.
-// We re-register tinfoil with its current chat catalog AFTER pi-privacy runs (a second
-// registerProvider call replaces the provider's model list; pi-privacy registers
-// synchronously, so ours lands second and wins). This is purely a display/resolution
-// list — posture and attestation are dispatcher-bound and unaffected by the model set.
+// It also REPAIRS two provider registrations pi-privacy makes from its own catalog, each
+// of which replaces (not merges) whatever model list that provider already had:
+//
+//   - `tinfoil` gets a single seed model, so any other Tinfoil model — notably our
+//     default `tinfoil/glm-5-2` — resolves as a "custom model id" with a startup warning
+//     and never shows in the picker. We re-register it with the current chat catalog.
+//   - `privateer` gets pi-privacy's PUBLIC developer-key channel (api.privateer.pro/v1 +
+//     `${PRIVATEER_API_KEY}`, one seed model), which clobbers the ACCOUNT channel our own
+//     privateer-account extension registers. That is our default model's provider, so the
+//     same "not found for provider privateer" warning followed — and worse, the model Pi
+//     synthesized pointed at the public endpoint instead of `/api/agent/v1`. We re-assert
+//     the account registration (see registerAccountModels).
+//
+// Both repairs run AFTER pi-privacy inside this same extension, so ours land second and
+// win regardless of the order pi discovers extensions in. This is purely a
+// display/resolution + routing list — posture and attestation are dispatcher-bound and
+// unaffected by the model set.
 import { makePiPrivacyExtension } from "pi-privacy";
-import { accountPosture } from "../src/providers/account.ts";
+import { accountPosture, registerAccountModels } from "../src/providers/account.ts";
 
 // Tinfoil's live chat models (inference.tinfoil.sh/v1/models), glm-5-2 first — the
 // launcher's default. Non-chat endpoints (embeddings, tts, whisper, websearch,
@@ -82,4 +92,6 @@ export default function privateerPrivacy(pi: any): void {
     authHeader: true,
     models: TINFOIL_MODELS.map(tinfoilModel),
   });
+  // Put the ACCOUNT channel back over pi-privacy's public developer-key `privateer`.
+  registerAccountModels(pi);
 }
