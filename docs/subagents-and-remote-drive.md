@@ -60,6 +60,17 @@ Net: the child loads *exactly* pi-subagents' runtime + Privateer's gate/privacy/
 | REPL (`chat.ts`) | in-code factories | wrapper `-e` + `--no-extensions` | `bin/privateer-subagent.mjs` |
 | harbor / live tasks | in-code factories | wrapper `-e` + `--no-extensions` | `bin/privateer-subagent.mjs` |
 
+### 2c. …and in a real install the daemon gets BOTH
+
+The "a parent with both would double-load" caveat above is not hypothetical — on any machine where the product launcher ran, it **already happens**. `bin/privateer-launch.mjs` installs the shims into `$AGENT_DIR/extensions/` once, machine-wide, and the harbor daemon shares that agent dir. So every session the daemon creates (routine, workflow, ad-hoc task, live spawn) loads the discovered `privateer-gate.ts` **on top of** its own in-code factories. Verified empirically, not inferred: `services.resourceLoader.getExtensions()` on a daemon-shaped session lists the shimmed gate.
+
+Two consequences, both load-bearing:
+
+- **The gate itself is harmless there.** The discovered copy sees `ctx.mode === "print"` (Pi's default for an SDK-created session) and flips to bypass, so it never blocks; the session's own in-code gate — wired to that session's relay approvals — is what enforces.
+- **Its TOOLS were not harmless.** The gate registers `send_file_to_client` / `save_attachment` against its **module-level** `RemoteBridge`, the one only `/remote-access` ever attaches a relay to. In the daemon that bridge is permanently unattached, and since Pi resolves duplicate tool names **first-registration-wins** (discovered extensions land before inline factories), it *shadowed* the session-scoped pair. A live task spawn therefore answered *"remote access is off or the app isn't connected"* to every `send_file_to_client` — while the app was attached and driving that very session.
+
+Fix: `Harbor.start()` marks the process (`config/harborDaemon.ts` → `PRIVATEER_HARBOR_DAEMON`), the gate skips its two file tools when that is set, and `liveTaskSession` registers its own pair against its own bridge (`tools/relayFileTools.ts`). An env var, not a module singleton — discovered extensions load through jiti with `moduleCache: false`, so they can hold a separate copy of our modules; `process.env` is the state both copies definitely share. Pinned by `tests/extensionLoad.test.ts` (tools present in a terminal, absent in the daemon).
+
 ### How a child gate behaves
 
 `extensions/privateer-gate.ts` detects a headless child (`session_start` with `ctx.mode` ∈ `json`/`print`/`rpc`) and flips to **bypass-within-the-restricted-toolset**: pi-subagents already constrains each role's `--tools`, so normal tools auto-approve, while `decideAuto` still forces **dangerous shell / destructive / secret-exfil** actions to `"ask"`. Those "ask" outcomes are what the relay carries (§3); with no relay wired they fail closed.

@@ -48,6 +48,7 @@ import {
   loadPendingCloud,
   savePendingCloud,
   type PendingCloud,
+  type OutboxKind,
   routineRelayId,
 } from "../routines/store.ts";
 import type { Routine } from "../routines/schema.ts";
@@ -59,6 +60,7 @@ import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
 import { isHosted, publishRelayPub, webEnabled } from "../config/hosted.ts";
+import { markHarborDaemon } from "../config/harborDaemon.ts";
 import { makeWebTools, WEB_TOOL_NAMES } from "../tools/web.ts";
 
 // The safe, read-only toolset for unattended runs — Pi builtins with no
@@ -282,6 +284,11 @@ export class Harbor {
   };
 
   async start(): Promise<void> {
+    // Mark the process before anything can create a session: the shipped TUI extensions
+    // are auto-discovered from the shared agent dir into every session we run, and the
+    // gate one has to stand its relay file tools down here so a live task's own pair
+    // (bound to that task's live relay) isn't shadowed. See config/harborDaemon.ts.
+    markHarborDaemon();
     // Single-instance lock FIRST, before any other side effect: binding the IPC
     // socket is the machine's mutex. If a live harbor already holds it this throws
     // HarborAlreadyRunningError — two harbors under one ~/.privateer share a single
@@ -596,7 +603,7 @@ export class Harbor {
     return this.originCache;
   }
 
-  private async postOutbox(name: string, at: string, status: "ok" | "error", content: string, kind: "routine" | "task" = "routine"): Promise<boolean> {
+  private async postOutbox(name: string, at: string, status: "ok" | "error", content: string, kind: OutboxKind = "routine"): Promise<boolean> {
     const pub = await this.ensureOutboxPub();
     if (!pub) return false;
     const body = content.length > MAX_CLOUD_PLAINTEXT ? content.slice(0, MAX_CLOUD_PLAINTEXT) + "\n…truncated" : content;
@@ -1047,6 +1054,19 @@ export class Harbor {
           parseSpec,
           log,
           onClosed: (id) => this.liveTasks.delete(id),
+          // A live spawn's feed lives only in the attached app; when the session ends
+          // (closed, reaped, or timed out) its answer would otherwise be gone. Seal the
+          // closing one to the outbox like a submitted task's, so the app's inbox holds
+          // every agent result, not just the unattended ones. Same queue-on-failure path.
+          onResult: ({ title, status, content }) => {
+            void (async () => {
+              const at = new Date().toISOString();
+              const body = redactText(content, collectSecrets(loadHarborConfig().providers));
+              if (!(await this.postOutbox(title, at, status, body, "task"))) {
+                addPendingCloud({ routine: title, at, status, content: body, kind: "task" });
+              }
+            })();
+          },
         });
         this.liveTasks.set(handle.termId, handle);
         this.relay?.sendTaskSpawned(handle.termId, handle.label);
@@ -1111,8 +1131,8 @@ export class Harbor {
       const content = formatWorkflowResult(wf.workflow.name, result);
       const at = new Date().toISOString();
       // Durable delivery: seal to the outbox (queue on failure to re-seal later).
-      if (!(await this.postOutbox(wf.workflow.name, at, status, content, "task"))) {
-        addPendingCloud({ routine: wf.workflow.name, at, status, content, kind: "task" });
+      if (!(await this.postOutbox(wf.workflow.name, at, status, content, "workflow"))) {
+        addPendingCloud({ routine: wf.workflow.name, at, status, content, kind: "workflow" });
       }
       if (this.controllerAttached) this.relay?.sendWorkflowResult(wf.workflow.name, content);
       log(`  workflow "${wf.workflow.name}" ${result.status}${result.reason ? `: ${result.reason}` : ""}`);

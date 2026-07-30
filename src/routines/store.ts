@@ -204,6 +204,11 @@ export function drainPendingRelay(): PendingRelay[] {
   return queue;
 }
 
+// What produced a result delivered to the account outbox. Travels inside the sealed
+// envelope, so the app can label and filter its inbox without the server learning
+// anything. Kept here (not in the harbor) because the pending-cloud queue persists it.
+export type OutboxKind = "routine" | "task" | "workflow";
+
 // A `cloud`-delivery result that couldn't be sealed+posted to the account outbox
 // yet (offline, server down, or the app hasn't published its outbox key). Held on
 // disk until a later flush succeeds. Unlike PendingRelay this carries `status`, so
@@ -214,9 +219,10 @@ export interface PendingCloud {
   status: "ok" | "error";
   content: string;
   // What produced this — a scheduled routine (default, for back-compat with items
-  // written before ad-hoc tasks existed) or an app-submitted one-shot task. Preserved
-  // so the flush re-seals with the right `kind` and the app labels it correctly.
-  kind?: "routine" | "task";
+  // written before ad-hoc tasks existed), an app-submitted one-shot task, or a
+  // workflow run. Preserved so the flush re-seals with the right `kind` and the app
+  // labels it correctly in the inbox.
+  kind?: OutboxKind;
 }
 
 function pendingCloudPath(): string {

@@ -28,6 +28,8 @@ import {
 } from "../providers/account.ts";
 import { RelayClient, type TaskSpec } from "./relayClient.ts";
 import { RemoteBridge } from "./remoteBridge.ts";
+import { makeRelayFileTools } from "../tools/relayFileTools.ts";
+import { AttachmentStore, type StoredAttachment } from "../util/attachmentStore.ts";
 import { spawnAccountCredentials, revokeAccountSession, hasCredentials } from "../auth/privateer.ts";
 
 export interface LiveTaskHandle {
@@ -41,6 +43,11 @@ export interface LiveTaskDeps {
   parseSpec: (spec: string) => { provider: string; modelId: string };
   log: (msg: string) => void;
   onClosed: (termId: string) => void;
+  // Deliver the session's closing answer durably (the harbor seals it to the account
+  // outbox, so it lands in the app's inbox). A live spawn's feed is otherwise purely
+  // ephemeral: close the screen, reap the session, and everything it said is gone —
+  // unlike a submitted task or a routine, whose results are always sealed.
+  onResult?: (result: { title: string; status: "ok" | "error"; content: string }) => void;
 }
 
 // How long to keep a spawned session alive with NO controller ever attaching, and the
@@ -72,12 +79,42 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   let attachTimer: ReturnType<typeof setTimeout> | undefined;
   let lifeTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // Files the app sends down mid-session, keyed by the "#n" ref save_attachment writes
+  // back out. `sinceLastPrompt` is drained into the next prompt so the model is told what
+  // it just received — same contract as the TUI's (extensions/privateer-gate.ts).
+  const attachments = new AttachmentStore();
+  let sinceLastPrompt: StoredAttachment[] = [];
+
+  // The assistant text of the most recent turn, accumulated from the event stream and
+  // reset at the start of each one, so what we keep is the session's CLOSING answer
+  // rather than a transcript. Bounded — the outbox truncates anyway, and a long
+  // session's scrollback is not what makes a useful inbox entry.
+  const MAX_RESULT_CHARS = 8000;
+  let lastAnswer = "";
+  let turnErrored = false;
+
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    // Hand the closing answer over BEFORE tearing anything down. Best-effort by
+    // design: no answer (nothing ever ran, or the model only used tools) means
+    // nothing to deliver, and a delivery failure must never block teardown.
+    const answer = lastAnswer.trim();
+    if (answer && deps.onResult) {
+      try {
+        deps.onResult({
+          title: title || "Spawned agent",
+          status: turnErrored ? "error" : "ok",
+          content: answer.slice(0, MAX_RESULT_CHARS),
+        });
+      } catch (e) {
+        deps.log(`live task ${termId} result delivery failed: ${(e as Error).message}`);
+      }
+    }
     if (attachTimer) clearTimeout(attachTimer);
     if (lifeTimer) clearTimeout(lifeTimer);
     try { relay?.stop(); } catch { /* already stopped */ }
+    attachments.cleanup(); // drop the scratch dir holding inbound file bytes
     // Revoke ONLY this session's account inference session so it doesn't linger in the
     // app's Linked Devices; the harbor's own child session stays alive. Best-effort.
     if (spawnedAccount) {
@@ -93,9 +130,20 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   const runTurn = async (text: string): Promise<void> => {
     if (turnActive || stopped) return;
     turnActive = true;
+    lastAnswer = "";   // keep the CLOSING answer, not the whole session
+    turnErrored = false;
     try {
-      await session.prompt(text);
+      // Fold any files the app sent since the last prompt into a reference note, so the
+      // model knows they exist and can save_attachment them to disk.
+      const atts = sinceLastPrompt;
+      sinceLastPrompt = [];
+      const note = atts.length
+        ? `\n\n[Files attached from the app: ${atts.map((a) => `#${a.n} ${a.name} (${a.mediaType})`).join(", ")}. ` +
+          `Use the save_attachment tool with the ref number to write one to disk.]`
+        : "";
+      await session.prompt(text + note);
     } catch (e) {
+      turnErrored = true;
       deps.log(`live task ${termId} turn error: ${(e as Error).message}`);
     } finally {
       turnActive = false;
@@ -122,6 +170,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
         bridge.callbacks.onPrompt(spec.prompt);
       }
     },
+    onAttachment: (file) => sinceLastPrompt.push(attachments.register(file)),
     onTerminate: () => void stop(),
     onStatus: (t) => deps.log(`live task ${termId}: ${t}`),
   });
@@ -157,6 +206,11 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
           privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
         }),
         makeAccountProvider(),
+        // send_file_to_client / save_attachment bound to THIS session's bridge — the one
+        // whose relay the app is attached to. The shipped gate extension is discovered
+        // into this session too but stands its own pair down inside the daemon, so these
+        // are the ones the model gets (see tools/relayFileTools.ts).
+        makeRelayFileTools(bridge, attachments),
       ] as any,
     },
   });
@@ -219,7 +273,12 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
 
   const adapter = createEngineEventAdapter();
   session.subscribe((ev: any) => {
-    for (const ee of adapter.toEngineEvents(ev)) bridge.forwardEvent(ee);
+    for (const ee of adapter.toEngineEvents(ev)) {
+      // Assistant prose only — reasoning, tool calls and results are deliberately not
+      // kept: the inbox entry should read like the agent's answer, not a trace.
+      if (ee.type === "text" && lastAnswer.length < MAX_RESULT_CHARS) lastAnswer += ee.text;
+      bridge.forwardEvent(ee);
+    }
   });
 
   relay = new RelayClient(bridge.callbacks, { termId, label });

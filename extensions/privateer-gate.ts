@@ -26,6 +26,7 @@ import { AttachmentStore, type StoredAttachment } from "../src/util/attachmentSt
 import { makeExtensionsControl } from "../src/remote/extensionsControl.ts";
 import { makeSkillsControl } from "../src/remote/skillsControl.ts";
 import { agentDir } from "../src/config/paths.ts";
+import { inHarborDaemon } from "../src/config/harborDaemon.ts";
 import { agentVersion } from "../src/config/version.ts";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
@@ -446,8 +447,18 @@ export default function privateerControl(pi: any): void {
   // File transfer both ways: send_file_to_client (CLI→app, via the bridge's relay) and
   // save_attachment (app→CLI, from the AttachmentStore inbound files land in). Both
   // live here because they share the RemoteBridge / its attachment stream.
-  pi.registerTool?.(makeSendFileTool(bridge));
-  pi.registerTool?.(makeSaveAttachmentTool(attachments));
+  //
+  // NOT inside the harbor daemon. This extension is auto-discovered from the shared
+  // ~/.privateer/agent/extensions into every session the daemon runs, but `bridge` only
+  // ever gets a relay from THIS file's /remote-access command — which the daemon never
+  // runs. Registering there would shadow (Pi: first registration per name wins, and
+  // discovered extensions load before inline factories) the session-scoped pair a live
+  // task spawn registers against its own connected relay, so send_file_to_client would
+  // always answer "remote access is off" while the app was attached and driving.
+  if (!inHarborDaemon()) {
+    pi.registerTool?.(makeSendFileTool(bridge));
+    pi.registerTool?.(makeSaveAttachmentTool(attachments));
+  }
 
   // Subagents (and print/rpc) run as headless child `pi` processes with no UI. There
   // no one can approve, so a "default" gate would fail-closed on every tool and the

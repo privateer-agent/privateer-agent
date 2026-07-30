@@ -118,3 +118,69 @@ test("extensions: privateer-gate loads under Pi's real loader and registers /no-
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// The gate is auto-discovered into EVERY session that shares ~/.privateer/agent —
+// including the ones the harbor daemon stands up, where its module-level bridge never
+// gets a relay (only /remote-access attaches one, and the daemon has no TUI). Pi resolves
+// duplicate tool names first-registration-wins and loads discovered extensions BEFORE
+// inline factories, so a gate that still registered send_file_to_client there would
+// shadow the session-scoped one a live task spawn binds to its own connected relay — and
+// every send would answer "remote access is off" while the app sat attached and driving.
+// Pin both halves: tools present in a normal terminal, absent inside the daemon.
+async function gateToolNames(daemon: boolean): Promise<string[]> {
+  const home = mkdtempSync(join(tmpdir(), "priv-extload-gate-tools-"));
+  const agentDir = join(home, "agent");
+  const extDir = join(agentDir, "extensions");
+  mkdirSync(extDir, { recursive: true });
+  const prevHome = process.env.PRIVATEER_HOME;
+  const prevAgent = process.env.PI_CODING_AGENT_DIR;
+  const wasChild = process.env.PI_SUBAGENT_CHILD;
+  const wasDaemon = process.env.PRIVATEER_HARBOR_DAEMON;
+  process.env.PRIVATEER_HOME = home;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_SUBAGENT_CHILD = "1"; // skip the parent approval relay's live timer
+  if (daemon) process.env.PRIVATEER_HARBOR_DAEMON = "1";
+  else delete process.env.PRIVATEER_HARBOR_DAEMON;
+
+  try {
+    const target = join(REPO, "extensions", "privateer-gate.ts");
+    writeFileSync(
+      join(extDir, "privateer-gate.ts"),
+      `export { default } from ${JSON.stringify(pathToFileURL(target).href)};\n`,
+    );
+    const { createAgentSessionServices } = await import("@earendil-works/pi-coding-agent");
+    const services = await createAgentSessionServices({ cwd: REPO, agentDir });
+    const loaded = services.resourceLoader.getExtensions();
+    const mine = loaded.extensions.filter((e: any) => String(e.path).includes("privateer-gate"));
+    assert.equal(mine.length, 1, "privateer-gate did not load");
+    const tools = (mine[0] as any).tools;
+    return tools instanceof Map ? [...tools.keys()] : Object.keys(tools ?? {});
+  } finally {
+    if (prevHome === undefined) delete process.env.PRIVATEER_HOME;
+    else process.env.PRIVATEER_HOME = prevHome;
+    if (prevAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevAgent;
+    if (wasChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = wasChild;
+    if (wasDaemon === undefined) delete process.env.PRIVATEER_HARBOR_DAEMON;
+    else process.env.PRIVATEER_HARBOR_DAEMON = wasDaemon;
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("extensions: privateer-gate owns the relay file tools in a terminal", async () => {
+  const names = await gateToolNames(false);
+  for (const tool of ["send_file_to_client", "save_attachment"]) {
+    assert.ok(names.includes(tool), `expected ${tool}, got: ${names.join(", ") || "(none)"}`);
+  }
+});
+
+test("extensions: privateer-gate stands its file tools down inside the harbor daemon", async () => {
+  const names = await gateToolNames(true);
+  for (const tool of ["send_file_to_client", "save_attachment"]) {
+    assert.ok(
+      !names.includes(tool),
+      `${tool} would shadow the live task's own (session-scoped) registration; got: ${names.join(", ")}`,
+    );
+  }
+});
