@@ -166,6 +166,26 @@ test("task gate: no pinned account key ⇒ refused", () => {
   assert.match(r.message ?? "", /re-link/i);
 });
 
+// The app's "New agent" action on a harbor tile spawns a live session with NO task attached
+// (an agent to drive, not a task to run), so it signs and sends `prompt: ""`. That empty
+// prompt has to survive the whole path verbatim: relayClient dispatches it (it is still a
+// string), parseTaskSpec keeps it, and taskControlArgs signs it as-is — a normalization
+// anywhere along there would break the signature and the gate would refuse a legitimate
+// promptless spawn. liveTaskSession is what makes it mean "no initial turn": it delivers
+// spec.prompt only when non-empty, so the session comes up idle.
+test("task_spawn: a promptless spawn (New agent) signs, parses and verifies unchanged", () => {
+  pinAccountSignKey(pub(MK));
+  const spec = parseTaskSpec({ prompt: "" });
+  assert.deepEqual(spec, { prompt: "" });
+  const args = taskControlArgs(spec);
+  assert.deepEqual(args, { prompt: "", cwd: null, model: null, tools: null, title: null });
+  const ts = 1_752_100_900_000;
+  const sig = sign(MK, { termId: TERM, ts, action: "task_spawn", args });
+  assert.equal(authorizeControl(TERM, "task_spawn", args, sig, ts, { strict: true }).ok, true);
+  // Nothing to derive a title from → the documented fallback, not a crash.
+  assert.equal(deriveTaskTitle(spec), "task");
+});
+
 // A live spawn only announces `task_spawned` after the child terminal actually registers on
 // the relay. awaitRegistered() is that gate: with no relay reachable it must REJECT (not hang)
 // so spawnLiveTask reports task_spawn_error instead of pointing the app at a dead terminal.
