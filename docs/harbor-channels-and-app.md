@@ -158,7 +158,16 @@ The app and terminal speak a small typed frame set:
 | Direction | Frames |
 |-----------|--------|
 | app → terminal | `prompt`, `interrupt`, `command`, `approval_response`, `select_response`, `input_response`, `no_quarter`, attachments, `extensions_*`, `skills_*`, `routines_*`, `channels_*` |
-| terminal → app | `event` (text/tool/finish), `context` (model/version/**terminalPub**), `notice`, `commands`, `select_request`, `input_request`, `extensions`, `skills`, `routines`, `channels`, file transfer |
+| terminal → app | `event` (text/tool/finish), `context` (model/version/**terminalPub**, plus `cwd` from a spawned session), `notice`, `commands`, `select_request`, `input_request`, `extensions`, `skills`, `routines`, `channels`, file transfer |
+
+`context` stays deliberately thin — the relay hop is our server, so anything
+machine-identifying in it is something the server learns. `cwd` is the one scoped
+exception and only a **harbor-spawned live session** (`liveTaskSession`) sends it: the
+driver either named that folder in the spawn form or left it blank and has no other way
+to see which one the harbor chose, and everything that session reads, writes and
+`@`-mentions lives under it. It is home-collapsed to `~/…` on the way out, so the OS
+username never crosses the wire; an interactive terminal keeps omitting it entirely and
+the app's banner simply drops the row.
 
 Each app-manageable feature has the same three-part shape: a `*Control.ts` on the
 agent, a `*_*` frame family, and a screen in the app:

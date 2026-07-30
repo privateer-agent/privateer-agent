@@ -31,6 +31,8 @@ import { RemoteBridge } from "./remoteBridge.ts";
 import { makeRelayFileTools } from "../tools/relayFileTools.ts";
 import { AttachmentStore, type StoredAttachment } from "../util/attachmentStore.ts";
 import { spawnAccountCredentials, revokeAccountSession, hasCredentials } from "../auth/privateer.ts";
+import { createUIContext } from "../ext/headlessUi.ts";
+import { noQuarterActive } from "../permissions/noQuarter.ts";
 
 export interface LiveTaskHandle {
   termId: string;
@@ -161,7 +163,11 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
       attached = true;
       if (attachTimer) { clearTimeout(attachTimer); attachTimer = undefined; }
       relay?.sendSnapshot([]);
-      relay?.sendContext({ model: modelSpec, version: agentVersion() });
+      // cwd rides along here (and nowhere else — see RelayClient.sendContext): this
+      // session's working directory was either named by the driver in the spawn form
+      // or defaulted to the harbor's own, and they have no other way to see which.
+      // Every file this agent touches is under it.
+      relay?.sendContext({ model: modelSpec, cwd, version: agentVersion() });
       relay?.sendCommands([]);
       // Deliver the spawn's initial prompt exactly once, THROUGH the bridge's own prompt
       // path so it counts as a driven turn (remote=true → tools relay to the app).
@@ -189,6 +195,13 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     },
     getRemote: bridge.getRemote,
     getNoQuarter: bridge.getNoQuarter,
+    // Session-wide TOTAL bypass when the harbor itself was launched `--no-quarter`
+    // (env PRIVATEER_NO_QUARTER): every action auto-approves with no prompt, here as
+    // in the TUI. Without this the flag meant nothing on a spawn — the app's own
+    // no-quarter toggle (getNoQuarter above) was the only switch that reached this
+    // gate, so an operator who had lowered the moat harbor-wide still got prompted
+    // for everything. Off unless the flag is set, which launchd/systemd never does.
+    getSkipAllPermissions: noQuarterActive,
     remoteAsk: bridge.remoteAsk,
     blockedWhenRemote: isRemoteUnsafeTool,
     onRemoteBlocked: (toolName) => bridge.sendNotice(`${toolName} is disabled while driving remotely — its prompts can't reach the app.`),
@@ -248,7 +261,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   // Relay the extension mid-turn UI (select/confirm/input) to the app when driven, so an
   // extension asking a question doesn't silently cancel. Mirrors cli/chat.ts's uiContext.
   const driven = (): boolean => bridge.getRemote() && bridge.isConnected();
-  const uiContext = {
+  const uiContext = createUIContext({
     async select(t: string, options: string[], opts?: { signal?: AbortSignal }): Promise<string | undefined> {
       if (!options.length) return undefined;
       if (!driven()) return undefined;
@@ -268,7 +281,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     notify(message: string): void {
       if (driven()) bridge.sendNotice(message);
     },
-  };
+  });
   await (session as any).bindExtensions({ uiContext });
 
   const adapter = createEngineEventAdapter();

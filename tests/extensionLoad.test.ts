@@ -184,3 +184,85 @@ test("extensions: privateer-gate stands its file tools down inside the harbor da
     );
   }
 });
+
+// The same discovery that shadowed the file tools also installed a SECOND permission
+// gate. Pi runs every tool_call handler (it short-circuits only on a block), so in a
+// harbor session — which already wires makePermissionGate as an inline factory — a
+// gated action was decided twice: by the session's gate (relayed to the app for
+// Allow/Deny) and by this discovered one, whose bridge has no relay outside
+// /remote-access, so it fell through to its LOCAL asker. In a live spawn (which binds
+// a uiContext, so session_start fires and the copy flips to bypass) that meant a
+// second, redundant dialog on every dangerous/destructive call; in the headless runs
+// and the channels runner (no bindExtensions → no session_start → still "default"
+// mode, no UI) it meant a fail-closed deny on EVERY gated tool before the real
+// approver was ever consulted — verified live on the ACP surface.
+//
+// The carve-out is what makes this safe: a subagent child inherits the parent's env but
+// loads this file explicitly as its ONLY moat (bin/privateer-subagent.mjs), so it must
+// keep installing. Invert that and a harbor task's children run entirely ungated.
+test("inlineMoat: the discovered gate stands down only where a session brings its own", async () => {
+  const { discoveredGateApplies } = await import("../src/config/inlineMoat.ts");
+  const prev = process.env.PRIVATEER_INLINE_MOAT;
+  try {
+    delete process.env.PRIVATEER_INLINE_MOAT;
+    assert.equal(discoveredGateApplies(false), true, "a plain terminal has no other gate");
+    assert.equal(discoveredGateApplies(true), true, "a child of a terminal still needs its own");
+
+    process.env.PRIVATEER_INLINE_MOAT = "1";
+    assert.equal(discoveredGateApplies(false), false, "the session's inline gate is the only one");
+    assert.equal(
+      discoveredGateApplies(true),
+      true,
+      "a subagent child loads this gate explicitly — standing it down here leaves it ungated",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.PRIVATEER_INLINE_MOAT;
+    else process.env.PRIVATEER_INLINE_MOAT = prev;
+  }
+});
+
+// And pin the carve-out end-to-end, through Pi's real loader: a child that inherited
+// PRIVATEER_INLINE_MOAT=1 from a harbor parent still registers a tool_call handler.
+test("extensions: privateer-gate keeps its gate in a subagent child under an inherited marker", async () => {
+  const home = mkdtempSync(join(tmpdir(), "priv-extload-gate-moat-"));
+  const agentDir = join(home, "agent");
+  const extDir = join(agentDir, "extensions");
+  mkdirSync(extDir, { recursive: true });
+  const prevHome = process.env.PRIVATEER_HOME;
+  const prevAgent = process.env.PI_CODING_AGENT_DIR;
+  const wasChild = process.env.PI_SUBAGENT_CHILD;
+  const wasMoat = process.env.PRIVATEER_INLINE_MOAT;
+  process.env.PRIVATEER_HOME = home;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_SUBAGENT_CHILD = "1"; // also skips the parent relay's live timer
+  process.env.PRIVATEER_INLINE_MOAT = "1"; // as inherited from the harbor that spawned us
+
+  try {
+    const target = join(REPO, "extensions", "privateer-gate.ts");
+    writeFileSync(
+      join(extDir, "privateer-gate.ts"),
+      `export { default } from ${JSON.stringify(pathToFileURL(target).href)};\n`,
+    );
+    const { createAgentSessionServices } = await import("@earendil-works/pi-coding-agent");
+    const services = await createAgentSessionServices({ cwd: REPO, agentDir });
+    const loaded = services.resourceLoader.getExtensions();
+    const mine = loaded.extensions.filter((e: any) => String(e.path).includes("privateer-gate"));
+    assert.equal(mine.length, 1, "privateer-gate did not load");
+    const handlers = (mine[0] as any).handlers;
+    const forToolCall = handlers instanceof Map ? handlers.get("tool_call") : handlers?.tool_call;
+    assert.ok(
+      forToolCall && forToolCall.length > 0,
+      "a subagent child lost its only permission gate — it would run every tool ungated",
+    );
+  } finally {
+    if (prevHome === undefined) delete process.env.PRIVATEER_HOME;
+    else process.env.PRIVATEER_HOME = prevHome;
+    if (prevAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevAgent;
+    if (wasChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = wasChild;
+    if (wasMoat === undefined) delete process.env.PRIVATEER_INLINE_MOAT;
+    else process.env.PRIVATEER_INLINE_MOAT = wasMoat;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -1,29 +1,41 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MessagingBridge, chunkText, approvalDecision, type TurnRunner } from "../src/channels/bridge.ts";
+import {
+  MessagingBridge,
+  chunkText,
+  approvalDecision,
+  passesMentionGate,
+  promptWithAttachments,
+  type TurnRunner,
+} from "../src/channels/bridge.ts";
 import { messageFromUpdate, TelegramAdapter } from "../src/channels/telegram.ts";
 import { messageFromSlackEvent, SlackAdapter } from "../src/channels/slack.ts";
 import { messageFromDiscord, DiscordAdapter } from "../src/channels/discord.ts";
 import { messagesFromWebhook, WhatsAppAdapter } from "../src/channels/whatsapp.ts";
-import type { ChannelAdapter, InboundMessage } from "../src/channels/types.ts";
+import type { ChannelAdapter, InboundMessage, SendOptions } from "../src/channels/types.ts";
 
 // A fake adapter standing in for a platform: it captures the bridge's onMessage
 // handler (so tests can inject inbound messages) and records everything sent.
-function makeFakeAdapter() {
+function makeFakeAdapter(opts: { maxMessageBytes?: number; assignIds?: boolean } = {}) {
   let handler: ((m: InboundMessage) => void) | undefined;
-  const sent: { chatId: string; text: string }[] = [];
+  const sent: { chatId: string; text: string; opts?: SendOptions }[] = [];
   const typing: string[] = [];
+  let seq = 0;
   const adapter: ChannelAdapter & {
     inject(m: InboundMessage): void;
     sent: typeof sent;
     typing: typeof typing;
   } = {
     name: "fake",
+    maxMessageBytes: opts.maxMessageBytes,
     async start(onMessage) {
       handler = onMessage;
     },
-    async sendText(chatId, text) {
-      sent.push({ chatId, text });
+    async sendText(chatId, text, sendOpts) {
+      sent.push({ chatId, text, opts: sendOpts });
+      // Platforms that hand back the id of what they just wrote let the bridge chain
+      // subsequent chunks beneath it.
+      return opts.assignIds ? `sent-${++seq}` : undefined;
     },
     sendTyping(chatId) {
       typing.push(chatId);
@@ -361,6 +373,230 @@ test("chunkText splits long text under the cap, preferring newlines", () => {
   for (const c of chunks) assert.ok(c.length <= 1900, `chunk length ${c.length}`);
   // Round-trips (modulo the newlines consumed at split points).
   assert.equal(chunks.join("\n").replace(/\n+/g, "\n"), text.replace(/\n+/g, "\n"));
+});
+
+test("chunkText measures BYTES, not characters, and never splits a code point", () => {
+  // 400 four-byte emoji = 1600 bytes but only 800 UTF-16 units — a char-based cap
+  // would wave this through and the platform would reject it.
+  const text = "😀".repeat(400);
+  const chunks = chunkText(text, 500);
+  assert.ok(chunks.length >= 4, `expected several chunks, got ${chunks.length}`);
+  for (const c of chunks) {
+    assert.ok(Buffer.byteLength(c) <= 500, `chunk was ${Buffer.byteLength(c)} bytes`);
+    // A split surrogate pair shows up as U+FFFD once re-encoded.
+    assert.ok(!c.includes("�"), "chunk split a code point");
+  }
+  assert.equal(chunks.join(""), text);
+});
+
+// ── the mention gate ───────────────────────────────────────────────────────────
+
+test("passesMentionGate: off lets everything through", () => {
+  assert.equal(passesMentionGate(msg(), "off"), true);
+  assert.equal(passesMentionGate(msg(), undefined), true);
+});
+
+test("passesMentionGate: mention requires being addressed; DMs need mention-or-dm", () => {
+  assert.equal(passesMentionGate(msg({ mentionsMe: true }), "mention"), true);
+  assert.equal(passesMentionGate(msg({ mentionsMe: false }), "mention"), false);
+  // A DM is inherently addressed to the agent, but only "mention-or-dm" says so.
+  assert.equal(passesMentionGate(msg({ isDirect: true }), "mention"), false);
+  assert.equal(passesMentionGate(msg({ isDirect: true }), "mention-or-dm"), true);
+  assert.equal(passesMentionGate(msg({ mentionsMe: true }), "mention-or-dm"), true);
+  assert.equal(passesMentionGate(msg(), "mention-or-dm"), false);
+});
+
+test("passesMentionGate FAILS CLOSED when the adapter can't report mentions", () => {
+  // Enabling a gate on a platform that can't honour it must silence the bot, not
+  // silently defeat the gate and answer everything.
+  assert.equal(passesMentionGate(msg({ mentionsMe: undefined }), "mention"), false);
+});
+
+test("mention gate drops an unaddressed message but still runs an addressed one", async () => {
+  const adapter = makeFakeAdapter();
+  let turns = 0;
+  const bridge = new MessagingBridge({
+    adapter,
+    runTurn: async (_c, _t, onText) => {
+      turns++;
+      onText("hi");
+      return { ok: true };
+    },
+    isAllowed: () => true,
+    isAdmin: () => true,
+    mentionGate: "mention",
+  });
+  await bridge.start();
+
+  adapter.inject(msg({ text: "just chatting to someone else" }));
+  await settle();
+  assert.equal(turns, 0);
+  assert.equal(adapter.sent.length, 0, "an ungated bot must stay completely silent");
+
+  adapter.inject(msg({ text: "@agent hello", mentionsMe: true }));
+  await settle();
+  assert.equal(turns, 1);
+});
+
+test("the mention gate NEVER blocks an approval reply or /stop", async () => {
+  // Ordering regression guard: both arrive without an @mention. Gating the approval
+  // answer would hang the waiting turn until its 2-minute fail-closed timeout, and
+  // gating /stop would make the channel uninterruptible.
+  const adapter = makeFakeAdapter();
+  let decision: string | undefined;
+  const bridge = new MessagingBridge({
+    adapter,
+    runTurn: async (chatId, _t, _onText, signal) => {
+      decision = await bridge.requestApproval(chatId, { kind: "bash", title: "run", detail: "ls" }, signal);
+      return { ok: true };
+    },
+    isAllowed: () => true,
+    isAdmin: () => true,
+    mentionGate: "mention",
+  });
+  await bridge.start();
+
+  adapter.inject(msg({ text: "@agent do it", mentionsMe: true }));
+  await settle();
+  adapter.inject(msg({ text: "yes" })); // no mention — must still be heard
+  await settle();
+  assert.equal(decision, "allow");
+});
+
+// ── threading ──────────────────────────────────────────────────────────────────
+
+test("the reply attaches to the message that triggered it", async () => {
+  const adapter = makeFakeAdapter();
+  const bridge = new MessagingBridge({
+    adapter,
+    runTurn: async (_c, _t, onText) => {
+      onText("answer");
+      return { ok: true };
+    },
+    isAllowed: () => true,
+    isAdmin: () => true,
+  });
+  await bridge.start();
+  adapter.inject(msg({ messageId: "evt-1", threadRootId: "root-1" }));
+  await settle();
+  assert.deepEqual(adapter.sent[0].opts, { replyTo: "evt-1", threadRoot: "root-1" });
+});
+
+test("a message with no thread root roots the thread at itself", async () => {
+  const adapter = makeFakeAdapter();
+  const bridge = new MessagingBridge({
+    adapter,
+    runTurn: async (_c, _t, onText) => {
+      onText("answer");
+      return { ok: true };
+    },
+    isAllowed: () => true,
+    isAdmin: () => true,
+  });
+  await bridge.start();
+  adapter.inject(msg({ messageId: "evt-1" }));
+  await settle();
+  assert.deepEqual(adapter.sent[0].opts, { replyTo: "evt-1", threadRoot: "evt-1" });
+});
+
+test("multi-chunk answers chain beneath the previous chunk when the adapter returns ids", async () => {
+  const adapter = makeFakeAdapter({ maxMessageBytes: 50, assignIds: true });
+  const bridge = new MessagingBridge({
+    adapter,
+    runTurn: async (_c, _t, onText) => {
+      onText("y".repeat(180));
+      return { ok: true };
+    },
+    isAllowed: () => true,
+    isAdmin: () => true,
+  });
+  await bridge.start();
+  adapter.inject(msg({ messageId: "evt-1" }));
+  await settle();
+
+  assert.ok(adapter.sent.length >= 4, `expected several chunks, got ${adapter.sent.length}`);
+  // The adapter's own cap is honoured — not the bridge's 1900-byte default.
+  for (const s of adapter.sent) assert.ok(Buffer.byteLength(s.text) <= 50);
+  assert.equal(adapter.sent[0].opts?.replyTo, "evt-1");
+  assert.equal(adapter.sent[1].opts?.replyTo, "sent-1", "chunk 2 should hang off chunk 1");
+  assert.equal(adapter.sent[2].opts?.replyTo, "sent-2");
+  // The whole chain stays in one thread.
+  for (const s of adapter.sent) assert.equal(s.opts?.threadRoot, "evt-1");
+});
+
+test("a platform without message ids gets plain sends, not threading options", async () => {
+  const adapter = makeFakeAdapter();
+  const bridge = new MessagingBridge({
+    adapter,
+    runTurn: async (_c, _t, onText) => {
+      onText("answer");
+      return { ok: true };
+    },
+    isAllowed: () => true,
+    isAdmin: () => true,
+  });
+  await bridge.start();
+  adapter.inject(msg()); // no messageId — Telegram/Slack/Discord/WhatsApp today
+  await settle();
+  assert.equal(adapter.sent[0].opts, undefined);
+});
+
+// ── attachments ────────────────────────────────────────────────────────────────
+
+test("promptWithAttachments appends a footer the agent can act on", () => {
+  assert.equal(promptWithAttachments(msg({ text: "look" })), "look");
+  assert.equal(
+    promptWithAttachments(
+      msg({ text: "look", attachments: [{ mediaType: "image/png", name: "a.png", url: "http://h/x" }] }),
+    ),
+    "look\n\n[attached: image/png — a.png — http://h/x]",
+  );
+  // An attachment-only message still produces a usable prompt.
+  assert.equal(
+    promptWithAttachments(msg({ text: "", attachments: [{ mediaType: "image/png", id: "sha" }] })),
+    "[attached: image/png — sha]",
+  );
+});
+
+test("attachments reach the turn runner", async () => {
+  const adapter = makeFakeAdapter();
+  let seen = "";
+  const bridge = new MessagingBridge({
+    adapter,
+    runTurn: async (_c, text, onText) => {
+      seen = text;
+      onText("ok");
+      return { ok: true };
+    },
+    isAllowed: () => true,
+    isAdmin: () => true,
+  });
+  await bridge.start();
+  adapter.inject(msg({ text: "what is this", attachments: [{ mediaType: "image/png", url: "http://h/y" }] }));
+  await settle();
+  assert.ok(seen.includes("[attached: image/png — http://h/y]"), seen);
+});
+
+test("audit lines carry the triggering messageId but never other users' mentions", async () => {
+  const adapter = makeFakeAdapter();
+  const events: any[] = [];
+  const bridge = new MessagingBridge({
+    adapter,
+    runTurn: async (_c, _t, onText) => {
+      onText("ok");
+      return { ok: true };
+    },
+    isAllowed: () => true,
+    isAdmin: () => true,
+    onAudit: (e) => events.push(e),
+  });
+  await bridge.start();
+  adapter.inject(msg({ messageId: "evt-9", mentions: ["someone-elses-pubkey"] }));
+  await settle();
+  const prompt = events.find((e) => e.event === "prompt");
+  assert.equal(prompt.messageId, "evt-9");
+  // Third-party ids are PII and must not land in the append-only audit file.
+  assert.ok(!JSON.stringify(events).includes("someone-elses-pubkey"));
 });
 
 // ── Telegram platform mapping (the only platform-specific logic) ────────────────

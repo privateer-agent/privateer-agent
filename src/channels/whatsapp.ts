@@ -87,14 +87,50 @@ export class WhatsAppAdapter implements ChannelAdapter {
 
   async start(onMessage: (m: InboundMessage) => void): Promise<void> {
     this.onMessage = onMessage;
-    this.server = createServer((req, res) => this.handle(req, res));
-    await new Promise<void>((resolve) => this.server!.listen(this.port, () => resolve()));
+    const server = createServer((req, res) => this.handle(req, res));
+    this.server = server;
+    // Bind with a bounded retry. A restart of THIS platform (config change) may race
+    // the previous listener's last keep-alive socket draining; stop() destroys those,
+    // but the kernel can still hold the port for a beat. Retrying turns a lost
+    // platform into a sub-second delay. Anything other than EADDRINUSE fails fast.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onError = (e: NodeJS.ErrnoException) => reject(e);
+          server.once("error", onError);
+          server.listen(this.port, () => {
+            server.off("error", onError);
+            resolve();
+          });
+        });
+        break;
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException)?.code;
+        if (code !== "EADDRINUSE" || attempt >= 2) {
+          this.server = undefined;
+          throw e;
+        }
+        this.log(`port ${this.port} still in use — retrying in 500ms`);
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
     this.log(`webhook listening on :${this.port}${this.path} — expose it publicly for Meta to reach.`);
   }
 
-  stop(): void {
-    this.server?.close();
+  // Async, and it DESTROYS live connections. `server.close()` alone stops accepting
+  // new connections but resolves only once every existing keep-alive socket drains —
+  // Meta holds those open, so a plain close() can leave the port bound for a long
+  // time and the next listen() fails. Awaiting this is what makes a targeted
+  // per-platform restart safe.
+  async stop(): Promise<void> {
+    const server = this.server;
     this.server = undefined;
+    this.onMessage = undefined;
+    if (!server) return;
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
   }
 
   async sendText(chatId: string, text: string): Promise<void> {

@@ -23,23 +23,17 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { configPath } from "../config/paths.ts";
+// The platform roster, per-platform secret field names, and the "is this block
+// startable" predicate all live in ONE place, shared with the channels runtime —
+// see channels/platforms.ts. Re-exported here so existing importers of
+// CHANNEL_PLATFORMS/ChannelPlatform from this module keep working unchanged.
+import { CHANNEL_PLATFORMS, SECRET_FIELDS, isChannelPlatform, type ChannelPlatform } from "../channels/platforms.ts";
 
-// The platforms channels/run.ts knows how to start. Order is the app's display
-// order. Keep in sync with the `startChannel` calls in run.ts.
-export const CHANNEL_PLATFORMS = ["telegram", "slack", "discord", "whatsapp"] as const;
-export type ChannelPlatform = (typeof CHANNEL_PLATFORMS)[number];
+export { CHANNEL_PLATFORMS };
+export type { ChannelPlatform };
 
 const POSTURES = ["readonly", "approve", "auto"] as const;
 export type ChannelPosture = (typeof POSTURES)[number];
-
-// The secret (never-echoed) fields per platform — the union of the token blocks
-// run.ts requires to START each platform. `secretsSet` reports presence of these.
-const SECRET_FIELDS: Record<ChannelPlatform, string[]> = {
-  telegram: ["botToken"],
-  slack: ["appToken", "botToken"],
-  discord: ["botToken"],
-  whatsapp: ["phoneNumberId", "accessToken", "verifyToken", "appSecret"],
-};
 
 // Non-secret projection of one platform's config, sent to the app. No token
 // values, ever — only which secret fields are already present (`secretsSet`).
@@ -79,9 +73,7 @@ export interface ChannelsControl {
   remove(platform: ChannelPlatform): { ok: boolean; message?: string };
 }
 
-function isPlatform(v: unknown): v is ChannelPlatform {
-  return typeof v === "string" && (CHANNEL_PLATFORMS as readonly string[]).includes(v);
-}
+const isPlatform = isChannelPlatform;
 
 function normalizePosture(v: unknown): ChannelPosture | undefined {
   return typeof v === "string" && (POSTURES as readonly string[]).includes(v) ? (v as ChannelPosture) : undefined;

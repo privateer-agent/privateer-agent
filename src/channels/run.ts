@@ -106,6 +106,13 @@ function normalizePosture(v: unknown): Posture | undefined {
 }
 
 async function main() {
+  // Mark the process before anything can create a session. This runner builds its
+  // session with its own makePermissionGate (the in-chat approver below), but the
+  // shipped TUI gate extension is still auto-discovered from the shared agent dir —
+  // and with no UI bound here its local asker fails CLOSED, denying every gated tool
+  // before our approver is ever consulted. See config/inlineMoat.ts.
+  const { markInlineMoat } = await import("../config/inlineMoat.ts");
+  markInlineMoat();
   const { readFileSync, appendFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const {
@@ -131,6 +138,8 @@ async function main() {
   const { DiscordAdapter } = await import("./discord.ts");
   const { WhatsAppAdapter } = await import("./whatsapp.ts");
   const { writeChannelsStatus, HEARTBEAT_MS } = await import("./status.ts");
+  const { startableFrom } = await import("./platforms.ts");
+  const { buzzRedactionSecrets } = await import("../nostr/keys.ts");
   type ChannelAdapter = import("./types.ts").ChannelAdapter;
 
   // ── config ──────────────────────────────────────────────────────────────────
@@ -149,7 +158,10 @@ async function main() {
     : (web ? [...SAFE_TOOLS, ...WEB_TOOLS] : [...SAFE_TOOLS]);
   const defaultPosture: Posture = normalizePosture(ch.posture) ?? "approve";
   const cwd: string = ch.cwd ?? process.cwd();
-  const secrets = collectSecrets(cfg.providers);
+  // Provider API keys, plus this machine's Nostr secret if one has been minted.
+  // The agent can READ its own key file, so without this it could quote its own
+  // permanent identity into a public channel. Non-minting: absent → nothing added.
+  const secrets = [...collectSecrets(cfg.providers), ...buzzRedactionSecrets()];
   const redact = (t: string) => redactText(t, secrets);
 
   // Append-only security audit log — every prompt, approval request/decision, and
@@ -279,7 +291,7 @@ async function main() {
   sweep.unref?.();
 
   // ── build a bridge per configured platform ───────────────────────────────────
-  const bridges: { stop(): void }[] = [];
+  const bridges: { stop(): Promise<void> }[] = [];
   // Platforms with a live bridge — written to the heartbeat file so the app's
   // channels manager (running on the harbor's relay, a separate process) can show
   // a live/offline badge without talking to this process.
@@ -343,28 +355,30 @@ async function main() {
     );
   }
 
-  if (ch.telegram?.botToken) {
+  // Which credentials each platform needs to start is declared once, in
+  // channels/platforms.ts, so this list and the app's config validator can't drift.
+  if (startableFrom("telegram", ch.telegram)) {
     await startChannel(
       "telegram",
       new TelegramAdapter({ botToken: ch.telegram.botToken, onLog: log }),
       ch.telegram,
     );
   }
-  if (ch.slack?.appToken && ch.slack?.botToken) {
+  if (startableFrom("slack", ch.slack)) {
     await startChannel(
       "slack",
       new SlackAdapter({ appToken: ch.slack.appToken, botToken: ch.slack.botToken, onLog: log }),
       ch.slack,
     );
   }
-  if (ch.discord?.botToken) {
+  if (startableFrom("discord", ch.discord)) {
     await startChannel(
       "discord",
       new DiscordAdapter({ botToken: ch.discord.botToken, intents: ch.discord.intents, onLog: log }),
       ch.discord,
     );
   }
-  if (ch.whatsapp?.phoneNumberId && ch.whatsapp?.accessToken && ch.whatsapp?.verifyToken) {
+  if (startableFrom("whatsapp", ch.whatsapp)) {
     await startChannel(
       "whatsapp",
       new WhatsAppAdapter({
@@ -397,7 +411,10 @@ async function main() {
     clearInterval(sweep);
     clearInterval(heartbeat);
     writeChannelsStatus([]); // clear presence immediately, don't wait for staleness
-    for (const b of bridges) b.stop();
+    // Fire-and-forget: process exit releases every socket and port anyway, so there's
+    // nothing to wait for here. Awaiting matters for a TARGETED restart (one platform
+    // rebinding its port while the process lives on), not for shutdown.
+    for (const b of bridges) void b.stop();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

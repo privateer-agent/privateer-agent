@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url"; // builtin, safe pre-boot
 import { cliPalette } from "../ui/palette.ts"; // no Pi deps → safe pre-boot
 import { noQuarterActive, setNoQuarter } from "../permissions/noQuarter.ts"; // no Pi deps → safe pre-boot
 import type { GateController } from "../ext/permissionGate.ts"; // type-only → erased, safe pre-boot
+import { createUIContext } from "../ext/headlessUi.ts"; // no Pi deps → safe pre-boot
 
 // This lean REPL has no Pi TUI (and so no Theme), so it detects the terminal background
 // itself (COLORFGBG) and picks a palette — on a light terminal the standard "\x1b[33m"
@@ -447,7 +448,7 @@ async function main() {
   // is correct: this REPL is interactive. The abort signal Pi passes (to dismiss a
   // dialog on interrupt) is threaded through so a cancelled turn doesn't wedge.
   const driven = (): boolean => bridge.getRemote() && bridge.isConnected();
-  const uiContext = {
+  const uiContext = createUIContext({
     // Pick one of `options`. Returns the chosen string, or undefined if cancelled.
     async select(title: string, options: string[], opts?: { signal?: AbortSignal }): Promise<string | undefined> {
       if (!options.length) return undefined;
@@ -492,7 +493,7 @@ async function main() {
       console.log(`${color}${message}${RESET}`);
       if (driven()) bridge.sendNotice(message);
     },
-  };
+  });
   await (session as any).bindExtensions({ uiContext });
 
   // Stream the turn as EngineEvents — printed locally AND forwarded to the app

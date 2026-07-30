@@ -122,6 +122,19 @@ else if (sub === "harbor" || sub === "daemon") {
   runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-harbor.mjs"), ...args.slice(1)]);
 }
 
+// --- `privateer acp` -------------------------------------------------------
+// Privateer as an Agent Client Protocol server, spawned by an ACP host (Buzz's
+// `buzz-acp`, Zed, …) and driven over newline-delimited JSON-RPC on stdio.
+//
+// ⚠️ STDOUT IS THE PROTOCOL here, so this branch must stay silent: no banner, no
+// patch chatter, no moat-shim install (like `harbor`, the ACP entry loads the moat
+// as in-code factories rather than discovered extensions). A single stray stdout
+// line breaks the JSON-RPC stream and the host disconnects.
+else if (sub === "acp") {
+  const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
+  runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-acp.mjs"), ...args.slice(1)]);
+}
+
 // --- normal launch: install the moat, then exec Pi's TUI -------------------
 else {
   // Windows has no bash out of the box, but Privateer's command tool needs one. If a

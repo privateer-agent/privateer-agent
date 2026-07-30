@@ -59,8 +59,10 @@ import { deliver, type RelayPusher, type CloudPusher } from "../routines/deliver
 import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
+import { serializeBuild } from "./buildLock.ts";
 import { isHosted, publishRelayPub, webEnabled } from "../config/hosted.ts";
 import { markHarborDaemon } from "../config/harborDaemon.ts";
+import { markInlineMoat } from "../config/inlineMoat.ts";
 import { makeWebTools, WEB_TOOL_NAMES } from "../tools/web.ts";
 
 // The safe, read-only toolset for unattended runs — Pi builtins with no
@@ -157,18 +159,8 @@ function formatResult(routine: Routine, body: string, status: "ok" | "error", er
   return `${head}${body.trim() || "(no output)"}\n${formatNotes(notes)}`;
 }
 
-// Session CONSTRUCTION is serialized across the harbor. pi-mcp-adapter decides which
-// MCP tools to register directly at extension-activation time, and the only knob for
-// that is the MCP_DIRECT_TOOLS env var — process-global state we set per run to keep
-// each unattended session to its own connector allow-list. Serializing the (short)
-// build window is what stops two concurrent routines from reading each other's value.
-// Prompting is NOT serialized — only the build.
-let buildLock: Promise<unknown> = Promise.resolve();
-function serializeBuild<T>(fn: () => Promise<T>): Promise<T> {
-  const run = buildLock.then(fn, fn);
-  buildLock = run.catch(() => {});
-  return run;
-}
+// Session construction is serialized process-wide — see harbor/buildLock.ts for why.
+// Imported rather than defined here so the channels runtime can share the same lock.
 
 // A short human title for an ad-hoc task: the app's explicit title, else the first
 // non-empty line of the prompt, clipped. Exported for the signed-args round-trip test.
@@ -289,6 +281,11 @@ export class Harbor {
     // gate one has to stand its relay file tools down here so a live task's own pair
     // (bound to that task's live relay) isn't shadowed. See config/harborDaemon.ts.
     markHarborDaemon();
+    // Same reason, one step further: every session this process builds (routines,
+    // workflows, submitted tasks, live spawns) wires its own makePermissionGate, so
+    // the discovered gate must not install a second one on top of it. See
+    // config/inlineMoat.ts for what that collision costs.
+    markInlineMoat();
     // Single-instance lock FIRST, before any other side effect: binding the IPC
     // socket is the machine's mutex. If a live harbor already holds it this throws
     // HarborAlreadyRunningError — two harbors under one ~/.privateer share a single

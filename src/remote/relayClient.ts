@@ -17,6 +17,7 @@
  */
 import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { apiRequest, serverBaseUrl } from "../auth/privateer.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
@@ -227,6 +228,15 @@ export interface RelayCallbacks {
 }
 
 const RECONNECT_MS = 3000;
+// Ceiling for the reconnect backoff below. A blip should be invisible (first retry at
+// RECONNECT_MS), but a relay that is genuinely down must not be hammered every 3s for
+// hours by every harbor on the fleet — and when it comes back, they must not all
+// stampede it in the same 3s window. So: grow the delay on consecutive failures, cap it
+// here, jitter it, and reset the moment a socket opens.
+const RECONNECT_MAX_MS = 30_000;
+const RECONNECT_GROWTH = 1.7;
+// Fraction of the delay to randomize (±), so restarts don't resynchronize the fleet.
+const RECONNECT_JITTER = 0.25;
 // Retry cadence after the relay REFUSES us (4xx — in practice the plan's live-agent
 // cap). Slow, because only an account change can clear it, but not never: the harbor
 // should come up on its own once a slot frees. Kept well under the server's denial
@@ -241,12 +251,27 @@ const REFUSED_RECONNECT_MS = 60_000;
 // the server prunes the terminal from its presence registry after ~60s, so the app
 // shows the harbor as offline while the harbor's own log says "connected", forever.
 //
-// So don't wait to be told. The server pings every 25s, so an alive socket sees
-// inbound traffic at least that often; we ping on our own timer too (the peer's pong
-// counts as inbound). If nothing arrives for LIVENESS_TIMEOUT_MS — three missed
-// server pings — the socket is dead: terminate it and take the normal reconnect path.
+// So don't wait to be told. The server pings every 25s, so an alive socket sees inbound
+// traffic at least that often; we ping on our own timer too and a healthy peer pongs
+// immediately, so in practice inbound arrives every ~20s. If nothing arrives for
+// LIVENESS_TIMEOUT_MS the socket is dead: terminate it and take the normal reconnect path.
+//
+// The timeout is sized against the SERVER's presence TTL, not against comfort. The server
+// refreshes a 60s presence key on its own 25s heartbeat tick (server.js relayHeartbeat →
+// relayHub.markOnline, PRESENCE_TTL_SECS = 60), and the app's agent list reads exactly
+// that key. So the budget to detect a dead socket AND finish reconnecting is 60s from the
+// last tick that reached us — otherwise the key lapses and the harbor blinks out of the
+// app even though recovery is already under way. At the old 75s this was guaranteed: a
+// silent death always cost ~20-40s of visible "offline". 50s of silence is already
+// conclusive (two-plus missed exchanges) and leaves ~10s for the reconnect to re-register.
+//
+// Detection granularity is its own timer: polling silence on the 20s PING cadence added
+// up to a whole extra ping interval of latency, and after a laptop wake (timers frozen
+// while asleep — the common cause of this whole failure mode) it decided how long the
+// harbor stayed dark. Checking every 5s costs nothing and bounds that.
 const HEARTBEAT_MS = 20_000;
-const LIVENESS_TIMEOUT_MS = 75_000;
+const LIVENESS_CHECK_MS = 5_000;
+const LIVENESS_TIMEOUT_MS = 50_000;
 // Cap the opening handshake too. Without this a black-holed connect leaves `this.ws`
 // set with no open/close/error ever firing, and connect()'s `if (this.ws) return`
 // guard then blocks every future attempt — the same permanent silence by another route.
@@ -265,6 +290,20 @@ const TEXT_FLUSH_MS = 60;
 function clip(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max) + `\n… (${s.length - max} more chars)`;
+}
+
+// Rewrite a path under the home directory as `~/…` — the CLI's own display form.
+// Used on the cwd we report in a context frame: the driver still sees which folder
+// the agent is working in, without the account name in the absolute path crossing
+// the relay. Only an exact home prefix is collapsed (`/Users/pat2` is left alone);
+// a path outside home is returned unchanged.
+function homeCollapsed(p: string): string {
+  let home = "";
+  try { home = homedir(); } catch { /* no home → nothing to collapse */ }
+  if (!home || !p.startsWith(home)) return p;
+  const rest = p.slice(home.length);
+  if (rest === "") return "~";
+  return rest.startsWith("/") || rest.startsWith("\\") ? `~${rest}` : p;
 }
 
 function asText(output: unknown): string {
@@ -314,6 +353,8 @@ export class RelayClient {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private lastInboundAt = 0;
   private connectedAt = 0;
+  // Current backoff delay for the next unqualified scheduleReconnect(); reset on 'open'.
+  private reconnectDelay = RECONNECT_MS;
   // Last refusal reason reported, so a 4xx is logged once instead of on every retry.
   private refusal: string | null = null;
   // Ordered delta buffer (text/reasoning) coalesced into one frame per flush.
@@ -402,6 +443,7 @@ export class RelayClient {
     if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = undefined; }
     this.stopHeartbeat();
     this.connectedAt = 0;
+    this.reconnectDelay = RECONNECT_MS; // a restarted client shouldn't inherit old backoff
     this.bufKind = null;
     this.buf = "";
     this.incoming.clear();
@@ -450,6 +492,7 @@ export class RelayClient {
       ws.on("open", () => {
         opened = true;
         this.refusal = null; // a later refusal is news again
+        this.reconnectDelay = RECONNECT_MS; // reachable again — next blip retries fast
         this.connectedAt = Date.now();
         this.startHeartbeat(ws);
         this.settleFirstConnect(); // terminal is live on the relay — awaitRegistered() resolves
@@ -525,11 +568,13 @@ export class RelayClient {
   private startHeartbeat(ws: WebSocket): void {
     this.stopHeartbeat();
     this.lastInboundAt = Date.now();
+    let lastPingAt = Date.now();
     this.heartbeatTimer = setInterval(() => {
       // A socket we've since replaced or dropped isn't ours to police anymore.
       if (this.ws !== ws) { this.stopHeartbeat(); return; }
       if (ws.readyState !== WebSocket.OPEN) return; // closing — 'close' will clean up
-      const quietMs = Date.now() - this.lastInboundAt;
+      const now = Date.now();
+      const quietMs = now - this.lastInboundAt;
       if (quietMs > LIVENESS_TIMEOUT_MS) {
         this.cb.onStatus?.(
           `Remote access went silent for ${Math.round(quietMs / 1000)}s (the connection died without closing) — dropping it and reconnecting…`,
@@ -538,8 +583,13 @@ export class RelayClient {
         try { ws.terminate(); } catch (_) { /* already gone — 'close' still fires */ }
         return;
       }
-      try { ws.ping(); } catch (_) { /* socket dying — the next tick or 'close' handles it */ }
-    }, HEARTBEAT_MS);
+      // The check runs on LIVENESS_CHECK_MS; the ping stays on its own slower cadence so
+      // tightening detection doesn't multiply the traffic we put on the wire.
+      if (now - lastPingAt >= HEARTBEAT_MS) {
+        lastPingAt = now;
+        try { ws.ping(); } catch (_) { /* socket dying — the next tick or 'close' handles it */ }
+      }
+    }, LIVENESS_CHECK_MS);
     // Never hold the process open for a heartbeat alone.
     this.heartbeatTimer.unref?.();
   }
@@ -548,12 +598,28 @@ export class RelayClient {
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = undefined; }
   }
 
-  private scheduleReconnect(delayMs: number = RECONNECT_MS): void {
+  // Schedule the next connect attempt. With no explicit delay this walks the backoff
+  // ladder (reset to RECONNECT_MS by a successful 'open'), so the first retry after a
+  // blip is still ~3s and only a genuinely unreachable relay backs off. An explicit
+  // delay — the REFUSED_RECONNECT_MS path — is a deliberate cadence for a decision that
+  // won't change on its own, so it bypasses the ladder rather than compounding with it.
+  private scheduleReconnect(delayMs?: number): void {
     if (this.closed || this.reconnectTimer) return;
+    let wait: number;
+    if (typeof delayMs === "number") {
+      wait = delayMs;
+    } else {
+      wait = this.reconnectDelay;
+      this.reconnectDelay = Math.min(Math.round(this.reconnectDelay * RECONNECT_GROWTH), RECONNECT_MAX_MS);
+    }
+    // Jitter every wait (including the fixed ones): the point is to break up fleet-wide
+    // synchronization after a server restart, which is exactly when many clients are
+    // sitting on the same timer.
+    const jittered = Math.max(250, Math.round(wait * (1 + (Math.random() * 2 - 1) * RECONNECT_JITTER)));
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.connect();
-    }, delayMs);
+    }, jittered);
   }
 
   private handle(data: WebSocket.RawData): void {
@@ -926,13 +992,22 @@ export class RelayClient {
   // Push this terminal's live context (selected model, agent version) to a
   // controller so the app's session banner reflects reality instead of a stub.
   // Sent on controller attach — like the snapshot/no_quarter resync. NON-PII ONLY
-  // by design: deliberately NO cwd / hostname / username, matching terminalLabel's
+  // by design: deliberately NO hostname / username, matching terminalLabel's
   // stance (the server/controller learns as little as possible about the machine).
   // Empty/absent fields are omitted so the app renders less rather than blank.
-  sendContext(ctx: { model?: string; version?: string; terminalPub?: string }): void {
+  //
+  // `cwd` is the one scoped exception, and ONLY a harbor-spawned live session passes
+  // it (see liveTaskSession): the driver chose that directory in the spawn form — or,
+  // having left it blank, needs to see which one the harbor picked — because it is
+  // where everything that session reads, writes and `@`-mentions lives, and unlike an
+  // interactive terminal there is no human sitting in it to already know. It is
+  // home-collapsed (`~/…`) on the way out, so the banner reads like the CLI's own and
+  // the OS username still never crosses the relay.
+  sendContext(ctx: { model?: string; version?: string; cwd?: string; terminalPub?: string }): void {
     const frame: Record<string, unknown> = { type: "context" };
     if (typeof ctx.model === "string" && ctx.model) frame.model = ctx.model;
     if (typeof ctx.version === "string" && ctx.version) frame.version = ctx.version;
+    if (typeof ctx.cwd === "string" && ctx.cwd) frame.cwd = clip(homeCollapsed(ctx.cwd), 300);
     // The terminal's identity public key (base64). NOT PII — it's a public key, and
     // the app uses it to confirm this terminal is the one it PINNED at link time
     // before sealing any secret to it (channel tokens). A malicious relay can swap

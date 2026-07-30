@@ -116,8 +116,8 @@ silently. The moat is swappable; the floor under it holds.
 - **Chat-app channels.** Bridge the agent into Telegram, Slack, Discord, or WhatsApp with
   role-based approval — admins can approve actions, members are read-only.
 - **MCP servers, sub-agents & skills.** Connect Model Context Protocol servers (local stdio
-  or remote HTTP with OAuth), delegate work to bounded parallel sub-agents, and drop in
-  skills — all gated like everything else.
+  or remote HTTP with OAuth) with [`/connect`](#connectors--mcp), delegate work to bounded
+  parallel sub-agents, and drop in skills — all gated like everything else.
 - **Zero-Data-Retention surfacing** for OpenRouter — see the selected model's retention
   posture before you send, and pin routing to zero-retention endpoints.
 - **Plan mode**, checkpoint/rewind, session branching, a modal prompt with `/` command and
@@ -376,6 +376,80 @@ the app are write-only — the app can name them but never read them back. Note 
 live in plaintext in `config.json` on your machine, and every channel action is appended to
 `~/.privateer/channels-audit.log`.
 
+## Connectors — MCP
+
+Privateer is an **MCP client**. Point it at a [Model Context Protocol](https://modelcontextprotocol.io)
+server and that server's tools become first-class agent tools, gated exactly like the
+built-ins. Two kinds:
+
+| | |
+|---|---|
+| **Local — `stdio`** | Privateer spawns the server as a child process on this machine. Nothing leaves the box except what that server itself chooses to send. |
+| **Remote — `http`** | An `https` endpoint somebody else hosts. It authenticates with `oauth` (you authorize in a browser on **this** machine), a static `bearer` token, or nothing at all. Whatever the agent hands that server leaves your machine — the app shows a "sends data to *host*" badge for exactly this reason. |
+
+### Add one
+
+```
+/connect        # add, enable, disable, or remove connectors
+/mcp            # pi-mcp-adapter's own status view — what actually connected
+```
+
+`/connect` opens a picker over a curated catalog of 21 connectors — GitHub, Slack, Notion,
+Linear, Jira & Confluence, Sentry, Stripe, Asana, Supabase, Figma, Gmail, Google Drive,
+PostgreSQL, Playwright, Filesystem, … — plus a **Custom connector** entry for anything
+else: any stdio command line, or any `https://` URL. Pick one, fill in the token or path it
+asks for, and the adapter reloads in place, so the new tools are live in the session you're
+already sitting in. You can do the same from [the app](#the-privateer-app) or the desktop
+app; all three edit the same files.
+
+### One config, three surfaces
+
+```
+~/.privateer/agent/mcp-desktop.json   # source of truth — every connector, each with `enabled`
+~/.privateer/agent/mcp.json           # projection: enabled connectors only, in the standard
+                                      # { "mcpServers": … } shape the adapter reads
+```
+
+Don't hand-edit the projection — it is rewritten from the source on every change. Edit
+`mcp-desktop.json`, or just use `/connect`.
+
+Both files live in the shared `~/.privateer` home, so a connector you add in the terminal is
+already there for the harbor's unattended routine runs and for the desktop app's windows.
+One machine, one coherent connector config, however you reached it.
+
+### Tools and the moat
+
+By default the adapter exposes MCP through a **single proxy tool named `mcp`** — one grant
+covers every server you've enabled. When a routine carries a per-connector allow-list,
+Privateer scopes that run down to exactly the selected servers and tools instead, each
+registered under its own `<server>_<tool>` name, so an unattended task can hold GitHub's
+`create_issue` without holding all of MCP.
+
+Either way, **every MCP tool goes through the same permission gate as the built-ins.** A
+tool is not trusted because you configured the server it came from.
+
+### Credentials
+
+A connector's secrets — env values, a bearer token, an `Authorization:` header — are written
+in **plaintext** to `mcp-desktop.json` on this machine. That's unavoidable: the adapter has
+to hand the real token to the server. `/connect` masks the field while you type, which is
+shoulder-surfing and screen-share hygiene, not a storage claim. Protect that file the way you
+protect `~/.aws/credentials`.
+
+Editing connectors **from the app** is a different story: over the relay secrets are
+write-only in both directions. A listing returns env/header *names* and which of them are
+set — never a value — and a value you type on your phone is sealed to that terminal's pinned
+key before it leaves the device, so the relay forwards it blind. See
+[What you can do from the app](#what-you-can-do-from-the-app).
+
+A hand-written `.mcp.json` in a project directory is a **protected path**: the agent can be
+asked to edit one, but never does it silently, in any mode.
+
+> **Hosted harbors are OAuth-only by design** — no stdio child processes, no stored tokens,
+> because a hosted tenant's home is tmpfs and a durable secret would have to rest somewhere
+> we could read. In the current preview they carry no connectors at all; mirroring your
+> catalog into a hosted agent isn't wired up yet.
+
 ## Permission modes
 
 | Mode | Behavior |
@@ -424,9 +498,8 @@ Everything below is a **Pi extension** loaded by discovery (see [Built on Pi](#b
 drop your own into `~/.privateer/agent/extensions/` and it loads the same way, gated like the rest.
 
 - **MCP servers** (`pi-mcp-adapter`) — declare them and their tools become first-class, gated
-  like the rest (local stdio, or remote HTTP with interactive OAuth). One catalog at
-  `~/.privateer/agent/mcp-desktop.json` is shared by the CLI, the harbor, and the desktop
-  app, so a machine has one coherent connector config.
+  like the rest (local stdio, or remote HTTP with interactive OAuth). Add them with
+  `/connect`; see [Connectors — MCP](#connectors--mcp).
 - **Sub-agents** (`pi-subagents`) — delegate investigations to bounded parallel agents. Children
   run as headless child processes that **inherit the moat**, so their actions hit the same
   permission gate and their approvals surface on your phone.
@@ -447,6 +520,7 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/verify` | fetch and check the TEE attestation for the current model |
 | `/signin` · `/signout` | sign in to a Privateer account (device flow) / sign out |
 | `/remote-access` | link this terminal to the app and allow it to drive (off by default) |
+| `/connect` · `/mcp` | add, enable, or remove MCP connectors / see what actually connected |
 | `/extensions` | list loaded Pi extensions |
 | `/init` | scaffold a starter `PRIVATEER.md` in this directory |
 | `/update` · `/privateer` | update to the latest release / Privateer status and posture |
