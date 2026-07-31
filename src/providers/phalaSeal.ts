@@ -13,7 +13,7 @@
 // no polyfills, unlike the RN app.
 //
 // Two-layer attestation, fail-secure:
-//   (1) verifyReportBinding — the report's crypto binding (keyset digest,
+//   (1) verifyAciReportBinding — the report's crypto binding (keyset digest,
 //       report_data == statement(nonce), endorsement sig). Self-attesting alone.
 //   (2) verifyHardwareQuote — the hardware root: @phala/dcap-qvl verifies the TDX quote
 //       against Intel collateral and binds the quote's report_data to (1)'s statement
@@ -22,7 +22,6 @@
 
 import type { Report } from "@phala/dcap-qvl";
 import {
-  verifyReportBinding,
   openE2eeChannel,
   toHex,
   fromHex,
@@ -30,6 +29,11 @@ import {
   type ReportVerification,
   type E2eeChannel,
 } from "./phala/aci-verifier/index.ts";
+// Not the vendored verifyReportBinding directly: the deployed gateway signs its
+// keyset endorsement with ecdsa-secp256k1, which upstream's Web-Crypto-only verifier
+// refuses. This wrapper delegates ed25519 to it unchanged and adds the secp256k1 arm
+// the spec allows (§4.3), leaving aci-verifier/ pristine for re-pulls.
+import { verifyAciReportBinding } from "./phala/reportBinding.ts";
 import { serverBaseUrl } from "../auth/privateer.ts";
 
 const DEFAULT_ACCEPTABLE_TCB = ["UpToDate"];
@@ -94,7 +98,7 @@ async function establishAttestation(): Promise<VerifiedAttestation> {
   if (!res.ok) throw new Error(`phala attestation HTTP ${res.status}`);
   const report = (await res.json()) as AttestationReport;
 
-  const verification = await verifyReportBinding(report, nonce);
+  const verification = await verifyAciReportBinding(report, nonce);
   if (!verification.ok) {
     const failed = verification.checks.filter((c) => !c.ok).map((c) => c.name).join(", ");
     throw new Error(`phala attestation binding failed: ${failed}`);

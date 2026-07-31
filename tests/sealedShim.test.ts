@@ -57,7 +57,15 @@ test("buildForward keeps the FULL prefixed id on the cleartext billing header", 
   // and its pricing table is keyed by the prefixed id.
   assert.equal(plan.headers["X-Sealed-Model"], "tinfoil/glm-5-2");
   assert.equal(plan.sealedModel, "tinfoil/glm-5-2");
-  assert.equal(plan.headers["Content-Type"], "application/json");
+  assert.equal(plan.headers["Content-Type"], "application/json; charset=utf-8");
+});
+
+test("buildForward sends a charset on Content-Type (the enclave rejects a bare application/json)", () => {
+  // Regression guard for a live failure: EHBP seals the body but not the headers, so
+  // this Content-Type is what the enclave's router validates. It 400s a bare
+  // `application/json` ("Unsupported Media Type") and accepts any `charset=` variant.
+  const plan = buildForward("tinfoil", JSON.stringify({ model: "tinfoil/glm-5-2", messages: [] }), undefined);
+  assert.match(plan.headers["Content-Type"], /^application\/json\s*;\s*charset=/i);
 });
 
 test("buildForward forwards the account bearer, and omits it when absent", () => {

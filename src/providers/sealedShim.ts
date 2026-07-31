@@ -151,7 +151,12 @@ export function buildForward(
     // Not JSON — forward unchanged (X-Sealed-Model stays "unknown"; relay logs it).
   }
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    // MUST carry the charset. EHBP seals the body but headers travel in cleartext
+    // (tinfoil/dist/encrypted-body-fetch.js: "EHBP only seals the body"), so this
+    // Content-Type is what the enclave's router actually validates — and it rejects a
+    // bare `application/json` with "Unsupported Media Type: Only 'application/json' is
+    // allowed" (verified live 2026-07-31: bare → 400, any `charset=` variant → 200).
+    "Content-Type": "application/json; charset=utf-8",
     "X-Sealed-Model": sealedModel,
   };
   if (authHeader) headers.Authorization = authHeader;

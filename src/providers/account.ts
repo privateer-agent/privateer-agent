@@ -114,15 +114,36 @@ export function loadCachedCatalogIds(): string[] {
   }
 }
 
+// Whether the account channel can actually SERVE a catalog model right now.
+//
+// `phala/*` is sealed-only: it runs through the sealed blind relay and nowhere else.
+// The server's cleartext `/api/agent/v1` has no Phala route and rejects the id
+// outright (verified live 2026-07-31: 400 "phala/… is not a valid model ID"), because
+// Phala models are the Sealed tier by design — the server is not meant to be able to
+// read them. But `/api/models` advertises them to every client regardless of whether
+// that client speaks sealed mode, so with the flag off they are pickable and then fail
+// on the first prompt. Offering a model we know cannot answer is worse than a shorter
+// list, so drop them until sealed mode is on.
+//
+// `tinfoil/*` is deliberately NOT filtered: the cleartext path serves it fine (sealed
+// mode only upgrades the badge from unconfirmed to verified), so it stays either way.
+export function isServableAccountModel(id: string): boolean {
+  return sealedEnabled() || !id.startsWith("phala/");
+}
+
 // The ids to register synchronously at load. DEFAULT_MODELS FIRST and always: the account
 // default has to be index 0 both because it must always resolve and because Pi clones the
 // provider's first/default model when it synthesizes a custom model id
 // (model-resolver.js buildFallbackModel).
+//
+// The disk cache stores what the SERVER last listed, unfiltered, so the filter is applied
+// here on read: flipping PRIVATEER_SEALED changes what's registered on the next launch
+// without needing the cache rewritten.
 export function seedCatalogIds(): string[] {
   const ids = [...DEFAULT_MODELS];
   const seen = new Set(ids);
   for (const id of loadCachedCatalogIds()) {
-    if (!seen.has(id)) {
+    if (!seen.has(id) && isServableAccountModel(id)) {
       seen.add(id);
       ids.push(id);
     }
@@ -202,9 +223,12 @@ export async function fetchAccountCatalog(): Promise<AccountModelInfo[]> {
         .map((m) => (m.modelId ? { id: m.modelId, tier: normalizeTier(m.privacy?.tier, m.modelId) } : null))
         .filter((x): x is AccountModelInfo => !!x);
       // Cache only a real LIVE listing — never the fallback, which would freeze the six
-      // seed ids on disk and read back as though it were the catalog.
+      // seed ids on disk and read back as though it were the catalog. Cache the server's
+      // list UNFILTERED (it is the record of what the server offers); isServableAccountModel
+      // is applied on the way out, here and in seedCatalogIds.
       if (parsed.length) saveCachedCatalogIds(parsed.map((p) => p.id));
-      infos = parsed.length ? parsed : fallback();
+      const servable = parsed.filter((p) => isServableAccountModel(p.id));
+      infos = servable.length ? servable : fallback();
     }
   } catch {
     infos = fallback();
