@@ -996,13 +996,14 @@ export class RelayClient {
   // stance (the server/controller learns as little as possible about the machine).
   // Empty/absent fields are omitted so the app renders less rather than blank.
   //
-  // `cwd` is the one scoped exception, and ONLY a harbor-spawned live session passes
-  // it (see liveTaskSession): the driver chose that directory in the spawn form — or,
-  // having left it blank, needs to see which one the harbor picked — because it is
-  // where everything that session reads, writes and `@`-mentions lives, and unlike an
-  // interactive terminal there is no human sitting in it to already know. It is
-  // home-collapsed (`~/…`) on the way out, so the banner reads like the CLI's own and
-  // the OS username still never crosses the relay.
+  // `cwd` is the one scoped exception, sent by BOTH session kinds: it is where
+  // everything the agent reads, writes and `@`-mentions lives, so a driver who can't
+  // see it is guessing at the blast radius of every prompt they send. (It used to be
+  // harbor-spawned sessions only — on the theory that a human sits in an interactive
+  // terminal and already knows the folder. They don't when they're driving it from a
+  // phone, which is the entire point of this transport.) It is home-collapsed (`~/…`)
+  // on the way out, so the banner reads like the CLI's own and the OS username still
+  // never crosses the relay.
   sendContext(ctx: { model?: string; version?: string; cwd?: string; terminalPub?: string }): void {
     const frame: Record<string, unknown> = { type: "context" };
     if (typeof ctx.model === "string" && ctx.model) frame.model = ctx.model;

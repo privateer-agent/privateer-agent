@@ -157,14 +157,16 @@ async function main() {
       console.log(`\n${DIM}⟿ [app] ${text}${RESET}`);
       void (async () => { if (!(await runCommand(text, true))) await runTurn(text, true, false); })();
     },
-    // On (re)attach, resync the transcript, push live context (model + version) so
-    // the app's banner shows what this terminal runs, AND advertise the available
-    // commands so the composer can autocomplete them (incl. extension commands). The
-    // model catalog isn't pushed — /model relays it on demand as a selection prompt.
-    // NON-PII: no cwd — see RelayClient.sendContext.
+    // On (re)attach, resync the transcript, push live context (model + cwd +
+    // version) so the app's banner shows what this terminal runs, AND advertise the
+    // available commands so the composer can autocomplete them (incl. extension
+    // commands). The model catalog isn't pushed — /model relays it on demand as a
+    // selection prompt. `cwd` is home-collapsed on the way out (see sendContext), so
+    // the driver learns which folder they're driving without the OS username
+    // crossing the relay.
     onControllerAttached: () => {
       relay?.sendSnapshot([]);
-      relay?.sendContext({ model: currentSpec, version: agentVersion() });
+      relay?.sendContext({ model: currentSpec, cwd, version: agentVersion() });
       relay?.sendCommands(availableCommands());
     },
     onStatus: (t) => console.log(`\n${DIM}⟿ ${t}${RESET}`),
@@ -602,7 +604,7 @@ async function main() {
       currentSpec = sp;
       const m = `model → ${sp}`;
       console.log(`${DIM}${m}${RESET}`);
-      relay?.sendContext({ model: currentSpec, version: agentVersion() }); // banner follows the switch
+      relay?.sendContext({ model: currentSpec, cwd, version: agentVersion() }); // banner follows the switch
       if (remote) relay?.sendNotice(m);
     } catch (e) {
       const m = `Couldn't switch model: ${(e as Error).message}`;
