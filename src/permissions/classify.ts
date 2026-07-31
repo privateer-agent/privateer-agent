@@ -141,8 +141,17 @@ function unknownTarget(toolName: string, kind: "write" | "edit"): PermissionRequ
 // machine: no gate regardless of arguments. Tunable — the conservative default for
 // anything NOT listed here is to ask (see below). TODO(verify) against Pi's full
 // builtin tool catalog as it's enumerated in Phase 5.
+// `ask_user_question` (rpiv-ask-user-question, shimmed by the launcher) is here on
+// purpose: it is a QUESTION PUT TO THE USER — it renders a dialog and returns what the
+// human picked. It touches nothing, sends nothing, and the human is already in the loop
+// by construction. Gating it would fall through to the unknown-tool branch below, which
+// classifies as bash-kind: a pointless "Run ask_user_question" prompt in default mode,
+// and an outright DENY in plan/readonly — the very posture where a model most needs to
+// ask instead of guess. Headless surfaces need no guard either: the tool self-checks
+// ctx.hasUI and returns an error result when there's no one to ask.
 const NON_GATED = new Set([
   "todo", "todowrite", "todo_write", "todoread", "think", "plan_note",
+  "ask_user_question",
 ]);
 
 // Read-ish builtins: gated ONLY when the target resolves outside scope.

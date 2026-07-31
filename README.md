@@ -73,6 +73,7 @@ What Privateer adds is a *moat* of Pi extensions layered on top:
 | `privateer-account` | `/signin` billed inference against a Privateer account (device flow) |
 | `privateer-posture`, `privateer-tools` | live attestation shield + Privateer tool pack |
 | `rpiv-web-tools` | private-by-default web search (self-hosted SearXNG, no WebView) |
+| `rpiv-ask-user-question` | `ask_user_question` — a structured questionnaire the agent puts to you instead of guessing |
 | `pi-mcp-adapter`, `pi-subagents` | MCP servers · bounded parallel sub-agents |
 
 They're ordinary Pi extensions — inspect them, replace them, or build your own alongside.
@@ -509,6 +510,9 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
   [Workflows](#workflows).
 - **Web tools** (`rpiv-web-tools`) — private-by-default web search/fetch with pluggable backends
   (self-hosted SearXNG for fully private search).
+- **Ask user question** (`rpiv-ask-user-question`) — when a request is underspecified the agent
+  raises a structured questionnaire (typed options, multi-select, markdown previews, or type your
+  own answer) instead of guessing. Ungated by design — it only asks you something.
 
 ## Command reference
 

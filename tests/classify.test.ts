@@ -62,6 +62,10 @@ test("known meta tool (todo) → null", () => {
   assert.equal(classifyToolCall("todowrite", { items: [] }, scope), null);
 });
 
+test("ask_user_question → null (it only asks the human; gating it would deny in plan)", () => {
+  assert.equal(classifyToolCall("ask_user_question", { questions: [] }, scope), null);
+});
+
 test("unknown/custom tool → safe-by-default bash-kind ask", () => {
   const r = classifyToolCall("some_mcp_tool", { foo: 1 }, scope);
   assert.equal(r?.kind, "bash"); // asks in default, denies in plan

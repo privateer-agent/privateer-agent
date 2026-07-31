@@ -61,6 +61,8 @@ const RESERVED = new Set([
   "pi-web-access",
   "rpiv-web-tools",
   "@juicesharp/rpiv-web-tools",
+  "rpiv-ask-user-question",
+  "@juicesharp/rpiv-ask-user-question",
   "pi-mcp-adapter",
   "pi-hypa",
   "@hypabolic/pi-hypa",

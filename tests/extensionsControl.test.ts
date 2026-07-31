@@ -21,7 +21,13 @@ test("listInstalled maps the user's configured packages", () => {
 
 test("listInstalled excludes the Privateer moat even if hand-added to settings", () => {
   // The moat normally lives as shims (not "packages"), but guard defensively.
-  const installed = control(["npm:pi-hello", "npm:pi-privacy", "npm:@juicesharp/rpiv-web-tools", "pi-subagents"]).listInstalled();
+  const installed = control([
+    "npm:pi-hello",
+    "npm:pi-privacy",
+    "npm:@juicesharp/rpiv-web-tools",
+    "npm:@juicesharp/rpiv-ask-user-question@2.2.0",
+    "pi-subagents",
+  ]).listInstalled();
   assert.deepEqual(installed.map((e) => e.source), ["npm:pi-hello"]);
 });
 

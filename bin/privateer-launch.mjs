@@ -162,7 +162,8 @@ else {
     "privateer-brand", "privateer-context", "privateer-gate", "privateer-account",
     "privateer-models", "privateer-posture", "privateer-tools", "privateer-privacy",
     "privateer-connect",
-    "pi-privacy", "pi-web-access", "rpiv-web-tools", "pi-mcp-adapter", "pi-hypa", "pi-subagents",
+    "pi-privacy", "pi-web-access", "rpiv-web-tools", "rpiv-ask-user-question",
+    "pi-mcp-adapter", "pi-hypa", "pi-subagents",
   ];
   for (const name of MANAGED) fs.rmSync(path.join(EXT_DIR, `${name}.ts`), { force: true });
 
@@ -189,6 +190,7 @@ else {
   shim("privateer-privacy", ext("privateer-privacy.ts"));   // pi-privacy + account tier resolver
   shim("privateer-connect", ext("privateer-connect.ts"));   // /connect — MCP connector manager
   shim("rpiv-web-tools", dep("@juicesharp/rpiv-web-tools", "index.ts")); // private web tools
+  shim("rpiv-ask-user-question", dep("@juicesharp/rpiv-ask-user-question", "index.ts")); // ask_user_question
   shim("pi-mcp-adapter", dep("pi-mcp-adapter", "index.ts"));
   shim("pi-hypa", dep("@hypabolic/pi-hypa", "extensions", "index.ts"));
   shim("pi-subagents", dep("pi-subagents", "src", "extension", "index.ts"));
