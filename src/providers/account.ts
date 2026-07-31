@@ -121,14 +121,20 @@ export function loadCachedCatalogIds(): string[] {
 // outright (verified live 2026-07-31: 400 "phala/… is not a valid model ID"), because
 // Phala models are the Sealed tier by design — the server is not meant to be able to
 // read them. But `/api/models` advertises them to every client regardless of whether
-// that client speaks sealed mode, so with the flag off they are pickable and then fail
-// on the first prompt. Offering a model we know cannot answer is worse than a shorter
-// list, so drop them until sealed mode is on.
+// that client can reach the sealed path, so they were pickable and then failed on the
+// first prompt. Offering a model we know cannot answer is worse than a shorter list.
+//
+// The condition is the SHIM, not the flag. Sealed mode being enabled only means we
+// intend to seal; `phala/*` is unservable until the loopback shim is actually
+// listening, because that is what its per-model baseUrl points at (see modelEntry).
+// With the flag now defaulting on, "enabled but the shim failed to bind" is a state a
+// user can really land in, and it must not re-offer models that would 400.
 //
 // `tinfoil/*` is deliberately NOT filtered: the cleartext path serves it fine (sealed
 // mode only upgrades the badge from unconfirmed to verified), so it stays either way.
 export function isServableAccountModel(id: string): boolean {
-  return sealedEnabled() || !id.startsWith("phala/");
+  if (!id.startsWith("phala/")) return true;
+  return sealedEnabled() && sealedShimBase() !== null;
 }
 
 // The ids to register synchronously at load. DEFAULT_MODELS FIRST and always: the account
@@ -136,14 +142,14 @@ export function isServableAccountModel(id: string): boolean {
 // provider's first/default model when it synthesizes a custom model id
 // (model-resolver.js buildFallbackModel).
 //
-// The disk cache stores what the SERVER last listed, unfiltered, so the filter is applied
-// here on read: flipping PRIVATEER_SEALED changes what's registered on the next launch
-// without needing the cache rewritten.
+// Returns the server's list as cached, unfiltered — accountProviderConfig decides what
+// is servable at each registration, so a model dropped now (shim not up yet) can be
+// re-offered by a later re-registration without the cache being rewritten.
 export function seedCatalogIds(): string[] {
   const ids = [...DEFAULT_MODELS];
   const seen = new Set(ids);
   for (const id of loadCachedCatalogIds()) {
-    if (!seen.has(id) && isServableAccountModel(id)) {
+    if (!seen.has(id)) {
       seen.add(id);
       ids.push(id);
     }
@@ -223,12 +229,11 @@ export async function fetchAccountCatalog(): Promise<AccountModelInfo[]> {
         .map((m) => (m.modelId ? { id: m.modelId, tier: normalizeTier(m.privacy?.tier, m.modelId) } : null))
         .filter((x): x is AccountModelInfo => !!x);
       // Cache only a real LIVE listing — never the fallback, which would freeze the six
-      // seed ids on disk and read back as though it were the catalog. Cache the server's
-      // list UNFILTERED (it is the record of what the server offers); isServableAccountModel
-      // is applied on the way out, here and in seedCatalogIds.
+      // seed ids on disk and read back as though it were the catalog. Both the cache and
+      // the returned list are the server's UNFILTERED offer; servability is decided at
+      // registration (accountProviderConfig), which re-evaluates it every time.
       if (parsed.length) saveCachedCatalogIds(parsed.map((p) => p.id));
-      const servable = parsed.filter((p) => isServableAccountModel(p.id));
-      infos = servable.length ? servable : fallback();
+      infos = parsed.length ? parsed : fallback();
     }
   } catch {
     infos = fallback();
@@ -426,14 +431,15 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
     const att = await attestSealed(sealedProvider);
     return att.ok ? { tier: "tee-verified" } : { tier: "tee-unverified", error: att.error };
   }
-  // Honest labelling for the non-NEAR enclaves without sealed mode. Tinfoil and Phala
-  // publish real attestations, but the server proxies the inference in cleartext, so
-  // from here we cannot bind a quote to the connection actually carrying our tokens —
-  // only the account's word that it did. That's `tee-unverified` (yellow "confidential
-  // compute, unconfirmed"), never the green tee-verified we reserve for a quote we
-  // checked ourselves. Turn on sealed mode (PRIVATEER_SEALED=1) for the verified
-  // shield, or set TINFOIL_API_KEY and run `tinfoil/*` direct (pi-privacy attests
-  // client-side over the TLS binding).
+  // Honest labelling for the non-NEAR enclaves when we are NOT sealing — sealed mode
+  // explicitly disabled (PRIVATEER_SEALED=0), or on but the shim never came up. Tinfoil
+  // and Phala publish real attestations, but the server proxies the inference in
+  // cleartext, so from here we cannot bind a quote to the connection actually carrying
+  // our tokens — only the account's word that it did. That's `tee-unverified` (yellow
+  // "confidential compute, unconfirmed"), never the green tee-verified we reserve for a
+  // quote we checked ourselves. Re-enable sealed mode for the verified shield, or set
+  // TINFOIL_API_KEY and run `tinfoil/*` direct (pi-privacy attests client-side over the
+  // TLS binding).
   if (!modelId.startsWith("near/")) {
     return { tier: "tee-unverified" };
   }
@@ -453,11 +459,13 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
   }
 }
 
-// A model entry, with a per-model baseUrl override once the EHBP shim is listening:
-// `tinfoil/*` then route through the loopback shim (which seals to the blind relay)
-// instead of the cleartext `/api/agent/v1` proxy. Everything else keeps the provider
-// baseUrl. Until the shim is up (or when sealed mode is off) sealed models fall back to
-// the cleartext path — and the badge stays honestly `tee-unverified` (see accountPosture).
+// A model entry, with a per-model baseUrl override once the sealed shim is listening:
+// `tinfoil/*` and `phala/*` then route through the loopback shim (which seals to the
+// blind relay) instead of the cleartext `/api/agent/v1` proxy. Everything else keeps the
+// provider baseUrl. Until the shim is up (or with sealed mode disabled) `tinfoil/*` falls
+// back to the cleartext path and the badge stays honestly `tee-unverified` (see
+// accountPosture); `phala/*` has no cleartext path at all and is not registered in that
+// state (see isServableAccountModel).
 function modelEntry(id: string) {
   const base = seedModel(id);
   const provider = sealedEnabled() ? sealedProviderFor(id) : null;
@@ -472,7 +480,13 @@ export function accountProviderConfig(ids: string[]): Record<string, unknown> {
     baseUrl: `${serverBaseUrl()}/api/agent/v1`,
     api: "openai-completions",
     oauth: privateerOAuthProvider,
-    models: ids.map(modelEntry),
+    // Filter HERE rather than at the catalog, so callers keep passing the server's
+    // full list and every registration re-evaluates servability against the CURRENT
+    // shim state. That is what lets the post-shim re-registration in makeAccountProvider
+    // put `phala/*` back: had the ids been filtered upstream, the sealed-only models
+    // would have been dropped from `lastIds` before the shim ever finished starting and
+    // nothing would have brought them back.
+    models: ids.filter(isServableAccountModel).map(modelEntry),
   };
 }
 

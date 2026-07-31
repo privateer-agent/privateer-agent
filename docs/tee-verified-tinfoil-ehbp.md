@@ -1,15 +1,31 @@
 # Green shield for proxied Tinfoil — EHBP end-to-end encryption
 
-> **Status (2026-07-24): client path implemented in privateer-agent for BOTH sealed
-> providers (Tinfoil EHBP + Phala ACI E2EE), behind `PRIVATEER_SEALED=1`, pending a live
-> end-to-end run.** The server relay (`treeview/server/routes/sealed.js`, provider-generic)
-> and the treeview app's clients already shipped. This repo now has the Node clients:
-> `src/providers/sealedShim.ts` (loopback shim + provider dispatch), `src/providers/phalaSeal.ts`
-> (ACI E2EE + TDX-quote attestation) over the vendored `src/providers/phala/aci-verifier/`,
-> sealed routing + posture flip in `src/providers/account.ts`; tests in
-> `tests/sealedShim.test.ts` + `tests/phalaE2ee.test.ts` (full seal/open round-trip on Node
-> Web Crypto). What remains is the live checklist at the bottom — no sealed byte has crossed a
-> real relay from this CLI yet, so the flag stays off by default.
+> **Status (2026-07-31): LIVE and ON BY DEFAULT for both sealed providers (Tinfoil EHBP +
+> Phala ACI E2EE).** The checklist at the bottom passed end to end against the deployed
+> relay: both enclaves attest client-side, sealed turns round-trip and stream
+> incrementally, a bogus enclave is refused rather than silently greened, and the server
+> bills the turn. `PRIVATEER_SEALED=0` drops back to the cleartext path.
+>
+> Four things the live run found, all fixed:
+> 1. **Content-Type needs a charset.** EHBP seals the body but not headers, so the enclave
+>    router validates the cleartext `Content-Type` and 400s a bare `application/json`.
+> 2. **Phala signs its keyset endorsement with `ecdsa-secp256k1`**, which ACI §4.3 allows
+>    but upstream's Web-Crypto-only verifier throws on. Dispatch now lives outside the
+>    vendored tree in `src/providers/phala/reportBinding.ts`.
+> 3. **`phala/*` is sealed-only** — no cleartext route exists — so it is registered only
+>    while the shim is actually listening (`isServableAccountModel`).
+> 4. **Streaming turns billed as UNBILLED.** Tinfoil returns usage as an HTTP *trailer*
+>    while streaming, and `fetch` cannot read trailers; the relay now forwards with
+>    `undici.request`. Fixed in `treeview/server/routes/sealed.js`.
+>
+> Client path: `src/providers/sealedShim.ts` (loopback shim + provider dispatch),
+> `src/providers/phalaSeal.ts` (ACI E2EE + TDX-quote attestation) over the vendored
+> `src/providers/phala/aci-verifier/`, sealed routing + posture in
+> `src/providers/account.ts`. Tests: `tests/sealedShim.test.ts`, `tests/phalaE2ee.test.ts`,
+> `tests/phalaReportBinding.test.ts`, `tests/account.test.ts`.
+>
+> Still unproven: the full expire → refresh → retry loop (step 6) was only verified as far
+> as "a dead bearer 401s cleanly through the shim".
 
 ## The problem, in one line
 
@@ -240,9 +256,10 @@ Mirror `docs/mcp-live-verify.md`'s discipline — each step fails in exactly one
   honest yellow badge, exactly as before. Nothing about the working path changes until the flag
   flips.
 
-## Live verification (do this before turning the flag on by default)
+## Live verification — RUN 2026-07-31, all steps passed
 
-No sealed byte has crossed a real relay from this CLI yet. Ordered so each step fails in one place:
+Ordered so each step fails in one place. Results below each step; the fixes they forced are
+summarised in the status block at the top.
 
 1. **Attestation reachable:** `curl -s ${server}/api/sealed/tinfoil/attestation` returns a
    bundle (hardware predicate present). Proves the relay's `/attestation` proxy + a live enclave.
@@ -259,7 +276,14 @@ No sealed byte has crossed a real relay from this CLI yet. Ordered so each step 
 6. **Auth refresh:** let a child token expire mid-session → relay 401 propagates → Pi refreshes
    and retries (the shim forwards Authorization verbatim; it owns no token).
 
-Only after 1–6 pass against production should `PRIVATEER_SEALED` default on (or become
+**Outcome:** 1–6 passed for both providers and `PRIVATEER_SEALED` now defaults ON. Billing
+was verified separately and precisely — via `GET /api/billing/history` (raw UsageEvent rows),
+NOT `/api/billing/balance`, which rounds through `TWO_DECIMAL()` and cannot resolve a
+sub-cent turn at all. A streaming sealed turn now bills $0.0023175 for 23/170 tokens with
+`origin=cli`, where before the fix it produced no row.
+
+Historical note — the original bar was: only after 1–6 pass against production should
+`PRIVATEER_SEALED` default on (or become
 auto-sealed when a tinfoil model is selected, mirroring the app's §9.5 proposal).
 
 ## Bottom line

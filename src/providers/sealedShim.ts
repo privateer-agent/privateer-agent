@@ -40,13 +40,22 @@ import { iterateSSE } from "./phala/sse.ts";
 // (unsealed) path, not sealed. See docs/tee-verified-tinfoil-ehbp.md §12.
 export type SealedProvider = "tinfoil" | "phala";
 
-// Sealed mode is OFF until verified end-to-end against a live relay (a real EHBP
-// round-trip needs the deployed relay + TINFOIL_API_KEY; see the live checklist in
-// docs/tee-privateer-tinfoil-ehbp.md). Off = the current plaintext path + honest
-// yellow badge, untouched. Flip with PRIVATEER_SEALED=1.
+// Sealed mode is ON by default as of 2026-07-31, when the live checklist in
+// docs/tee-verified-tinfoil-ehbp.md passed end to end against the deployed relay:
+// both enclaves attest client-side (Tinfoil HPKE-key match; Phala report binding +
+// TDX quote), a sealed turn round-trips and streams incrementally, a bogus enclave is
+// refused rather than silently greened, and the server bills the turn.
+//
+// What it buys: the prompt is sealed to the enclave the client itself attested, so the
+// badge is a quote WE checked rather than the account's word — green instead of
+// "Trusted Execution (unconfirmed)".
+//
+// PRIVATEER_SEALED=0 (or =false) drops back to the cleartext `/api/agent/v1` path and
+// the honest yellow badge. Note that is a real downgrade for `phala/*`, which is
+// sealed-only and simply disappears from the catalog (see isServableAccountModel).
 export function sealedEnabled(): boolean {
   const v = process.env.PRIVATEER_SEALED;
-  return v === "1" || v === "true";
+  return !(v === "0" || v === "false");
 }
 
 // The sealed provider a model id routes through, or null if it isn't a sealed
@@ -170,6 +179,7 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 let shimBase: string | null = null;
 let shimStarting: Promise<string> | null = null;
+let shimServer: http.Server | null = null;
 
 // The shim's base URL once listening, else null. account.ts reads this to decide
 // whether a sealed model can point its baseUrl at the shim yet.
@@ -182,6 +192,19 @@ export function ensureSealedShim(): Promise<string> {
   if (shimBase) return Promise.resolve(shimBase);
   if (!shimStarting) shimStarting = startShim();
   return shimStarting;
+}
+
+// Close the shim and forget it, so a later ensureSealedShim() starts a fresh one.
+// The listener is `unref`'d and never blocks exit, so this is not needed for
+// shutdown — it exists so a caller that stops sealing (or a test) can drop the
+// socket deterministically rather than leaving a port open for the process lifetime.
+export function stopSealedShim(): Promise<void> {
+  const server = shimServer;
+  shimServer = null;
+  shimBase = null;
+  shimStarting = null;
+  if (!server) return Promise.resolve();
+  return new Promise((resolve) => server.close(() => resolve()));
 }
 
 function startShim(): Promise<string> {
@@ -197,6 +220,7 @@ function startShim(): Promise<string> {
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       if (addr && typeof addr === "object") {
+        shimServer = server;
         shimBase = `http://127.0.0.1:${addr.port}`;
         resolve(shimBase);
       } else {

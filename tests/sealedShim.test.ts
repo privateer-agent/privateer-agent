@@ -19,17 +19,25 @@ test("sealedProviderFor classifies the sealed providers, not the others", () => 
 
 // ── feature flag ──────────────────────────────────────────────────────────────
 
-test("sealedEnabled reads PRIVATEER_SEALED", () => {
+test("sealedEnabled defaults ON, and only an explicit 0/false opts out", () => {
+  // Flipped 2026-07-31 once the live checklist passed end to end. Sealing is now the
+  // default posture: unset means seal. Opting out is deliberate and explicit, because
+  // it downgrades the badge to unconfirmed and drops `phala/*` entirely.
   const prev = process.env.PRIVATEER_SEALED;
   try {
     delete process.env.PRIVATEER_SEALED;
-    assert.equal(sealedEnabled(), false);
+    assert.equal(sealedEnabled(), true, "unset must seal");
     process.env.PRIVATEER_SEALED = "1";
     assert.equal(sealedEnabled(), true);
     process.env.PRIVATEER_SEALED = "true";
     assert.equal(sealedEnabled(), true);
     process.env.PRIVATEER_SEALED = "0";
     assert.equal(sealedEnabled(), false);
+    process.env.PRIVATEER_SEALED = "false";
+    assert.equal(sealedEnabled(), false);
+    // Anything else is not an opt-out — a typo must not silently unseal.
+    process.env.PRIVATEER_SEALED = "off";
+    assert.equal(sealedEnabled(), true, "only 0/false opt out; a typo must not unseal");
   } finally {
     if (prev === undefined) delete process.env.PRIVATEER_SEALED;
     else process.env.PRIVATEER_SEALED = prev;

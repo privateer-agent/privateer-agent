@@ -18,7 +18,9 @@ import {
   recoverAccountSession,
   rememberAccountCredential,
   verificationLink,
+  accountProviderConfig,
 } from "../src/providers/account.ts";
+import { ensureSealedShim, sealedShimBase, stopSealedShim } from "../src/providers/sealedShim.ts";
 import { clearCredentials, currentUser, saveCredentials } from "../src/auth/privateer.ts";
 
 // A stand-in for Pi's ExtensionContext + auth store (auth.json), so the tests can see
@@ -544,32 +546,26 @@ const CATALOG_WITH_PHALA = {
   ],
 };
 
-test("sealed-only phala models are not offered when sealed mode is off", async () => {
+const registeredIds = (cfg: any): string[] => cfg.models.map((m: any) => m.id);
+
+test("sealed-only phala models are not registered when sealed mode is off", async () => {
   await withCacheHome(async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () => json(CATALOG_WITH_PHALA)) as typeof fetch;
     try {
-      await withSealed(undefined, async () => {
+      await withSealed("0", async () => {
+        // The catalog and the cache stay the SERVER's list — they record what is on
+        // offer, not what this process can reach.
         const infos = await fetchAccountCatalog();
-        assert.deepEqual(
-          infos.map((i) => i.id),
-          ["tinfoil/glm-5-2", "amazon/nova-2-lite-v1"],
-          "phala/* is unservable without the sealed relay — don't offer it",
-        );
-        // tinfoil/* is NOT sealed-only: the cleartext path serves it (sealed mode only
-        // upgrades the badge), so it must survive the filter.
-        assert.ok(infos.some((i) => i.id === "tinfoil/glm-5-2"));
-
-        // The cache keeps the server's list verbatim — it records what the server offers,
-        // not what this process can use — but the seed applies the filter on read.
+        assert.ok(infos.some((i) => i.id === "phala/qwen/qwen-2.5-7b-instruct"));
         assert.ok(loadCachedCatalogIds().includes("phala/qwen/qwen-2.5-7b-instruct"));
-        assert.ok(!seedCatalogIds().includes("phala/qwen/qwen-2.5-7b-instruct"));
 
-        // And nothing phala-shaped reaches the synchronous registration.
-        const calls: any[] = [];
-        makeAccountProvider()({ registerProvider: (_n: string, cfg: unknown) => calls.push(cfg) });
-        const ids = calls[0].models.map((m: any) => m.id);
-        assert.ok(!ids.some((id: string) => id.startsWith("phala/")), "no unservable model may be registered");
+        // Servability is decided at registration, and nothing phala-shaped survives it.
+        const ids = registeredIds(accountProviderConfig(infos.map((i) => i.id)));
+        assert.ok(!ids.some((id) => id.startsWith("phala/")), "no unservable model may be registered");
+        // tinfoil/* is NOT sealed-only: the cleartext path serves it (sealed mode only
+        // upgrades the badge), so it must survive.
+        assert.ok(ids.includes("tinfoil/glm-5-2"));
       });
     } finally {
       globalThis.fetch = real;
@@ -577,34 +573,47 @@ test("sealed-only phala models are not offered when sealed mode is off", async (
   });
 });
 
-test("phala models come back once sealed mode is on", async () => {
-  await withCacheHome(async () => {
-    const real = globalThis.fetch;
-    globalThis.fetch = (async () => json(CATALOG_WITH_PHALA)) as typeof fetch;
+test("sealed mode alone doesn't re-offer phala — the shim has to be listening", async () => {
+  // The flag says we intend to seal; the shim is what phala/*'s baseUrl points at.
+  // "Enabled but the shim failed to bind" must not put back models that would 400.
+  await withSealed("1", async () => {
+    // Earlier tests call makeAccountProvider, which now starts the shim (sealed is on
+    // by default) — so drop it explicitly to reach the state we're asserting about.
+    await stopSealedShim();
+    assert.equal(sealedShimBase(), null);
+    const ids = registeredIds(accountProviderConfig(["tinfoil/glm-5-2", "phala/x/y"]));
+    assert.deepEqual(ids, ["tinfoil/glm-5-2"]);
+  });
+});
+
+test("phala models are registered once the shim is up", async () => {
+  await withSealed("1", async () => {
+    const shim = await ensureSealedShim();
+    assert.ok(shim.startsWith("http://127.0.0.1:"));
     try {
-      await withSealed("1", async () => {
-        const infos = await fetchAccountCatalog();
-        assert.ok(
-          infos.some((i) => i.id === "phala/qwen/qwen-2.5-7b-instruct"),
-          "with the sealed relay in play phala/* IS servable",
-        );
-        assert.ok(seedCatalogIds().includes("phala/qwen/qwen-2.5-7b-instruct"));
-      });
+      const ids = registeredIds(accountProviderConfig(["tinfoil/glm-5-2", "phala/x/y"]));
+      assert.ok(ids.includes("phala/x/y"), "with the shim listening phala/* IS servable");
+      // …and it routes through the shim, not the cleartext proxy.
+      const entry: any = (accountProviderConfig(["phala/x/y"]) as any).models[0];
+      assert.equal(entry.baseUrl, `${shim}/phala/v1`);
     } finally {
-      globalThis.fetch = real;
+      await stopSealedShim();
     }
   });
 });
 
-test("a phala-only catalog degrades to the fallback rather than an empty picker", async () => {
+test("a phala-only catalog still leaves the user a usable model list", async () => {
   await withCacheHome(async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () => json({ models: [{ modelId: "phala/only/model" }] })) as typeof fetch;
     try {
-      await withSealed(undefined, async () => {
-        const infos = await fetchAccountCatalog();
-        assert.ok(infos.length > 0, "filtering everything out must not leave the user with no models");
-        assert.ok(!infos.some((i) => i.id.startsWith("phala/")));
+      await withSealed("0", async () => {
+        await fetchAccountCatalog();
+        // seedCatalogIds always leads with DEFAULT_MODELS, so filtering every live id
+        // out can never leave an empty picker.
+        const ids = registeredIds(accountProviderConfig(seedCatalogIds()));
+        assert.ok(ids.length > 0);
+        assert.ok(!ids.some((id) => id.startsWith("phala/")));
       });
     } finally {
       globalThis.fetch = real;
