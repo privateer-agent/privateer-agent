@@ -1,35 +1,48 @@
 #!/usr/bin/env node
-// The binary pi-subagents spawns for each subagent child (via PI_SUBAGENT_PI_BINARY)
-// when the PARENT loaded privateer's moat as IN-CODE extension factories (the lean
-// REPL, the harbor, live task sessions) rather than agent-dir discovery.
+// The binary pi-subagents spawns for EVERY subagent child (via PI_SUBAGENT_PI_BINARY).
 //
-// Why a wrapper here (vs the plain cli.js the TUI uses): a subagent child is a fresh
-// `pi` subprocess that can't inherit the parent's in-code factories. It CAN auto-
-// discover agent-dir extensions — but if the parent ALSO loaded those same shims as
-// factories, Pi loads both (resource-loader merges discovered + inline) and the moat
-// double-loads (two gates, two provider registrations). So instead of relying on
-// discovery, this wrapper injects the moat EXPLICITLY as `-e` extensions and passes
-// `--no-extensions` to turn agent-dir discovery OFF. The child then loads exactly:
-//   • pi-subagents' own runtime extensions (already present in the argv it built), and
-//   • privateer's gate + privacy + account (the three `-e` below),
-// with no discovery, hence no double-load — while pi-subagents' explicit `--extension`
-// args still load (‑‑no‑extensions only disables DISCOVERY, not explicit `-e`).
+// ⚠️ THIS IS WHAT KEEPS A SUBAGENT GATED. A child is a fresh `pi` subprocess that cannot
+// inherit its parent's in-code extension factories, and — since the moat stopped being
+// installed as discovery shims in the shared agent dir — there is nothing for it to
+// discover either. So the moat reaches a child through exactly one route: the `-e` args
+// injected here. A child spawned around this wrapper runs UNGATED.
+//
+// It also passes `--no-extensions` to turn agent-dir discovery off. That is now about the
+// child's blast radius rather than double-loading: an unattended, headless worker should
+// load the set its parent chose and nothing else — not whatever extensions the user
+// happens to have configured for their own interactive sessions. (`--no-extensions`
+// disables DISCOVERY only, so pi-subagents' own `--extension` args still load, as do the
+// `-e` paths below.)
 //
 // Exported helpers are pure and unit-tested (tests/subagentWrapper.test.ts); the
 // spawn only runs when this file is invoked as a binary.
 
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve, join } from "node:path";
+import { dirname, resolve, join, delimiter } from "node:path";
+import { existsSync } from "node:fs";
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // bin/
 const REPO = resolve(HERE, ".."); // repo root
 
-// Absolute paths to privateer's moat extension entry files (the same modules the TUI
-// installs as discovery shims). gate = the permission moat (fail-closed / forwards
-// child approvals to the parent); privacy = ZDR/TEE posture + attestation dispatcher;
-// account = the privateer/* provider so a child can run account models.
-export function moatExtensionPaths(repoRoot = REPO) {
+// The moat a child loads: whatever its PARENT loaded, handed down through the environment.
+//
+// bin/privateer-launch.mjs sets PRIVATEER_CHILD_EXTENSIONS to the same list it passes the
+// TUI, so a child of a terminal gets the terminal's moat — including the tool packs —
+// rather than a hardcoded subset that silently drifts from it as the manifest changes.
+//
+// The fallback covers the in-code parents (the lean REPL, the harbor, live task sessions),
+// which build their moat from factories and have no `-e` list to hand down. Those get the
+// floor and nothing else: gate = the permission moat (fail-closed, forwards the child's
+// approvals to the parent); privacy = ZDR/TEE posture + attestation dispatcher; account =
+// the privateer/* provider, so a child can run account models. Deliberately narrower than
+// a terminal's — an unattended run's children have no human to approve a tool that spends.
+export function moatExtensionPaths(repoRoot = REPO, env = process.env) {
+  const inherited = (env.PRIVATEER_CHILD_EXTENSIONS ?? "")
+    .split(delimiter)
+    .map((p) => p.trim())
+    .filter((p) => p && existsSync(p));
+  if (inherited.length > 0) return inherited;
   return [
     join(repoRoot, "extensions", "privateer-gate.ts"),
     join(repoRoot, "extensions", "privateer-privacy.ts"),
@@ -45,9 +58,9 @@ export function piCliPath(repoRoot = REPO) {
 // Given the args pi-subagents built for the child, return the args to run the bundled
 // cli.js with: `--no-extensions` + one `-e <path>` per moat extension, THEN the
 // original args (so the injected flags precede the positional `Task:` prompt).
-export function buildChildArgs(originalArgs, repoRoot = REPO) {
+export function buildChildArgs(originalArgs, repoRoot = REPO, env = process.env) {
   const inject = ["--no-extensions"];
-  for (const p of moatExtensionPaths(repoRoot)) inject.push("-e", p);
+  for (const p of moatExtensionPaths(repoRoot, env)) inject.push("-e", p);
   return [...inject, ...originalArgs];
 }
 

@@ -1,3 +1,72 @@
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/config.js b/node_modules/@earendil-works/pi-coding-agent/dist/config.js
+index 4600b23..075ecae 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/config.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/config.js
+@@ -393,6 +393,64 @@ export const APP_NAME = piConfigName || "pi";
+ export const APP_TITLE = piConfigName ? APP_NAME : "π";
+ export const CONFIG_DIR_NAME = pkg.piConfig?.configDir || ".pi";
+ export const VERSION = pkg.version || "0.0.0";
++// --- Privateer patch: dual project config dirs -------------------------------
++//
++// Stock Pi resolves EVERY project-scoped path as `<cwd>/CONFIG_DIR_NAME/...`, where
++// CONFIG_DIR_NAME is a build-time constant read from this package's own package.json
++// (`piConfig.configDir`, default ".pi"). PI_CODING_AGENT_DIR moves only the USER dir,
++// which is why Privateer's global config lives in ~/.privateer/agent while every
++// project still had to spell its config `.pi/` — a directory named after a tool the
++// user never installed.
++//
++// We do not rename it (that would orphan every existing `.pi/` folder and break
++// interop with stock Pi). Instead BOTH names are live, `.privateer` taking precedence:
++//
++//   read   — every project dir that exists is searched, `.privateer` first; on a
++//            conflict (same settings key, same skill/prompt/theme/extension name,
++//            SYSTEM.md) the `.privateer` copy wins and the `.pi` one is ignored.
++//   write  — new project config is always created under `.privateer/`. Package
++//            payloads (npm/, git/) stay in whichever dir already holds them, so an
++//            existing `.pi/npm` tree is reused rather than re-downloaded.
++//
++// Precedence order, highest first. `.pi` is filtered out if a fork ever renames
++// CONFIG_DIR_NAME to `.privateer`, so the list never holds duplicates.
++export const PROJECT_CONFIG_DIR_NAMES = [".privateer", CONFIG_DIR_NAME].filter((name, i, all) => all.indexOf(name) === i);
++/** Every candidate project config dir under cwd, highest precedence first (may not exist). */
++export function projectConfigDirCandidates(cwd) {
++    return PROJECT_CONFIG_DIR_NAMES.map((name) => join(cwd, name));
++}
++/** The project config dirs that actually exist under cwd, highest precedence first. */
++export function projectConfigDirs(cwd) {
++    return projectConfigDirCandidates(cwd).filter((dir) => existsSync(dir));
++}
++/** Where NEW project config is written: always `.privateer/`. */
++export function projectConfigWriteDir(cwd) {
++    return join(cwd, PROJECT_CONFIG_DIR_NAMES[0]);
++}
++/**
++ * The highest-precedence project dir that already contains `...rel`, or undefined.
++ * Use for "one file wins" lookups (settings.json, SYSTEM.md, an npm/ payload root).
++ */
++export function findProjectConfigPath(cwd, ...rel) {
++    for (const dir of projectConfigDirCandidates(cwd)) {
++        const candidate = join(dir, ...rel);
++        if (existsSync(candidate))
++            return candidate;
++    }
++    return undefined;
++}
++/**
++ * Where a project-scoped `...rel` lives: the existing copy if there is one, else the
++ * path it would be created at under `.privateer/`.
++ */
++export function resolveProjectConfigPath(cwd, ...rel) {
++    return findProjectConfigPath(cwd, ...rel) ?? join(projectConfigWriteDir(cwd), ...rel);
++}
++/** Human-readable list of the project dir names, for prompts and help text. */
++export function formatProjectConfigDirNames() {
++    return PROJECT_CONFIG_DIR_NAMES.map((n) => `${n}/`).join(" or ");
++}
++// --- end Privateer patch -----------------------------------------------------
+ // e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
+ export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
+ export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 index e223ce1..cc853e7 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
@@ -53,7 +122,7 @@ index e223ce1..cc853e7 100644
      }
      /**
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
-index 197bccc..27f6429 100644
+index 197bccc..bc9ac3f 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
 @@ -1,21 +1,33 @@
@@ -96,11 +165,773 @@ index 197bccc..27f6429 100644
 +    return [join(getDocsPath(), "providers.md"), join(getDocsPath(), "models.md")];
 +}
  //# sourceMappingURL=auth-guidance.js.map
+\ No newline at end of file
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
+index 4b79482..a81b452 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
+@@ -17,7 +17,7 @@ import { createJiti } from "jiti/static";
+ import * as _bundledTypebox from "typebox";
+ import * as _bundledTypeboxCompile from "typebox/compile";
+ import * as _bundledTypeboxValue from "typebox/value";
+-import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.js";
++import { getAgentDir, isBunBinary, projectConfigDirCandidates } from "../../config.js";
+ // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
+ // avoiding a circular dependency. Extensions can import from @earendil-works/pi-coding-agent.
+ import * as _bundledPiCodingAgent from "../../index.js";
+@@ -508,9 +508,23 @@ export async function discoverAndLoadExtensions(configuredPaths, cwd, agentDir =
+             }
+         }
+     };
+-    // 1. Project-local extensions: cwd/${CONFIG_DIR_NAME}/extensions/
+-    const localExtDir = path.join(resolvedCwd, CONFIG_DIR_NAME, "extensions");
+-    addPaths(discoverExtensionsInDir(localExtDir));
++    // 1. Project-local extensions: cwd/.privateer/extensions/, then cwd/.pi/extensions/
++    //
++    // Privateer patch: both project dirs are discovered, `.privateer` first. Extensions
++    // are files, so a same-named file in the lower-precedence dir would otherwise load
++    // as a SECOND copy of the same extension — skip it by basename, which is what makes
++    // `.privateer` genuinely supersede `.pi` here rather than merely precede it.
++    const seenLocalNames = new Set();
++    for (const projectDir of projectConfigDirCandidates(resolvedCwd)) {
++        const discovered = discoverExtensionsInDir(path.join(projectDir, "extensions"));
++        addPaths(discovered.filter((p) => {
++            const name = path.basename(p);
++            if (seenLocalNames.has(name))
++                return false;
++            seenLocalNames.add(name);
++            return true;
++        }));
++    }
+     // 2. Global extensions: agentDir/extensions/
+     const globalExtDir = path.join(resolvedAgentDir, "extensions");
+     addPaths(discoverExtensionsInDir(globalExtDir));
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js
+index a125c9a..5ca0ccc 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js
+@@ -25,7 +25,7 @@ import { globSync } from "glob";
+ import ignore from "ignore";
+ import { minimatch } from "minimatch";
+ import { maxSatisfying, rcompare, satisfies, valid, validRange } from "semver";
+-import { CONFIG_DIR_NAME } from "../config.js";
++import { projectConfigDirs, projectConfigWriteDir, resolveProjectConfigPath } from "../config.js";
+ import { spawnProcess, spawnProcessSync } from "../utils/child-process.js";
+ import { parseGitUrl } from "../utils/git.js";
+ import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.js";
+@@ -693,23 +693,29 @@ export class DefaultPackageManager {
+         const packageSources = this.dedupePackages(allPackages);
+         await this.resolvePackageSources(packageSources, accumulator, onMissing);
+         const globalBaseDir = this.agentDir;
+-        const projectBaseDir = join(this.cwd, CONFIG_DIR_NAME);
++        // Privateer patch: relative entries in project settings are resolved against
++        // every project config dir, `.privateer` first. Paths that don't exist under a
++        // given dir are skipped silently (collectFilesFromPaths), so a `.pi`-relative
++        // entry still resolves when `.privateer` exists but doesn't contain it.
++        const projectBaseDirs = this.projectBaseDirs();
+         for (const resourceType of RESOURCE_TYPES) {
+             const target = this.getTargetMap(accumulator, resourceType);
+             const globalEntries = (globalSettings[resourceType] ?? []);
+             const projectEntries = (projectSettings[resourceType] ?? []);
+-            this.resolveLocalEntries(projectEntries, resourceType, target, {
+-                source: "local",
+-                scope: "project",
+-                origin: "top-level",
+-            }, projectBaseDir);
++            for (const projectBaseDir of projectBaseDirs) {
++                this.resolveLocalEntries(projectEntries, resourceType, target, {
++                    source: "local",
++                    scope: "project",
++                    origin: "top-level",
++                }, projectBaseDir);
++            }
+             this.resolveLocalEntries(globalEntries, resourceType, target, {
+                 source: "local",
+                 scope: "user",
+                 origin: "top-level",
+             }, globalBaseDir);
+         }
+-        this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir);
++        this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDirs);
+         return this.toResolvedPaths(accumulator);
+     }
+     async resolveExtensionSources(sources, options) {
+@@ -1586,13 +1592,30 @@ export class DefaultPackageManager {
+             writeFileSync(ignorePath, "*\n!.gitignore\n", "utf-8");
+         }
+     }
++    // --- Privateer patch: project config dirs -------------------------------
++    /**
++     * Every project config dir that exists under cwd, `.privateer` before `.pi`.
++     * Falls back to the write dir so callers always have a base to resolve against.
++     */
++    projectBaseDirs() {
++        const dirs = projectConfigDirs(this.cwd);
++        return dirs.length > 0 ? dirs : [projectConfigWriteDir(this.cwd)];
++    }
++    /** An existing project-scoped payload path, else the path to create under `.privateer`. */
++    projectPayloadPath(...rel) {
++        return resolveProjectConfigPath(this.cwd, ...rel);
++    }
++    // --- end Privateer patch -------------------------------------------------
+     getNpmInstallRoot(scope, temporary) {
+         if (temporary) {
+             return this.getTemporaryDir("npm");
+         }
+         if (scope === "project") {
+             this.assertProjectTrustedForScope(scope);
+-            return join(this.cwd, CONFIG_DIR_NAME, "npm");
++            // Privateer patch: reuse an existing `.pi/npm` tree rather than
++            // re-downloading everything under `.privateer/npm`; only a project with no
++            // payload tree at all gets one created under `.privateer`.
++            return this.projectPayloadPath("npm");
+         }
+         return join(this.agentDir, "npm");
+     }
+@@ -1631,7 +1654,9 @@ export class DefaultPackageManager {
+         }
+         if (scope === "project") {
+             this.assertProjectTrustedForScope(scope);
+-            return join(this.cwd, CONFIG_DIR_NAME, "npm", "node_modules", source.name);
++            // Privateer patch: an already-installed package is found in whichever
++            // project dir holds it; a new one lands in the payload root above.
++            return this.projectPayloadPath("npm", "node_modules", source.name);
+         }
+         return join(this.agentDir, "npm", "node_modules", source.name);
+     }
+@@ -1667,7 +1692,7 @@ export class DefaultPackageManager {
+         }
+         if (scope === "project") {
+             this.assertProjectTrustedForScope(scope);
+-            return join(this.cwd, CONFIG_DIR_NAME, "git");
++            return this.projectPayloadPath("git");
+         }
+         return join(this.agentDir, "git");
+     }
+@@ -1690,7 +1715,7 @@ export class DefaultPackageManager {
+     getBaseDirForScope(scope) {
+         if (scope === "project") {
+             this.assertProjectTrustedForScope(scope);
+-            return join(this.cwd, CONFIG_DIR_NAME);
++            return this.projectBaseDirs()[0];
+         }
+         if (scope === "user") {
+             return this.agentDir;
+@@ -1701,7 +1726,30 @@ export class DefaultPackageManager {
+         return resolvePath(input, this.cwd, { homeDir: getHomeDir(), trim: true });
+     }
+     resolvePathFromBase(input, baseDir) {
+-        return resolvePath(input, baseDir, { homeDir: getHomeDir(), trim: true });
++        const resolved = resolvePath(input, baseDir, { homeDir: getHomeDir(), trim: true });
++        // Privateer patch: a relative entry lives relative to the settings file that
++        // declared it, but the merged project scope has only ONE base — `.privateer`
++        // once it exists. Without this fallback a `./foo` package or skill declared in
++        // `.pi/settings.json` resolves to a non-existent `.privateer/foo` and silently
++        // disappears. Try the other project config dirs and take the first real hit;
++        // absolute entries and genuine typos are unaffected (both fall through).
++        if (existsSync(resolved)) {
++            return resolved;
++        }
++        const projectDirs = this.projectBaseDirs();
++        if (!projectDirs.some((dir) => resolve(dir) === resolve(baseDir))) {
++            return resolved;
++        }
++        for (const dir of projectDirs) {
++            if (resolve(dir) === resolve(baseDir)) {
++                continue;
++            }
++            const alternate = resolvePath(input, dir, { homeDir: getHomeDir(), trim: true });
++            if (existsSync(alternate)) {
++                return alternate;
++            }
++        }
++        return resolved;
+     }
+     collectPackageResources(packageRoot, accumulator, filter, metadata) {
+         if (filter) {
+@@ -1847,19 +1895,24 @@ export class DefaultPackageManager {
+             this.addResource(target, f, metadata, enabledPaths.has(f));
+         }
+     }
+-    addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir) {
++    // Privateer patch: `projectBaseDirs` is every project config dir that exists,
++    // highest precedence first (`.privateer` before `.pi`). Auto-discovery runs once
++    // per dir; same-named resources collide downstream where the first one wins, so
++    // `.privateer` supersedes `.pi`.
++    addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDirs) {
+         const userMetadata = {
+             source: "auto",
+             scope: "user",
+             origin: "top-level",
+             baseDir: globalBaseDir,
+         };
+-        const projectMetadata = {
++        const projectMetadataFor = (baseDir) => ({
+             source: "auto",
+             scope: "project",
+             origin: "top-level",
+-            baseDir: projectBaseDir,
+-        };
++            baseDir,
++        });
++        const projectMetadata = projectMetadataFor(projectBaseDirs[0]);
+         const userOverrides = {
+             extensions: (globalSettings.extensions ?? []),
+             skills: (globalSettings.skills ?? []),
+@@ -1878,12 +1931,12 @@ export class DefaultPackageManager {
+             prompts: join(globalBaseDir, "prompts"),
+             themes: join(globalBaseDir, "themes"),
+         };
+-        const projectDirs = {
+-            extensions: join(projectBaseDir, "extensions"),
+-            skills: join(projectBaseDir, "skills"),
+-            prompts: join(projectBaseDir, "prompts"),
+-            themes: join(projectBaseDir, "themes"),
+-        };
++        const projectDirsFor = (baseDir) => ({
++            extensions: join(baseDir, "extensions"),
++            skills: join(baseDir, "skills"),
++            prompts: join(baseDir, "prompts"),
++            themes: join(baseDir, "themes"),
++        });
+         const userAgentsSkillsDir = join(getHomeDir(), ".agents", "skills");
+         const projectTrusted = this.settingsManager.isProjectTrusted();
+         const projectAgentsSkillDirs = projectTrusted
+@@ -1897,10 +1950,13 @@ export class DefaultPackageManager {
+             }
+         };
+         if (projectTrusted) {
+-            // Project extensions from .pi/
+-            addResources("extensions", collectAutoExtensionEntries(projectDirs.extensions), projectMetadata, projectOverrides.extensions, projectBaseDir);
+-            // Project skills from .pi/
+-            addResources("skills", collectAutoSkillEntries(projectDirs.skills, "pi"), projectMetadata, projectOverrides.skills, projectBaseDir);
++            for (const projectBaseDir of projectBaseDirs) {
++                const projectDirs = projectDirsFor(projectBaseDir);
++                // Project extensions from .privateer/ then .pi/
++                addResources("extensions", collectAutoExtensionEntries(projectDirs.extensions), projectMetadataFor(projectBaseDir), projectOverrides.extensions, projectBaseDir);
++                // Project skills from .privateer/ then .pi/
++                addResources("skills", collectAutoSkillEntries(projectDirs.skills, "pi"), projectMetadataFor(projectBaseDir), projectOverrides.skills, projectBaseDir);
++            }
+         }
+         // Project skills from .agents/ (each with its own baseDir)
+         for (const agentsSkillsDir of projectAgentsSkillDirs) {
+@@ -1912,8 +1968,11 @@ export class DefaultPackageManager {
+             addResources("skills", collectAutoSkillEntries(agentsSkillsDir, "agents"), agentsMetadata, projectOverrides.skills, agentsBaseDir);
+         }
+         if (projectTrusted) {
+-            addResources("prompts", collectAutoPromptEntries(projectDirs.prompts), projectMetadata, projectOverrides.prompts, projectBaseDir);
+-            addResources("themes", collectAutoThemeEntries(projectDirs.themes), projectMetadata, projectOverrides.themes, projectBaseDir);
++            for (const projectBaseDir of projectBaseDirs) {
++                const projectDirs = projectDirsFor(projectBaseDir);
++                addResources("prompts", collectAutoPromptEntries(projectDirs.prompts), projectMetadataFor(projectBaseDir), projectOverrides.prompts, projectBaseDir);
++                addResources("themes", collectAutoThemeEntries(projectDirs.themes), projectMetadataFor(projectBaseDir), projectOverrides.themes, projectBaseDir);
++            }
+         }
+         // User extensions from ~/.pi/agent/
+         addResources("extensions", collectAutoExtensionEntries(userDirs.extensions), userMetadata, userOverrides.extensions, globalBaseDir);
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/project-trust.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/project-trust.js
+index c4f2509..a4402df 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/project-trust.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/project-trust.js
+@@ -1,8 +1,8 @@
+-import { CONFIG_DIR_NAME } from "../config.js";
++import { formatProjectConfigDirNames } from "../config.js";
+ import { emitProjectTrustEvent } from "./extensions/runner.js";
+ import { getProjectTrustOptions, hasTrustRequiringProjectResources, } from "./trust-manager.js";
+ function formatProjectTrustPrompt(cwd) {
+-    return `Trust project folder?\n${cwd}\n\nThis allows pi to load ${CONFIG_DIR_NAME} settings and resources, install missing project packages, and execute project extensions.`;
++    return `Trust project folder?\n${cwd}\n\nThis allows pi to load ${formatProjectConfigDirNames()} settings and resources, install missing project packages, and execute project extensions.`;
+ }
+ async function selectProjectTrustOption(cwd, ctx) {
+     const options = getProjectTrustOptions(cwd, { includeSessionOnly: true });
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/prompt-templates.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/prompt-templates.js
+index ae4a7d4..a251c37 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/prompt-templates.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/prompt-templates.js
+@@ -1,6 +1,6 @@
+ import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+ import { basename, dirname, join, resolve, sep } from "path";
+-import { CONFIG_DIR_NAME } from "../config.js";
++import { projectConfigDirCandidates } from "../config.js";
+ import { parseFrontmatter } from "../utils/frontmatter.js";
+ import { resolvePath } from "../utils/paths.js";
+ import { createSyntheticSourceInfo } from "./source-info.js";
+@@ -157,7 +157,8 @@ export function loadPromptTemplates(options) {
+     const includeDefaults = options.includeDefaults;
+     const templates = [];
+     const globalPromptsDir = join(resolvedAgentDir, "prompts");
+-    const projectPromptsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "prompts");
++    // Privateer patch: `.privateer/prompts` then `.pi/prompts`.
++    const projectPromptsDirs = projectConfigDirCandidates(resolvedCwd).map((dir) => resolve(dir, "prompts"));
+     const isUnderPath = (target, root) => {
+         const normalizedRoot = resolve(root);
+         if (target === normalizedRoot) {
+@@ -174,7 +175,8 @@ export function loadPromptTemplates(options) {
+                 baseDir: globalPromptsDir,
+             });
+         }
+-        if (isUnderPath(resolvedPath, projectPromptsDir)) {
++        const projectPromptsDir = projectPromptsDirs.find((dir) => isUnderPath(resolvedPath, dir));
++        if (projectPromptsDir) {
+             return createSyntheticSourceInfo(resolvedPath, {
+                 source: "local",
+                 scope: "project",
+@@ -188,7 +190,9 @@ export function loadPromptTemplates(options) {
+     };
+     if (includeDefaults) {
+         templates.push(...loadTemplatesFromDir(globalPromptsDir, getSourceInfo));
+-        templates.push(...loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
++        for (const projectPromptsDir of projectPromptsDirs) {
++            templates.push(...loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
++        }
+     }
+     // 3. Load explicit prompt paths
+     for (const rawPath of promptPaths) {
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js
+index 74e36fe..7dfef45 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js
+@@ -1,7 +1,7 @@
+ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+ import { join, resolve, sep } from "node:path";
+ import chalk from "chalk";
+-import { CONFIG_DIR_NAME } from "../config.js";
++import { findProjectConfigPath, projectConfigDirCandidates, projectConfigDirs } from "../config.js";
+ import { loadThemeFromPath } from "../modes/interactive/theme/theme.js";
+ import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.js";
+ import { createEventBus } from "./event-bus.js";
+@@ -570,12 +570,14 @@ export class DefaultResourceLoader {
+             join(this.agentDir, "themes"),
+             join(this.agentDir, "extensions"),
+         ];
+-        const projectRoots = [
+-            join(this.cwd, CONFIG_DIR_NAME, "skills"),
+-            join(this.cwd, CONFIG_DIR_NAME, "prompts"),
+-            join(this.cwd, CONFIG_DIR_NAME, "themes"),
+-            join(this.cwd, CONFIG_DIR_NAME, "extensions"),
+-        ];
++        // Privateer patch: attribute paths under EITHER project config dir to the
++        // project scope, so a `.privateer/skills/…` file isn't reported as temporary.
++        const projectRoots = projectConfigDirCandidates(this.cwd).flatMap((dir) => [
++            join(dir, "skills"),
++            join(dir, "prompts"),
++            join(dir, "themes"),
++            join(dir, "extensions"),
++        ]);
+         for (const root of agentRoots) {
+             if (this.isUnderPath(normalizedPath, root)) {
+                 return { path: filePath, source: "local", scope: "user", origin: "top-level", baseDir: root };
+@@ -614,7 +616,11 @@ export class DefaultResourceLoader {
+         const themes = [];
+         const diagnostics = [];
+         if (includeDefaults) {
+-            const defaultDirs = [join(this.agentDir, "themes"), join(this.cwd, CONFIG_DIR_NAME, "themes")];
++            // Privateer patch: `.privateer/themes` first, then `.pi/themes`.
++            const defaultDirs = [
++                join(this.agentDir, "themes"),
++                ...projectConfigDirs(this.cwd).map((dir) => join(dir, "themes")),
++            ];
+             for (const dir of defaultDirs) {
+                 this.loadThemesFromDir(dir, themes, diagnostics);
+             }
+@@ -749,8 +755,9 @@ export class DefaultResourceLoader {
+         return { themes: Array.from(seen.values()), diagnostics };
+     }
+     discoverSystemPromptFile() {
+-        const projectPath = join(this.cwd, CONFIG_DIR_NAME, "SYSTEM.md");
+-        if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
++        // Privateer patch: `.privateer/SYSTEM.md` wins over `.pi/SYSTEM.md`.
++        const projectPath = findProjectConfigPath(this.cwd, "SYSTEM.md");
++        if (this.settingsManager.isProjectTrusted() && projectPath) {
+             return projectPath;
+         }
+         const globalPath = join(this.agentDir, "SYSTEM.md");
+@@ -760,8 +767,9 @@ export class DefaultResourceLoader {
+         return undefined;
+     }
+     discoverAppendSystemPromptFile() {
+-        const projectPath = join(this.cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md");
+-        if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
++        // Privateer patch: `.privateer/APPEND_SYSTEM.md` wins over `.pi/`.
++        const projectPath = findProjectConfigPath(this.cwd, "APPEND_SYSTEM.md");
++        if (this.settingsManager.isProjectTrusted() && projectPath) {
+             return projectPath;
+         }
+         const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
+index 5910aac..f379c0f 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
+@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
+ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+ import { dirname, join } from "path";
+ import lockfile from "proper-lockfile";
+-import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
++import { getAgentDir, projectConfigDirCandidates, projectConfigWriteDir } from "../config.js";
+ import { normalizePath, resolvePath } from "../utils/paths.js";
+ import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.js";
+ /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
+@@ -40,14 +40,112 @@ function parseTimeoutSetting(value, settingName) {
+     }
+     return undefined;
+ }
++/**
++ * Privateer patch: drop the keys of `settings` that are byte-identical to `base`.
++ *
++ * Project settings are read as `.pi/settings.json` ⊕ `.privateer/settings.json`, but
++ * written back to `.privateer` alone. Without this reduction every save would copy the
++ * whole inherited `.pi` file into `.privateer` — two files claiming to own the same
++ * values, silently diverging the first time one is edited. Reducing keeps `.privateer`
++ * holding only what it actually overrides.
++ *
++ * Known limit (shared with stock Pi's global→project layering): a key can be
++ * overridden but not un-set — removing it from `.privateer` lets `.pi`'s value show
++ * through again.
++ */
++function subtractSettings(settings, base) {
++    const result = {};
++    for (const key of Object.keys(settings)) {
++        const value = settings[key];
++        const baseValue = base[key];
++        if (value === undefined)
++            continue;
++        if (JSON.stringify(value) === JSON.stringify(baseValue))
++            continue;
++        if (typeof value === "object" &&
++            value !== null &&
++            !Array.isArray(value) &&
++            typeof baseValue === "object" &&
++            baseValue !== null &&
++            !Array.isArray(baseValue)) {
++            const nested = subtractSettings(value, baseValue);
++            if (Object.keys(nested).length > 0) {
++                result[key] = nested;
++            }
++            continue;
++        }
++        result[key] = value;
++    }
++    return result;
++}
+ export class FileSettingsStorage {
+     globalSettingsPath;
+     projectSettingsPath;
++    // Privateer patch: lower-precedence project settings files (`.pi/settings.json`),
++    // highest precedence first. Read and merged underneath projectSettingsPath, never
++    // written to.
++    projectBaseSettingsPaths;
+     constructor(cwd, agentDir) {
+         const resolvedCwd = resolvePath(cwd);
+         const resolvedAgentDir = resolvePath(agentDir);
+         this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
+-        this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
++        // Privateer patch: writes always land in `.privateer/settings.json`.
++        this.projectSettingsPath = join(projectConfigWriteDir(resolvedCwd), "settings.json");
++        this.projectBaseSettingsPaths = projectConfigDirCandidates(resolvedCwd)
++            .map((dir) => join(dir, "settings.json"))
++            .filter((path) => path !== this.projectSettingsPath);
++    }
++    /**
++     * Privateer patch: the project scope is the MERGE of every project settings file
++     * that exists — `.pi/settings.json` first, `.privateer/settings.json` layered on
++     * top — presented to callers as one document so the rest of Pi is unchanged.
++     * Writes are reduced against the inherited base and land in `.privateer` only.
++     */
++    withProjectLock(fn) {
++        const path = this.projectSettingsPath;
++        let base = {};
++        let sawBase = false;
++        // Lowest precedence first, so higher-precedence files overwrite them.
++        for (const basePath of [...this.projectBaseSettingsPaths].reverse()) {
++            if (!existsSync(basePath))
++                continue;
++            const raw = readFileSync(basePath, "utf-8");
++            if (!raw)
++                continue;
++            // A malformed `.pi/settings.json` throws here exactly as it would in stock
++            // Pi, and is reported by the caller as a project settings load error.
++            base = deepMergeSettings(base, JSON.parse(raw));
++            sawBase = true;
++        }
++        const dir = dirname(path);
++        let release;
++        try {
++            const fileExists = existsSync(path);
++            if (fileExists) {
++                release = this.acquireLockSyncWithRetry(path);
++            }
++            const ownRaw = fileExists ? readFileSync(path, "utf-8") : undefined;
++            const merged = ownRaw ? deepMergeSettings(base, JSON.parse(ownRaw)) : base;
++            // `undefined` means "no project settings at all" — the signal stock callers
++            // use to fall back to an empty document.
++            const current = ownRaw === undefined && !sawBase ? undefined : JSON.stringify(merged, null, 2);
++            const next = fn(current);
++            if (next !== undefined) {
++                const reduced = subtractSettings(JSON.parse(next), base);
++                if (!existsSync(dir)) {
++                    mkdirSync(dir, { recursive: true });
++                }
++                if (!release) {
++                    release = this.acquireLockSyncWithRetry(path);
++                }
++                writeFileSync(path, JSON.stringify(reduced, null, 2), "utf-8");
++            }
++        }
++        finally {
++            if (release) {
++                release();
++            }
++        }
+     }
+     acquireLockSyncWithRetry(path) {
+         const maxAttempts = 10;
+@@ -74,7 +172,13 @@ export class FileSettingsStorage {
+         throw lastError ?? new Error("Failed to acquire settings lock");
+     }
+     withLock(scope, fn) {
+-        const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
++        // Privateer patch: the project scope spans two directories, so it needs its own
++        // read-merge / write-reduce path.
++        if (scope !== "global") {
++            this.withProjectLock(fn);
++            return;
++        }
++        const path = this.globalSettingsPath;
+         const dir = dirname(path);
+         let release;
+         try {
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
+index 4e7e784..7383a2b 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
+@@ -1,7 +1,7 @@
+ import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+ import ignore from "ignore";
+ import { basename, dirname, join, relative, resolve, sep } from "path";
+-import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
++import { getAgentDir, projectConfigDirCandidates } from "../config.js";
+ import { parseFrontmatter } from "../utils/frontmatter.js";
+ import { canonicalizePath, resolvePath } from "../utils/paths.js";
+ import { createSyntheticSourceInfo } from "./source-info.js";
+@@ -328,10 +328,15 @@ export function loadSkills(options) {
+     }
+     if (includeDefaults) {
+         addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
+-        addSkills(loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", true));
++        // Privateer patch: `.privateer/skills` is added before `.pi/skills`, and the
++        // first skill to claim a name wins — so `.privateer` supersedes on a collision
++        // (the loser is reported as a normal collision diagnostic).
++        for (const projectDir of projectConfigDirCandidates(resolvedCwd)) {
++            addSkills(loadSkillsFromDirInternal(resolve(projectDir, "skills"), "project", true));
++        }
+     }
+     const userSkillsDir = join(resolvedAgentDir, "skills");
+-    const projectSkillsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "skills");
++    const projectSkillsDirs = projectConfigDirCandidates(resolvedCwd).map((dir) => resolve(dir, "skills"));
+     const isUnderPath = (target, root) => {
+         const normalizedRoot = resolve(root);
+         if (target === normalizedRoot) {
+@@ -344,7 +349,7 @@ export function loadSkills(options) {
+         if (!includeDefaults) {
+             if (isUnderPath(resolvedPath, userSkillsDir))
+                 return "user";
+-            if (isUnderPath(resolvedPath, projectSkillsDir))
++            if (projectSkillsDirs.some((dir) => isUnderPath(resolvedPath, dir)))
+                 return "project";
+         }
+         return "path";
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js
+index 17af938..6d97caa 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js
+@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { dirname, join } from "node:path";
+ import lockfile from "proper-lockfile";
+-import { CONFIG_DIR_NAME } from "../config.js";
++import { projectConfigDirCandidates } from "../config.js";
+ import { canonicalizePath, resolvePath } from "../utils/paths.js";
+ const TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES = [
+     "settings.json",
+@@ -150,9 +150,13 @@ export function hasTrustRequiringProjectResources(cwd) {
+     const homeDir = canonicalizePath(resolvePath(process.env.HOME || homedir()));
+     const userAgentsSkillsDir = join(homeDir, ".agents", "skills");
+     let currentDir = canonicalizePath(resolvePath(cwd));
+-    const configDir = join(currentDir, CONFIG_DIR_NAME);
+-    if (TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES.some((entry) => existsSync(join(configDir, entry)))) {
+-        return true;
++    // Privateer patch: a project needs a trust decision if EITHER config dir carries
++    // trust-requiring resources — otherwise `.privateer/extensions` would execute
++    // without ever prompting.
++    for (const configDir of projectConfigDirCandidates(currentDir)) {
++        if (TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES.some((entry) => existsSync(join(configDir, entry)))) {
++            return true;
++        }
+     }
+     while (true) {
+         const agentsSkillsDir = join(currentDir, ".agents", "skills");
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/main.js b/node_modules/@earendil-works/pi-coding-agent/dist/main.js
+index fc62585..8b08615 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/main.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/main.js
+@@ -693,7 +693,58 @@ export async function main(args, options) {
+         if (exitCode !== 0) {
+             process.exitCode = exitCode;
+         }
++        // Privateer patch: one-shot runs must EXIT, not merely stop working.
++        //
++        // Stock Pi returns here and trusts the event loop to drain. It usually does —
++        // but a single ref'd resource anywhere in the process pins it open forever, and
++        // `pi -p` then hangs with the answer already printed, looking for all the world
++        // like a stuck model call.
++        //
++        // Measured on a normal Privateer install: with `-ne`, or an agent dir holding no
++        // extensions, one-shot runs exit. Load the moat and they never do. Bisecting the
++        // moat one extension at a time puts it on privateer-gate; the other nine exit
++        // cleanly. What the gate retains could not be identified from JS, because while
++        // the process sits there BOTH process._getActiveHandles() and
++        // process.getActiveResourcesInfo() come back empty — whatever holds libuv's loop
++        // open is native, so nothing in JS can find it, let alone close it.
++        //
++        // It is not only ours to fix, either: extensions are arbitrary third-party code.
++        // A user package on this same machine (context-mode) spawns MCP stdio servers on
++        // before_agent_start, which is its own reason a one-shot run may never end.
++        //
++        // Exiting here is safe because the work is genuinely finished — runPrintMode's
++        // finally block has already awaited disposeRuntime() (which runs extension
++        // session_shutdown handlers, so session indexing and flushes complete) and
++        // flushRawStdout(). All that remains is the exit itself. We still drain stdout
++        // and stderr first, because with a pipe (`privateer -p … | tail`) the last write
++        // may be buffered, and a bare process.exit() would truncate it.
++        //
++        // Interactive and RPC modes are untouched: the TUI owns its own teardown, and
++        // an RPC server is supposed to stay up.
++        await flushStdioAndExit(process.exitCode ?? 0);
+         return;
+     }
+ }
++// Privateer patch: flush stdout/stderr, then exit — even if something in the process
++// (native addon, extension, stray timer) would otherwise keep the event loop alive.
++// The 2s backstop covers the pathological case where a stream never drains; an
++// unref'd timer so it can never itself delay a clean exit.
++function flushStdioAndExit(code) {
++    return new Promise(() => {
++        let pending = 2;
++        const done = () => {
++            if (--pending === 0)
++                process.exit(code);
++        };
++        const backstop = setTimeout(() => process.exit(code), 2000);
++        backstop.unref?.();
++        try {
++            process.stdout.write("", done);
++            process.stderr.write("", done);
++        }
++        catch {
++            process.exit(code);
++        }
++    });
++}
+ //# sourceMappingURL=main.js.map
+\ No newline at end of file
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/migrations.js b/node_modules/@earendil-works/pi-coding-agent/dist/migrations.js
+index e3a5ccf..a561a8a 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/migrations.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/migrations.js
+@@ -4,7 +4,7 @@
+ import chalk from "chalk";
+ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+ import { dirname, join } from "path";
+-import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.js";
++import { getAgentDir, getBinDir, projectConfigDirs } from "./config.js";
+ import { migrateKeybindingsConfig } from "./core/keybindings.js";
+ const MIGRATION_GUIDE_URL = "https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/CHANGELOG.md#extensions-migration";
+ const EXTENSIONS_DOC_URL = "https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/extensions.md";
+@@ -230,14 +230,17 @@ function checkDeprecatedExtensionDirs(baseDir, label) {
+  */
+ function migrateExtensionSystem(cwd) {
+     const agentDir = getAgentDir();
+-    const projectDir = join(cwd, CONFIG_DIR_NAME);
++    // Privateer patch: migrate/scan every project config dir that exists.
++    const projectDirs = projectConfigDirs(cwd);
+     // Migrate commands/ to prompts/
+     migrateCommandsToPrompts(agentDir, "Global");
+-    migrateCommandsToPrompts(projectDir, "Project");
++    for (const projectDir of projectDirs) {
++        migrateCommandsToPrompts(projectDir, "Project");
++    }
+     // Check for deprecated directories
+     const warnings = [
+         ...checkDeprecatedExtensionDirs(agentDir, "Global"),
+-        ...checkDeprecatedExtensionDirs(projectDir, "Project"),
++        ...projectDirs.flatMap((projectDir) => checkDeprecatedExtensionDirs(projectDir, "Project")),
+     ];
+     return warnings;
+ }
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js
+index 3355a47..8c6bba9 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js
+@@ -4,7 +4,7 @@
+ import { homedir } from "node:os";
+ import { basename, dirname, join, relative } from "node:path";
+ import { Container, getKeybindings, Input, matchesKey, Spacer, truncateToWidth, visibleWidth, } from "@earendil-works/pi-tui";
+-import { CONFIG_DIR_NAME } from "../../../config.js";
++import { formatProjectConfigDirNames, projectConfigDirs, projectConfigWriteDir } from "../../../config.js";
+ import { theme } from "../theme/theme.js";
+ import { DynamicBorder } from "./dynamic-border.js";
+ import { rawKeyHint } from "./keybinding-hints.js";
+@@ -41,7 +41,7 @@ function getGroupLabel(metadata, agentDir) {
+                 ? `User (${formatBaseDir(metadata.baseDir)})`
+                 : `Project (${formatBaseDir(metadata.baseDir)})`;
+         }
+-        return metadata.scope === "user" ? `User (${formatBaseDir(agentDir)})` : `Project (${CONFIG_DIR_NAME}/)`;
++        return metadata.scope === "user" ? `User (${formatBaseDir(agentDir)})` : `Project (${formatProjectConfigDirNames()})`;
+     }
+     return metadata.scope === "user" ? "User settings" : "Project settings";
+ }
+@@ -458,7 +458,12 @@ class ResourceList {
+         }
+     }
+     getTopLevelBaseDir(scope) {
+-        return scope === "project" ? join(this.cwd, CONFIG_DIR_NAME) : this.agentDir;
++        // Privateer patch: patterns are made relative to the highest-precedence project
++        // dir that exists (`.privateer` when present), else where one would be created.
++        if (scope !== "project") {
++            return this.agentDir;
++        }
++        return projectConfigDirs(this.cwd)[0] ?? projectConfigWriteDir(this.cwd);
+     }
+     getResourcePattern(item) {
+         const scope = item.metadata.scope;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index 5d65200..0a08971 100644
+index 5d65200..f827cd7 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-@@ -301,9 +301,15 @@ export class InteractiveMode {
+@@ -10,7 +10,7 @@ import { getProviders, } from "@earendil-works/pi-ai/compat";
+ import { CombinedAutocompleteProvider, Container, fuzzyFilter, getCapabilities, hyperlink, Markdown, matchesKey, ProcessTerminal, Spacer, setKeybindings, Text, TruncatedText, TUI, visibleWidth, } from "@earendil-works/pi-tui";
+ import chalk from "chalk";
+ import { spawn, spawnSync } from "child_process";
+-import { APP_NAME, APP_TITLE, CONFIG_DIR_NAME, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, getShareViewerUrl, VERSION, } from "../../config.js";
++import { APP_NAME, APP_TITLE, formatProjectConfigDirNames, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, getShareViewerUrl, VERSION, } from "../../config.js";
+ import { parseSkillBlock } from "../../core/agent-session.js";
+ import { SessionImportFileNotFoundError } from "../../core/agent-session-runtime.js";
+ import { FooterDataProvider } from "../../core/footer-data-provider.js";
+@@ -110,7 +110,12 @@ export function formatResumeCommand(sessionManager) {
+     const sessionFile = sessionManager.getSessionFile();
+     if (!sessionFile || !fs.existsSync(sessionFile))
+         return undefined;
+-    const args = [APP_NAME];
++    // Privateer rename: APP_NAME is "pi", and no `pi` binary exists on a Privateer
++    // machine — the published bin is `privateer`. So this hint, whose entire job is to
++    // be copy-pasted, resolved to "bash: pi: command not found". The launcher exports
++    // PRIVATEER_CMD with the name it was actually invoked under (npm's bin symlink, or
++    // a user's own symlink of bin/privateer-tui); fall back to the published name.
++    const args = [process.env.PRIVATEER_CMD || "privateer"];
+     if (!sessionManager.usesDefaultSessionDir()) {
+         args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
+     }
+@@ -301,9 +306,15 @@ export class InteractiveMode {
      }
      getBuiltInCommandConflictDiagnostics(extensionRunner) {
          const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
@@ -117,7 +948,7 @@ index 5d65200..0a08971 100644
              .map((command) => ({
              type: "warning",
              message: command.invocationName === command.name
-@@ -2042,7 +2048,17 @@ export class InteractiveMode {
+@@ -2042,7 +2053,17 @@ export class InteractiveMode {
              if (text === "/model" || text.startsWith("/model ")) {
                  const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -136,7 +967,7 @@ index 5d65200..0a08971 100644
                  return;
              }
              if (text === "/export" || text.startsWith("/export ")) {
-@@ -2105,14 +2121,44 @@ export class InteractiveMode {
+@@ -2105,14 +2126,44 @@ export class InteractiveMode {
                  this.editor.setText("");
                  return;
              }
@@ -184,3 +1015,43 @@ index 5d65200..0a08971 100644
                  return;
              }
              if (text === "/new") {
+@@ -2650,7 +2701,7 @@ export class InteractiveMode {
+         if (this.chatContainer.children.length > 0) {
+             this.chatContainer.addChild(new Spacer(1));
+         }
+-        this.chatContainer.addChild(new Text(theme.fg("warning", `This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart pi.`), 1, 0));
++        this.chatContainer.addChild(new Text(theme.fg("warning", `This project is not trusted. Project ${formatProjectConfigDirNames()} resources and packages are ignored. Use /trust to save a trust decision, then restart ${process.env.PRIVATEER_CMD || APP_NAME}.`), 1, 0));
+     }
+     async getUserInput() {
+         const queuedInput = this.pendingUserInputs.shift();
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
+index f81b4b4..9712a37 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
+@@ -2,7 +2,7 @@ import { Markdown } from "@earendil-works/pi-tui";
+ import chalk from "chalk";
+ import { selectConfig } from "./cli/config-selector.js";
+ import { createProjectTrustContext } from "./cli/project-trust.js";
+-import { APP_NAME, CONFIG_DIR_NAME, detectInstallMethod, getAgentDir, getPackageDir, getSelfUpdateCommand, getSelfUpdateUnavailableInstruction, PACKAGE_NAME, VERSION, } from "./config.js";
++import { APP_NAME, detectInstallMethod, getAgentDir, getPackageDir, getSelfUpdateCommand, getSelfUpdateUnavailableInstruction, PACKAGE_NAME, PROJECT_CONFIG_DIR_NAMES, VERSION, } from "./config.js";
+ import { DefaultPackageManager } from "./core/package-manager.js";
+ import { resolveProjectTrusted } from "./core/project-trust.js";
+ import { DefaultResourceLoader } from "./core/resource-loader.js";
+@@ -57,7 +57,7 @@ function printPackageCommandHelp(command) {
+ Install a package and add it to settings.
+ 
+ Options:
+-  -l, --local       Install project-locally (${CONFIG_DIR_NAME}/settings.json)
++  -l, --local       Install project-locally (${PROJECT_CONFIG_DIR_NAMES[0]}/settings.json)
+   -a, --approve     Trust project-local files for this command
+   -na, --no-approve Ignore project-local files for this command
+ 
+@@ -78,7 +78,7 @@ Remove a package and its source from settings.
+ Alias: ${APP_NAME} uninstall <source> [-l]
+ 
+ Options:
+-  -l, --local       Remove from project settings (${CONFIG_DIR_NAME}/settings.json)
++  -l, --local       Remove from project settings (${PROJECT_CONFIG_DIR_NAMES[0]}/settings.json)
+   -a, --approve     Trust project-local files for this command
+   -na, --no-approve Ignore project-local files for this command
+ 

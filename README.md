@@ -116,6 +116,12 @@ silently. The moat is swappable; the floor under it holds.
   routing between them, and `human_gate` steps that pause for your approval and resume.
 - **Chat-app channels.** Bridge the agent into Telegram, Slack, Discord, or WhatsApp with
   role-based approval — admins can approve actions, members are read-only.
+- **Make images and video.** Signed in, the agent can generate images, video clips, narration
+  and music on your account — and stitch them together locally with ffmpeg. It plans the whole
+  piece: render the stills, animate them, carry the last frame of one clip into the next so the
+  shots stay continuous, cut them together, then score and narrate the result. Generated media
+  is handed straight back as files on your machine; none of it is stored in our cloud. See
+  [docs/media-generation.md](docs/media-generation.md).
 - **MCP servers, sub-agents & skills.** Connect Model Context Protocol servers (local stdio
   or remote HTTP with OAuth) with [`/connect`](#connectors--mcp), delegate work to bounded
   parallel sub-agents, and drop in skills — all gated like everything else.

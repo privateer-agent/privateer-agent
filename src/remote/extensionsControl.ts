@@ -8,11 +8,11 @@
  * of these and route the extensions_* relay frames through it.
  *
  * Only the user's OWN packages surface here. The Privateer moat (privateer-*,
- * pi-privacy, rpiv-web-tools, …) is installed by bin/privateer-tui as shim .ts
- * files in the agent dir's extensions/ folder — auto-discovered, NOT recorded in
- * settings.json "packages". listConfiguredPackages() reads only "packages", so the
- * moat is naturally excluded. We keep a RESERVED name guard as defence in depth in
- * case a user ever hand-adds one of our package names.
+ * rpiv-web-tools, …) never appears in settings.json "packages": the launcher passes it to
+ * Pi as `-e` arguments, and the in-process entries build it from factories. So
+ * listConfiguredPackages(), which reads only "packages", excludes it naturally. The
+ * RESERVED guard is defence in depth for a user who hand-adds one of our names — which
+ * would load a second copy of an extension the moat already supplies.
  *
  * Framework-agnostic: nothing here imports React or the relay. The caller owns the
  * frame plumbing and hands us a SettingsManager (the REPL reuses the session's;
@@ -20,6 +20,7 @@
  */
 import { DefaultPackageManager } from "@earendil-works/pi-coding-agent";
 import type { ProgressEvent, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { reservedNames } from "../config/moatManifest.ts";
 
 // One installed extension as surfaced to the app. NON-PII: a package source
 // (npm:/git: spec) plus its scope — no cwd, no absolute paths beyond what Pi
@@ -49,25 +50,12 @@ export interface ExtensionsControl {
 // Package names we never manage from the app: the Privateer moat + adopted packs
 // installed as shims by the launcher. A guard only — listConfiguredPackages()
 // already omits them since they aren't settings "packages".
-const RESERVED = new Set([
-  "privateer-brand",
-  "privateer-context",
-  "privateer-gate",
-  "privateer-account",
-  "privateer-posture",
-  "privateer-tools",
-  "privateer-privacy",
-  "pi-privacy",
-  "pi-web-access",
-  "rpiv-web-tools",
-  "@juicesharp/rpiv-web-tools",
-  "rpiv-ask-user-question",
-  "@juicesharp/rpiv-ask-user-question",
-  "pi-mcp-adapter",
-  "pi-hypa",
-  "@hypabolic/pi-hypa",
-  "pi-subagents",
-]);
+//
+// Derived from the shipping manifest rather than hand-listed. The hand-written version
+// had drifted: privateer-models and privateer-connect were shimmed by the launcher but
+// missing here, so the app would have offered to install a user package under a name the
+// launcher overwrites on every launch. See src/config/moatManifest.ts.
+const RESERVED = new Set(reservedNames());
 
 // The bare package name inside a source spec, for the RESERVED check. Strips the
 // npm:/git: scheme and any @version / #ref suffix; leaves scoped names intact.

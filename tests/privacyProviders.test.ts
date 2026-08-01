@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import privateerPrivacy from "../extensions/privateer-privacy.ts";
-import { ACCOUNT_DEFAULT_MODEL_ID } from "../src/providers/defaultModel.ts";
+import { ACCOUNT_DEFAULT_MODEL_ID, TINFOIL_DEFAULT_SPEC } from "../src/providers/defaultModel.ts";
 
 rmSync(process.env.PRIVATEER_HOME!, { recursive: true, force: true });
 
@@ -66,8 +66,8 @@ test("the privacy extension leaves the ACCOUNT channel registered as privateer",
 });
 
 // Same failure mode, the case privateer-privacy already handled: pi-privacy seeds
-// `tinfoil` with one model, so tinfoil/glm-5-2 (our default over a BYO Tinfoil key)
-// would resolve as a custom model id.
+// `tinfoil` with one model, so the BYO-Tinfoil-key default would resolve as a custom
+// model id.
 test("the privacy extension widens the tinfoil catalog past pi-privacy's seed", () => {
   const { pi, last } = fakePi();
   privateerPrivacy(pi);
@@ -75,6 +75,11 @@ test("the privacy extension widens the tinfoil catalog past pi-privacy's seed", 
   const tinfoil = last("tinfoil");
   assert.ok(tinfoil, "tinfoil must be registered");
   const ids = (tinfoil.models ?? []).map((m) => m.id);
-  assert.ok(ids.includes("glm-5-2"), "the launcher default must resolve");
+  // Assert against the shared constant rather than a literal, so moving the default
+  // can't leave this list silently missing the model the launcher boots on.
+  assert.ok(
+    ids.includes(TINFOIL_DEFAULT_SPEC.replace(/^tinfoil\//, "")),
+    "the launcher default must resolve",
+  );
   assert.ok(ids.length > 1, "more than pi-privacy's single seed model");
 });

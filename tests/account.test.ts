@@ -19,8 +19,10 @@ import {
   rememberAccountCredential,
   verificationLink,
   accountProviderConfig,
+  thinkingProfile,
 } from "../src/providers/account.ts";
 import { ensureSealedShim, sealedShimBase, stopSealedShim } from "../src/providers/sealedShim.ts";
+import { ACCOUNT_DEFAULT_MODEL_ID } from "../src/providers/defaultModel.ts";
 import { clearCredentials, currentUser, saveCredentials } from "../src/auth/privateer.ts";
 
 // A stand-in for Pi's ExtensionContext + auth store (auth.json), so the tests can see
@@ -476,7 +478,11 @@ test("a live catalog fetch is cached, and seeds the next launch synchronously", 
       ]);
 
       const seeded = seedCatalogIds();
-      assert.equal(seeded[0], "tinfoil/glm-5-2", "the account default must stay first: Pi clones models[0] for a custom id");
+      assert.equal(
+        seeded[0],
+        ACCOUNT_DEFAULT_MODEL_ID,
+        "the account default must stay first: Pi clones models[0] for a custom id",
+      );
       assert.equal(new Set(seeded).size, seeded.length, "no duplicates between the seed list and the cache");
       for (const id of ["allenai/olmo-3-32b-think", "amazon/nova-2-lite-v1"]) {
         assert.ok(seeded.includes(id), `${id} must be resolvable at launch`);
@@ -509,7 +515,10 @@ test("the fallback catalog is never cached, and a corrupt cache is ignored", asy
       // over the cache: read back later they would masquerade as the real catalog.
       globalThis.fetch = (async () => new Response("nope", { status: 503 })) as typeof fetch;
       const infos = await fetchAccountCatalog();
-      assert.ok(infos.length > 0 && infos.some((i) => i.id === "tinfoil/glm-5-2"), "fallback still yields a usable list");
+      assert.ok(
+        infos.length > 0 && infos.some((i) => i.id === ACCOUNT_DEFAULT_MODEL_ID),
+        "fallback still yields a usable list",
+      );
       assert.deepEqual(loadCachedCatalogIds(), ["keep/me"], "a failed fetch must leave the cache alone");
 
       // Garbage on disk must not throw or register nonsense.
@@ -619,6 +628,58 @@ test("a phala-only catalog still leaves the user a usable model list", async () 
       globalThis.fetch = real;
     }
   });
+});
+
+// ── Thinking control ─────────────────────────────────────────────────────────
+
+test("enclave thinking models are registered as steerable, in their verified shape", () => {
+  // The GLM/Qwen chat-template family: pi's "qwen-chat-template" emits the
+  // `chat_template_kwargs.enable_thinking` the enclave actually honours.
+  for (const id of [
+    "tinfoil/glm-5-2",
+    "near/zai-org/GLM-5.1-FP8",
+    "near/Qwen/Qwen3.6-35B-A3B-FP8",
+    "phala/z-ai/glm-5.2",
+  ]) {
+    const p = thinkingProfile(id);
+    assert.ok(p, `${id} must be steerable`);
+    assert.equal(p.reasoning, true);
+    assert.equal(p.compat?.thinkingFormat, "qwen-chat-template");
+    // Binary switch → exactly two levels offered, not five that all mean "on".
+    assert.equal(p.thinkingLevelMap?.low, null);
+  }
+
+  // gpt-oss is the other shape: reasoning_effort, which is pi's DEFAULT format for
+  // our baseUrl — so a compat override here would actively break it.
+  const oss = thinkingProfile("tinfoil/gpt-oss-120b");
+  assert.ok(oss);
+  assert.equal(oss.compat, undefined);
+  assert.equal(oss.thinkingLevelMap?.off, "low");
+});
+
+test("models whose thinking shape we did not verify are left exactly as they were", () => {
+  // Proxied third-party models: an unsupported parameter fails the whole turn, so
+  // being wrong here is worse than thinking too much.
+  for (const id of ["anthropic/claude-sonnet-5", "openai/gpt-5.4-mini", "deepseek/deepseek-v4-flash"]) {
+    assert.equal(thinkingProfile(id), null, `${id} must not be annotated`);
+  }
+  // Reasons, but ignored both levers when probed — a dial connected to nothing.
+  assert.equal(thinkingProfile("tinfoil/kimi-k2-6"), null);
+  // Non-thinking variants.
+  assert.equal(thinkingProfile("phala/qwen/qwen-2.5-7b-instruct"), null);
+  assert.equal(thinkingProfile("tinfoil/llama3-3-70b"), null);
+});
+
+test("the registered model entries carry the profile through to pi", () => {
+  const models: any[] = (accountProviderConfig(["tinfoil/glm-5-2", "anthropic/claude-sonnet-5"]) as any).models;
+  const glm = models.find((m) => m.id === "tinfoil/glm-5-2");
+  const claude = models.find((m) => m.id === "anthropic/claude-sonnet-5");
+  // pi gates every thinking branch on this field; false is what pinned the catalog
+  // to maximum thinking with an inert toggle.
+  assert.equal(glm.reasoning, true);
+  assert.equal(glm.compat.thinkingFormat, "qwen-chat-template");
+  assert.equal(claude.reasoning, false);
+  assert.equal(claude.compat, undefined);
 });
 
 test.after(() => {

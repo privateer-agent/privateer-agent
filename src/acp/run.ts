@@ -43,12 +43,17 @@
 
 import "../boot.ts"; // env + attestation dispatcher, before any Pi import
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
+import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
 
 // Read-only by default, exactly as the channels runtime and the routines harbor do:
 // a turn nobody is watching must not be able to mutate the filesystem or shell out
 // until a human widens it in config.
 const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES];
+// Media generation stays out of the default set (it spends the account's credit —
+// see the harbor's note); an ACP host that wants it names it in `acp.tools`. Listed
+// here so it can be stripped back out when generation is switched off.
+const MEDIA_GEN_TOOLS: string[] = [...MEDIA_TOOL_NAMES];
 
 type Posture = "readonly" | "approve" | "auto";
 const POSTURES: Posture[] = ["readonly", "approve", "auto"];
@@ -80,14 +85,12 @@ export async function runAcp(): Promise<void> {
     "@earendil-works/pi-coding-agent"
   );
   const { createEngineEventAdapter } = await import("../bridge/engineAdapter.ts");
-  const { makePermissionGate } = await import("../ext/permissionGate.ts");
   type GateController = import("../ext/permissionGate.ts").GateController;
-  const { makePiPrivacyExtension } = await import("pi-privacy");
-  const { makeAccountProvider, privateerChannel, rememberAccountCredential, dropPersistedAccountCredential } =
+  const { moatResourceOptions } = await import("../config/moat.ts");
+  const { privateerChannel, rememberAccountCredential, dropPersistedAccountCredential } =
     await import("../providers/account.ts");
   const { hasCredentials, acquireAccountCredential, revokeAccountSession } = await import("../auth/privateer.ts");
-  const { makeWebTools } = await import("../tools/web.ts");
-  const { webEnabled } = await import("../config/hosted.ts");
+  const { webEnabled, mediaEnabled } = await import("../config/hosted.ts");
   const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
   const { agentDir, configPath } = await import("../config/paths.ts");
   const { PrivateerAcpAgent, askOverAcp } = await import("./server.ts");
@@ -103,8 +106,9 @@ export async function runAcp(): Promise<void> {
   const block = cfg.acp ?? {};
   const defaultModel: string = resolveDefaultModel({ explicit: block.model ?? cfg.defaultModel });
   const web = webEnabled();
+  const media = mediaEnabled();
   const tools: string[] = Array.isArray(block.tools) && block.tools.length
-    ? (web ? block.tools : block.tools.filter((t: string) => !WEB_TOOLS.includes(t)))
+    ? block.tools.filter((t: string) => (web || !WEB_TOOLS.includes(t)) && (media || !MEDIA_GEN_TOOLS.includes(t)))
     : (web ? [...SAFE_TOOLS, ...WEB_TOOLS] : [...SAFE_TOOLS]);
   const posture: Posture = normalizePosture(block.posture) ?? "approve";
   const baseCwd: string = block.cwd ?? process.cwd();
@@ -146,20 +150,13 @@ export async function runAcp(): Promise<void> {
       //
       // Verified live: without this, `bash` was denied and remoteAsk never fired.
       //
-      // So: discover nothing, and load exactly the moat we want as in-code
-      // factories below. Same shape as bin/privateer-subagent.mjs's
-      // `--no-extensions -e …`, and for the same reason. This disables discovered
-      // MCP too; an ACP host supplies its own MCP servers in session/new, which is
-      // the more correct source anyway.
+      // The other entries now solve this with moatResourceOptions()'s extensionsOverride,
+      // which drops OUR shims and keeps the user's. ACP stays on the blunter setting on
+      // purpose: it also disables discovered MCP, and an ACP host supplies its own servers
+      // in session/new, which is the more correct source here. So this list is the only way
+      // a host (Zed, Buzz) gets the moat, the account provider, or media at all.
       noExtensions: true,
-      extensionFactories: [
-        makePermissionGate(gate),
-        makePiPrivacyExtension({
-          privateerVerifiedTee: (m: any) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
-        }),
-        makeAccountProvider(),
-        ...(webEnabled() ? [makeWebTools()] : []),
-      ] as any,
+      ...((await moatResourceOptions({ kind: "acp", gate })) as any),
     },
   });
 

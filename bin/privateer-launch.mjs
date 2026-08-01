@@ -3,12 +3,22 @@
 // platform (macOS, Linux, Windows). `bin/privateer-tui` (unix) and the Windows
 // `privateer.cmd` are thin shims that just pick a Node and run THIS file.
 //
-// It boots Pi's full interactive TUI with the Privateer moat + tool packs. The moat
-// is installed as re-export SHIMS in the agent dir's extensions/, so BOTH this TUI
-// and any subagents it spawns (child processes reading the same agent dir) load the
-// identical set — including our permission gate. One source of truth via discovery
-// (no `-e`, which would double-load vs discovery). Runs in the current directory;
-// model via PRIVATEER_MODEL=provider/id.
+// It boots Pi's full interactive TUI with the Privateer moat + tool packs, passed as
+// explicit `-e` extension args (the same way --skill passes our bundled skills).
+//
+// We USED to install the moat as re-export shims in the agent dir's extensions/ and let
+// Pi discover them. That directory is shared with every other Privateer process — the
+// harbor daemon, the channels runner, ACP, the REPL — and Pi discovers it into every
+// session built against that agent dir, so those processes each loaded a second copy of
+// the moat on top of the one they build in code: a gate wired to a RemoteBridge nothing
+// had attached a relay to, tool registrations that shadowed the session's own, and
+// module-level state shared across concurrent sessions. Each entry point defended itself
+// with a different env marker, and the ones nobody remembered to defend (media, MCP, web)
+// were never covered at all. Passing `-e` instead means the agent dir's extensions/ holds
+// ONLY the user's own extensions, so there is nothing of ours left to collide with, and
+// each process loads exactly the moat it asked for. See src/config/moat.ts.
+//
+// Runs in the current directory; model via PRIVATEER_MODEL=provider/id.
 //
 // Ported from the original bash launcher; behaviour is intended to match exactly.
 
@@ -16,7 +26,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
@@ -25,6 +35,32 @@ const isWin = process.platform === "win32";
 
 const PRIVATEER_HOME = process.env.PRIVATEER_HOME || path.join(os.homedir(), ".privateer");
 const ENV_FILE = path.join(REPO, ".env"); // dev-only; a real install has none
+const AGENT_DIR = path.join(PRIVATEER_HOME, "agent");
+const EXT_DIR = path.join(AGENT_DIR, "extensions");
+
+// WHAT to load comes from src/config/moatManifest.json — the same file the TS side derives
+// extensionsControl's RESERVED set and the per-profile factory lists from, so adding an
+// extension is one edit rather than four. JSON because this file runs before the patches,
+// with no tsx and no dependencies. See src/config/moatManifest.ts.
+const MANIFEST = JSON.parse(fs.readFileSync(path.join(REPO, "src", "config", "moatManifest.json"), "utf8"));
+
+// Releases up to 0.11 installed the moat as shim files here. They are no longer written
+// (we pass `-e` instead), so any that survive an upgrade are stale — and a stale shim is
+// worse than a missing one: Pi would discover it into every session sharing this agent
+// dir, loading a second moat next to the one that process builds in code. Sweep on EVERY
+// launch, not just the TUI's: a machine that only ever runs `privateer harbor` upgrades
+// too, and its sessions are exactly the ones the duplicate hurt most.
+function sweepLegacyShims() {
+  if (!fs.existsSync(EXT_DIR)) return;
+  for (const name of [...MANIFEST.shims.map((s) => s.name), ...MANIFEST.retired]) {
+    try {
+      fs.rmSync(path.join(EXT_DIR, `${name}.ts`), { force: true });
+    } catch {
+      /* a root-owned agent dir just means the stale shim stays; the in-process filter
+         (src/config/moat.ts) still keeps it out of any session we build. */
+    }
+  }
+}
 
 // --- bundle detection ------------------------------------------------------
 // A self-contained bundle ships its own pinned Node at "$REPO/node[.exe]" plus a
@@ -42,6 +78,20 @@ const NODE_BIN = BUNDLED ? bundledNode : process.execPath;
 process.env.PATH = path.dirname(NODE_BIN) + path.delimiter + (process.env.PATH || "");
 
 const args = process.argv.slice(2);
+
+// The command name to hand back to the user in copy-pasteable hints. Pi builds those
+// from its own APP_NAME ("pi"), which is installed nowhere on a Privateer machine — so
+// its "To resume this session: pi --session <id>" line pasted straight into
+// `bash: pi: command not found`. npm's bin symlink keeps its own name in argv[1], so
+// the invocation tells us the truth; internal entrypoints (privateer-launch.mjs, the
+// privateer-tui shim) are not on anyone's PATH, so those fall back to the published
+// bin name. Children inherit this via env; the patched formatResumeCommand reads it.
+process.env.PRIVATEER_CMD ??= invokedCommandName();
+
+function invokedCommandName() {
+  const name = path.basename(process.argv[1] || "").replace(/\.(mjs|cjs|js|cmd|bat|exe)$/i, "");
+  return !name || name.startsWith("privateer-") ? "privateer" : name;
+}
 
 // `--no-quarter` — total permission bypass ("take no prisoners"). Strip it from the
 // args BEFORE anything else so it never reaches Pi's cli.js (which doesn't know it)
@@ -114,10 +164,11 @@ if (sub === "update") {
 
 // --- `privateer harbor [run|install|uninstall|status]` ---------------------
 // The resident background harbor (routines + app-driven headless task spawns). Boots
-// straight into src/harbor via bin/privateer-harbor.mjs — no moat-shim install (the
-// harbor loads the moat as in-code factories, not interactive extensions).
+// straight into src/harbor via bin/privateer-harbor.mjs — the harbor loads the moat as
+// in-code factories, so it needs no `-e` args of its own.
 // `daemon` is a hidden back-compat alias for the pre-rename command name.
 else if (sub === "harbor" || sub === "daemon") {
+  sweepLegacyShims(); // a harbor-only machine upgrades too — see the function's note
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
   runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-harbor.mjs"), ...args.slice(1)]);
 }
@@ -126,16 +177,16 @@ else if (sub === "harbor" || sub === "daemon") {
 // Privateer as an Agent Client Protocol server, spawned by an ACP host (Buzz's
 // `buzz-acp`, Zed, …) and driven over newline-delimited JSON-RPC on stdio.
 //
-// ⚠️ STDOUT IS THE PROTOCOL here, so this branch must stay silent: no banner, no
-// patch chatter, no moat-shim install (like `harbor`, the ACP entry loads the moat
-// as in-code factories rather than discovered extensions). A single stray stdout
-// line breaks the JSON-RPC stream and the host disconnects.
+// ⚠️ STDOUT IS THE PROTOCOL here, so this branch must stay silent: no banner, no patch
+// chatter (like `harbor`, the ACP entry loads the moat as in-code factories). A single
+// stray stdout line breaks the JSON-RPC stream and the host disconnects.
 else if (sub === "acp") {
+  sweepLegacyShims(); // silent: only ever removes files
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
   runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-acp.mjs"), ...args.slice(1)]);
 }
 
-// --- normal launch: install the moat, then exec Pi's TUI -------------------
+// --- normal launch: resolve the moat, then exec Pi's TUI with it -----------
 else {
   // Windows has no bash out of the box, but Privateer's command tool needs one. If a
   // real bash isn't reachable, stop here with a clear, actionable message — otherwise
@@ -150,50 +201,22 @@ else {
   // stock Pi behaviour, not a broken boot. Bundles ship pre-patched and no-op here.
   ensurePatches();
 
-  const AGENT_DIR = path.join(PRIVATEER_HOME, "agent");
-  const EXT_DIR = path.join(AGENT_DIR, "extensions");
+  // The agent dir's extensions/ is now the USER's alone — we create it so there's a place
+  // to drop one, and clear out any shim an older release left behind.
   fs.mkdirSync(EXT_DIR, { recursive: true });
+  sweepLegacyShims();
 
-  // Install/refresh the moat + tool-pack shims. Each shim re-exports its target by
-  // ABSOLUTE path (as a file:// URL, portable across OSes) so the target's own
-  // relative imports resolve from the repo. We remove any shim we previously managed
-  // first, so a dropped package can't linger and reload.
-  const MANAGED = [
-    "privateer-brand", "privateer-context", "privateer-gate", "privateer-account",
-    "privateer-models", "privateer-posture", "privateer-tools", "privateer-privacy",
-    "privateer-connect",
-    "pi-privacy", "pi-web-access", "rpiv-web-tools", "rpiv-ask-user-question",
-    "pi-mcp-adapter", "pi-hypa", "pi-subagents",
-  ];
-  for (const name of MANAGED) fs.rmSync(path.join(EXT_DIR, `${name}.ts`), { force: true });
-
-  const ext = (...p) => path.join(REPO, "extensions", ...p);
-  // Resolve dependencies by walking the node_modules chain, NOT as REPO/node_modules.
-  // npm only nests deps under us for a global install; `npx privateer-agent` and
-  // `npm i privateer-agent` HOIST them to a sibling/parent node_modules, where the
-  // hardcoded path resolves to nothing and every shim below points at a missing file.
+  // Resolve every moat entry point to an absolute path, to be passed to Pi as `-e`.
+  // Dependencies resolve by walking the node_modules chain, NOT as REPO/node_modules: npm
+  // only nests deps under us for a global install; `npx privateer-agent` and `npm i
+  // privateer-agent` HOIST them to a sibling/parent node_modules, where a hardcoded path
+  // resolves to nothing. A target that doesn't exist means that optional tool pack isn't
+  // installed — drop it rather than passing a path Pi will fail to load.
   const dep = (name, ...rest) => resolveDep(REPO, name, ...rest);
-  // A missing target means that optional tool pack isn't installed — skip its shim
-  // rather than writing one that points at nothing (which fails at extension load).
-  const shim = (name, target) => {
-    if (!target || !fs.existsSync(target)) return;
-    fs.writeFileSync(path.join(EXT_DIR, `${name}.ts`), `export { default } from ${JSON.stringify(pathToFileURL(target).href)};\n`);
-  };
-
-  shim("privateer-brand", ext("privateer-brand.ts"));       // banner, ⚓ badge, /signin /signout
-  shim("privateer-context", ext("privateer-context.ts"));   // PRIVATEER.md context + /init
-  shim("privateer-gate", ext("privateer-gate.ts"));         // the permission gate (moat)
-  shim("privateer-account", ext("privateer-account.ts"));
-  shim("privateer-models", ext("privateer-models.ts"));     // /models picker w/ privacy shields
-  shim("privateer-posture", ext("privateer-posture.ts"));
-  shim("privateer-tools", ext("privateer-tools.ts"));
-  shim("privateer-privacy", ext("privateer-privacy.ts"));   // pi-privacy + account tier resolver
-  shim("privateer-connect", ext("privateer-connect.ts"));   // /connect — MCP connector manager
-  shim("rpiv-web-tools", dep("@juicesharp/rpiv-web-tools", "index.ts")); // private web tools
-  shim("rpiv-ask-user-question", dep("@juicesharp/rpiv-ask-user-question", "index.ts")); // ask_user_question
-  shim("pi-mcp-adapter", dep("pi-mcp-adapter", "index.ts"));
-  shim("pi-hypa", dep("@hypabolic/pi-hypa", "extensions", "index.ts"));
-  shim("pi-subagents", dep("pi-subagents", "src", "extension", "index.ts"));
+  const MOAT_PATHS = MANIFEST.shims
+    .map((s) => (s.entry ? path.join(REPO, s.entry) : dep(...s.dep)))
+    .filter((p) => p && fs.existsSync(p));
+  const extArgs = MOAT_PATHS.flatMap((p) => ["-e", p]);
 
   // Unlike the tool packs above, Pi's CLI is not optional — it IS the agent. If it
   // didn't resolve, the install is broken; say so instead of spawning `undefined`.
@@ -206,10 +229,18 @@ else {
     process.exit(1);
   }
   process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
-  // The binary pi-subagents spawns for each child. Point it at OUR cli.js so the child
-  // reads this same PI_CODING_AGENT_DIR and DISCOVERS the moat shims (gated + private,
-  // no -e injection). Set only when unset so a power user can override.
-  if (!process.env.PI_SUBAGENT_PI_BINARY) process.env.PI_SUBAGENT_PI_BINARY = CLI;
+  // The binary pi-subagents spawns for each child, and the moat that child must load.
+  //
+  // ⚠️ SECURITY-LOAD-BEARING. A child used to inherit the moat by DISCOVERING the shims
+  // from the shared agent dir — so pointing PI_SUBAGENT_PI_BINARY straight at cli.js was
+  // enough. With the shims gone there is nothing to discover, and a child spawned that way
+  // would run COMPLETELY UNGATED. So route children through our wrapper, which injects the
+  // moat explicitly, and hand it the exact set this TUI is loading: a child gets its
+  // parent's moat, not a hardcoded subset that drifts from it.
+  if (!process.env.PI_SUBAGENT_PI_BINARY) {
+    process.env.PI_SUBAGENT_PI_BINARY = path.join(REPO, "bin", "privateer-subagent.mjs");
+  }
+  process.env.PRIVATEER_CHILD_EXTENSIONS = MOAT_PATHS.join(path.delimiter);
   // Suppress Pi's upstream update banner (our banner is the startup surface). Disables
   // ONLY the version fetch — fd/rg can still download on first run.
   if (!process.env.PI_SKIP_VERSION_CHECK) process.env.PI_SKIP_VERSION_CHECK = "1";
@@ -247,11 +278,13 @@ else {
   // Privateer and points at /login.
   const CRED = path.join(PRIVATEER_HOME, "credentials.json");
   const signedIn = fs.existsSync(CRED);
-  const ACCOUNT_MODEL = "privateer/tinfoil/glm-5-2";
+  // Mirrors TINFOIL_MODEL_ID in src/providers/defaultModel.ts — keep them in step; that
+  // file carries the measurements behind the choice.
+  const ACCOUNT_MODEL = "privateer/tinfoil/kimi-k2-6";
   const MODEL = process.env.PRIVATEER_MODEL
     ? process.env.PRIVATEER_MODEL
     : haveTinfoilKey()
-      ? "tinfoil/glm-5-2"
+      ? "tinfoil/kimi-k2-6"
       : signedIn
         ? ACCOUNT_MODEL
         : haveKey("ANTHROPIC_API_KEY")
@@ -282,7 +315,7 @@ else {
 
   // Dev convenience: load provider keys from the repo's .env if present.
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
-  runToCompletion(NODE_BIN, [...nodeArgs, CLI, "--model", MODEL, ...skillArgs, ...args]);
+  runToCompletion(NODE_BIN, [...nodeArgs, CLI, "--model", MODEL, ...extArgs, ...skillArgs, ...args]);
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -346,11 +379,27 @@ function findWindowsBash() {
 // tell the user why in a way they can act on. "current"/"applied"/"skipped" are silent.
 function ensurePatches() {
   if (applyPatchesIfNeeded(REPO, NODE_BIN) !== "failed") return;
+
+  // Most of the patch set is UX polish that degrades to stock Pi. The project config
+  // dir is NOT: without the patch, `<cwd>/.privateer/` is a directory Pi has never
+  // heard of, so a project's settings, packages, skills and extensions are ignored
+  // outright. Say so — and say it louder when the current project actually has one,
+  // because that user is about to run with a config they believe is loaded.
+  const projectDirIgnored = fs.existsSync(path.join(process.cwd(), ".privateer"));
   process.stderr.write(
     [
       "",
       "  ⚓ Couldn't apply Privateer's bundled patches to node_modules — continuing without them.",
-      "     Two upstream fixes (retry-loop guard, /model → /models redirect) stay off.",
+      "     Upstream fixes (retry-loop guard, /model → /models redirect) stay off, and this",
+      "     project's `.privateer/` config directory is NOT read — only `.pi/` is.",
+      ...(projectDirIgnored
+        ? [
+            "",
+            `     THIS PROJECT HAS ONE: ${path.join(process.cwd(), ".privateer")}`,
+            "     Its settings, packages, skills and extensions are being ignored right now.",
+          ]
+        : []),
+      "",
       `     Usually a permissions issue: ${path.join(REPO, "node_modules")} isn't writable`,
       "     by this user (a `sudo npm install -g` install). Re-run once with sudo, or",
       "     install without sudo (nvm, or an npm prefix you own) to fix it for good.",

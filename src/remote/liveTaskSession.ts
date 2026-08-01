@@ -18,19 +18,13 @@ import {
 import { agentDir } from "../config/paths.ts";
 import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
-import { makePermissionGate, isRemoteUnsafeTool, type GateController } from "../ext/permissionGate.ts";
-import { makePiPrivacyExtension } from "pi-privacy";
-import {
-  makeAccountProvider,
-  privateerChannel,
-  rememberAccountCredential,
-  dropPersistedAccountCredential,
-} from "../providers/account.ts";
+import { isRemoteUnsafeTool, type GateController } from "../ext/permissionGate.ts";
+import { moatResourceOptions } from "../config/moat.ts";
+import { rememberAccountCredential, dropPersistedAccountCredential } from "../providers/account.ts";
 import { RelayClient, type TaskSpec } from "./relayClient.ts";
 import { RemoteBridge } from "./remoteBridge.ts";
-import { makeRelayFileTools } from "../tools/relayFileTools.ts";
 import { AttachmentStore, type StoredAttachment } from "../util/attachmentStore.ts";
-import { spawnAccountCredentials, revokeAccountSession, hasCredentials } from "../auth/privateer.ts";
+import { spawnAccountCredentials, revokeAccountSession } from "../auth/privateer.ts";
 import { createUIContext } from "../ext/headlessUi.ts";
 import { noQuarterActive } from "../permissions/noQuarter.ts";
 
@@ -207,24 +201,21 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     onRemoteBlocked: (toolName) => bridge.sendNotice(`${toolName} is disabled while driving remotely — its prompts can't reach the app.`),
   };
 
+  // relayFiles binds send_file_to_client / save_attachment to THIS session's bridge — the
+  // one whose relay the app is attached to. The shipped gate extension is discovered into
+  // this session too but stands its own pair down inside the daemon, so these are the ones
+  // the model gets (see tools/relayFileTools.ts). Media generation is on for a live spawn:
+  // it is driven from the app, so "make me a video of X" is one of the things it is FOR —
+  // and the gate still routes each call to the phone for approval like any other write.
   const services = await createAgentSessionServices({
     cwd,
     agentDir: agentDir(),
     resourceLoaderOptions: {
-      extensionFactories: [
-        makePermissionGate(gate),
-        // Per-model verified-TEE label for the /models picker (see harbor/index.ts):
-        // TEE-channel Privateer models verify on select when logged in; ZDR stays floored.
-        makePiPrivacyExtension({
-          privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
-        }),
-        makeAccountProvider(),
-        // send_file_to_client / save_attachment bound to THIS session's bridge — the one
-        // whose relay the app is attached to. The shipped gate extension is discovered
-        // into this session too but stands its own pair down inside the daemon, so these
-        // are the ones the model gets (see tools/relayFileTools.ts).
-        makeRelayFileTools(bridge, attachments),
-      ] as any,
+      ...((await moatResourceOptions({
+        kind: "live-task",
+        gate,
+        relayFiles: { bridge, attachments },
+      })) as any),
     },
   });
   servicesRef = services as any;

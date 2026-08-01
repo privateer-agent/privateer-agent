@@ -29,8 +29,9 @@ async function main() {
     SessionManager,
   } = await import("@earendil-works/pi-coding-agent");
   const { createEngineEventAdapter } = await import("../bridge/engineAdapter.ts");
-  const { makePermissionGate, isRemoteUnsafeTool } = await import("../ext/permissionGate.ts");
-  const { makePiPrivacyExtension, verifyModelPosture, TIERS } = await import("pi-privacy");
+  const { isRemoteUnsafeTool } = await import("../ext/permissionGate.ts");
+  const { moatResourceOptions } = await import("../config/moat.ts");
+  const { verifyModelPosture, TIERS } = await import("pi-privacy");
   const { agentDir } = await import("../config/paths.ts");
   const { RemoteBridge } = await import("../remote/remoteBridge.ts");
   const { startParentApprovalRelay } = await import("../remote/subagentRelay.ts");
@@ -41,14 +42,14 @@ async function main() {
   const { resolveMentions, completeMention, searchFiles } = await import("../util/fileMentions.ts");
   const priv = await import("../auth/privateer.ts");
   const {
-    makeAccountProvider,
     accountPosture,
-    privateerChannel,
     rememberAccountCredential,
     dropPersistedAccountCredential,
   } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
   const { resolveDefaultModel, resolveSignedInModel } = await import("../providers/defaultModel.ts");
+  const { postOutbox } = await import("../outbox/cloudOutbox.ts");
+  const { addPendingCloud } = await import("../routines/store.ts");
 
   // resolveDefaultModel() already honours PRIVATEER_MODEL first, then the account
   // default when signed in, then a BYO key — one source of truth (defaultModel.ts).
@@ -170,6 +171,12 @@ async function main() {
       relay?.sendCommands(availableCommands());
     },
     onStatus: (t) => console.log(`\n${DIM}⟿ ${t}${RESET}`),
+    // The driver asked for something, then closed the app (or lost the network) before
+    // the answer came back. The relay dropped every frame of it, so seal the reply to
+    // the account outbox instead: it lands in the app's Inbox on next open, sealed to
+    // a key this terminal can't read back. Same durability contract as a routine's
+    // `cloud` delivery — including the on-disk queue when the post can't go out now.
+    onUnwatchedResult: ({ prompt, content }) => void deliverUnwatchedTurn(prompt, content),
     // The app composer is autocompleting an `@file` mention — list the cwd entries
     // matching the query and reply. Read-only + cwd-constrained (searchFiles never
     // escapes the subtree); resolution of the picked path happens on the prompt turn.
@@ -275,6 +282,43 @@ async function main() {
   // Serialize turns so a remote prompt and a locally-typed one can't overlap.
   // `echo` prints the "⟿ [app] …" line; the caller suppresses it when it already
   // echoed (a fall-through command from onCommand).
+  // Deliver a finished but UNWATCHED driven turn to the account's Inbox.
+  //
+  // The app drove this turn and then went away — closed, killed, backgrounded past the
+  // relay's heartbeat. Everything the agent streamed up was dropped by the server (it
+  // forwards only to an attached controller), so without this the work is simply gone:
+  // the person comes back to a feed that ends at their own question. Sealing it to the
+  // outbox is the same store-and-forward path a routine's `cloud` delivery uses — the
+  // server holds ciphertext it cannot open, the app decrypts on next open, and the item
+  // is deleted server-side once acked.
+  //
+  // `task` rather than `routine`: this was a one-shot the user asked for, which is what
+  // that kind means in the app's Inbox filter.
+  //
+  // Never throws — a failed delivery falls back to the same on-disk queue the harbor
+  // flushes, and a failure to do even that must not take down the REPL.
+  async function deliverUnwatchedTurn(prompt: string, content: string): Promise<void> {
+    // Title the item by what was ASKED, not by what came back: it's what the person
+    // will recognise in a list, and the first line of an answer is often "Sure —".
+    const asked = prompt.replace(/\s+/g, " ").trim();
+    const title = asked ? (asked.length > 60 ? asked.slice(0, 57) + "…" : asked) : "Remote session";
+    const at = new Date().toISOString();
+    const body = `**${asked || "(no prompt)"}**\n\n${content}`;
+    try {
+      if (await postOutbox(title, at, "ok", body, "task")) {
+        console.log(`\n${DIM}⟿ app closed mid-turn — result sent to your Inbox.${RESET}`);
+        return;
+      }
+      // Couldn't seal/post right now (offline, no verified outbox key yet, server down).
+      // Queue it: the harbor flushes this file on its next connect, so the result is
+      // still headed for the Inbox rather than lost.
+      addPendingCloud({ routine: title, at, status: "ok", content: body, kind: "task" });
+      console.log(`\n${DIM}⟿ app closed mid-turn — result queued for your Inbox.${RESET}`);
+    } catch {
+      /* best effort: an undeliverable result must never break the session */
+    }
+  }
+
   async function runTurn(text: string, remote: boolean, echo = true): Promise<void> {
     if (turnActive) {
       console.log(`\n${DIM}(busy — a turn is already running)${RESET}`);
@@ -369,16 +413,11 @@ async function main() {
     cwd,
     agentDir: agentDir(),
     resourceLoaderOptions: {
-      // Structural ext types are intentionally narrow; cast to Pi's ExtensionFactory.
-      extensionFactories: [
-        makePermissionGate(gate),
-        // Per-model verified-TEE label for the /models picker (see harbor/index.ts):
-        // TEE-channel Privateer models verify on select when logged in; ZDR stays floored.
-        makePiPrivacyExtension({
-          privateerVerifiedTee: (m) => priv.hasCredentials() && privateerChannel(m.id ?? "") === "tee",
-        }),
-        makeAccountProvider(),
-      ] as any,
+      // The REPL builds its session from an explicit factory list rather than the
+      // launcher's shim directory, so config/moat.ts is the only way it gets the gate,
+      // the account provider, or media at all. Structural ext types are intentionally
+      // narrow; cast to Pi's ExtensionFactory.
+      ...((await moatResourceOptions({ kind: "repl", gate })) as any),
     },
   });
   for (const d of services.diagnostics) if (d.type === "error") console.log(`${RED}! ${d.message}${RESET}`);

@@ -10,6 +10,7 @@ import {
   ACCOUNT_DEFAULT_SPEC,
   LEGACY_BYO_FALLBACK,
   TINFOIL_DEFAULT_SPEC,
+  TINFOIL_MODEL_ID,
   ensurePiDefaultModel,
   resolveDefaultModel,
   resolveSignedInModel,
@@ -78,10 +79,12 @@ test("resolveDefaultModel: a Tinfoil key means direct (client-attested) Tinfoil"
   );
 });
 
-test("the default is Tinfoil's most capable model, however it's reached", () => {
+test("the default is one Tinfoil model, however it's reached", () => {
   // Same model both ways — direct with a key, over the subscription without one.
-  assert.equal(TINFOIL_DEFAULT_SPEC, "tinfoil/glm-5-2");
-  assert.equal(ACCOUNT_DEFAULT_SPEC, "privateer/tinfoil/glm-5-2");
+  // Pinned to the literal on purpose: moving the default is a deliberate, measured
+  // decision (see TINFOIL_MODEL_ID), not something a refactor should do quietly.
+  assert.equal(TINFOIL_DEFAULT_SPEC, "tinfoil/kimi-k2-6");
+  assert.equal(ACCOUNT_DEFAULT_SPEC, "privateer/tinfoil/kimi-k2-6");
 });
 
 test("resolveSignedInModel: Tinfoil when keyed, else the account channel", () => {
@@ -95,7 +98,7 @@ test("ensurePiDefaultModel: seeds provider+model when settings.json has no defau
   assert.equal(written, ACCOUNT_DEFAULT_SPEC);
   const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
   assert.equal(settings.defaultProvider, "privateer");
-  assert.equal(settings.defaultModel, "tinfoil/glm-5-2");
+  assert.equal(settings.defaultModel, TINFOIL_MODEL_ID);
 });
 
 test("ensurePiDefaultModel: never stomps an existing user default", () => {

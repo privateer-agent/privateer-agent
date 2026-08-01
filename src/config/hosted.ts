@@ -39,6 +39,31 @@ export function webEnabled(): boolean {
 }
 
 /**
+ * Is this agent allowed to GENERATE media (images, video, speech, music)?
+ *
+ * Same shape as webEnabled, and for the same reason: every media call is served by the
+ * account API, so credentials are a hard prerequisite. `HARBOR_MEDIA` is authoritative
+ * when set; unset defaults to on once signed in.
+ *
+ * It is a separate switch from web access because it buys a different thing and costs a
+ * different thing. Generation spends real credit — cents for an image, up to a dollar
+ * for a video clip — where a search costs a fraction of one, and the prompt (plus any
+ * input image) leaves the enclave for a model provider rather than for a search index.
+ * A hosted agent that should read the news is not automatically one that should be able
+ * to bill the account for a minute of video.
+ *
+ * Note this gates GENERATION only. `video_compose` is local ffmpeg work on files
+ * already on disk — no account, no network, no spend — and stays available regardless,
+ * so an agent can still finish assembling media a previous run produced.
+ */
+export function mediaEnabled(): boolean {
+  const flag = process.env.HARBOR_MEDIA;
+  if (flag === "1") return hasCredentials();
+  if (flag === "0") return false;
+  return hasCredentials();
+}
+
+/**
  * Publish this harbor's relay identity key so the Harbor host can attest it.
  *
  * ATTESTATION CONTRACT (host side: treeview `server/services/harborOrchestrator/`):

@@ -13,11 +13,9 @@ import {
 import { agentDir, configPath } from "../config/paths.ts";
 import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
-import { makePermissionGate, type GateController } from "../ext/permissionGate.ts";
-import { makePiPrivacyExtension } from "pi-privacy";
+import { type GateController } from "../ext/permissionGate.ts";
+import { moatResourceOptions } from "../config/moat.ts";
 import {
-  makeAccountProvider,
-  privateerChannel,
   rememberAccountCredential,
   dropPersistedAccountCredential,
 } from "../providers/account.ts";
@@ -33,10 +31,10 @@ import type { Workflow, Step } from "../workflows/schema.ts";
 import { readRunningPlatforms } from "../channels/status.ts";
 import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
 import { openJsonFromApp } from "../crypto/terminalUnseal.ts";
-import { verifyChannelSave, verifyOutboxKey } from "../crypto/accountVerify.ts";
+import { verifyChannelSave } from "../crypto/accountVerify.ts";
 import { loadAccountSignKey, loadLastControlTs, saveLastControlTs } from "../crypto/accountTrust.ts";
 import { authorizeControl } from "../remote/controlAuth.ts";
-import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, acquireAccountCredential, handleServerRevoke, defaultDeviceLabel } from "../auth/privateer.ts";
+import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, acquireAccountCredential, handleServerRevoke } from "../auth/privateer.ts";
 import {
   loadRoutines,
   upsertRoutine,
@@ -56,14 +54,14 @@ import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigg
 import { splitRoutineTools } from "../routines/toolSelect.ts";
 import { resolveMcpSelection, readMcpInventory, type ResolvedMcpTools } from "../mcp/toolNames.ts";
 import { deliver, type RelayPusher, type CloudPusher } from "../routines/delivery.ts";
-import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
+import { postOutbox as sealToOutbox } from "../outbox/cloudOutbox.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
 import { serializeBuild } from "./buildLock.ts";
-import { isHosted, publishRelayPub, webEnabled } from "../config/hosted.ts";
-import { markHarborDaemon } from "../config/harborDaemon.ts";
-import { markInlineMoat } from "../config/inlineMoat.ts";
-import { makeWebTools, WEB_TOOL_NAMES } from "../tools/web.ts";
+import { isHosted, publishRelayPub, webEnabled, mediaEnabled } from "../config/hosted.ts";
+import { WEB_TOOL_NAMES } from "../tools/web.ts";
+import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
+import { COMPOSE_TOOL_NAMES } from "../tools/videoCompose.ts";
 
 // The safe, read-only toolset for unattended runs — Pi builtins with no
 // write/edit/bash, so a routine firing with nobody watching can't mutate the
@@ -79,15 +77,36 @@ const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 // the user hand-write an allow-list for it was the whole friction.
 const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES];
 
-// Resolve a run's builtin allow-list. An explicit list wins, minus any web tools when
-// web access is off — a routine saved while it was on must not silently reference a
-// tool that no longer registers.
+// Media generation (src/tools/media.ts) plus local composition (videoCompose.ts).
+//
+// Unlike the web tools these are deliberately NOT in the default allow-list, even with
+// the switch on. Generation writes files and spends real credit — cents an image, up to
+// a dollar a video clip — so an unattended routine gets them only by NAMING them, which
+// makes "this routine can bill me for video" a decision someone made rather than a
+// default they inherited. `media_capabilities` is free and read-only but stays with its
+// siblings: on its own it would be a tool that only ever reports what the run can't do.
+// Composition (video_compose) is deliberately NOT in this list: it is local ffmpeg work
+// with no account, no network and no spend, so it stays grantable even with generation
+// switched off — finishing the clips a previous run produced is exactly when that
+// matters. See MEDIA_ALL for what actually gets registered.
+const MEDIA_GEN_TOOLS: string[] = [...MEDIA_TOOL_NAMES];
+const MEDIA_ALL: string[] = [...MEDIA_TOOL_NAMES, ...COMPOSE_TOOL_NAMES];
+
+// Resolve a run's builtin allow-list. An explicit list wins, minus any web or media
+// tools whose switch is off — a routine saved while one was on must not silently
+// reference a tool that no longer registers.
 function builtinToolsFor(explicit: string[]): string[] {
   const web = webEnabled();
+  const media = mediaEnabled();
   if (explicit.length > 0) {
-    return web ? explicit : explicit.filter((t) => !WEB_TOOLS.includes(t));
+    return explicit.filter((t) => (web || !WEB_TOOLS.includes(t)) && (media || !MEDIA_GEN_TOOLS.includes(t)));
   }
   return web ? [...SAFE_TOOLS, ...WEB_TOOLS] : [...SAFE_TOOLS];
+}
+
+/** Every media tool name a routine may name, for the app's tool picker / docs. */
+export function mediaToolNames(): string[] {
+  return mediaEnabled() ? [...MEDIA_ALL] : [...COMPOSE_TOOL_NAMES];
 }
 
 const TICK_MS = 60_000; // scan for due routines once a minute
@@ -95,7 +114,6 @@ const TICK_MS = 60_000; // scan for due routines once a minute
 // and stay up if a routine is due within the lead window (avoids suspend→wake churn).
 const HOSTED_IDLE_MS = Number(process.env.HARBOR_IDLE_MS) || 5 * 60_000;
 const HOSTED_SUSPEND_MIN_LEAD_MS = Number(process.env.HARBOR_SUSPEND_MIN_LEAD_MS) || 2 * 60_000;
-const MAX_CLOUD_PLAINTEXT = 45_000;
 // How long a workflow `human_gate` (or a script-approval prompt) waits for the app to
 // answer before it fail-closes to "no response" (the runner then defers the run). Bounds
 // a stuck graph from pinning a `running` slot forever when the controller wanders off.
@@ -266,8 +284,6 @@ export class Harbor {
     return "queued";
   };
 
-  private outboxPub?: Uint8Array;
-
   private readonly pushCloud: CloudPusher = async (routine, content, status) => {
     const at = new Date().toISOString();
     if (await this.postOutbox(routine.name, at, status, content)) return "sent";
@@ -276,16 +292,6 @@ export class Harbor {
   };
 
   async start(): Promise<void> {
-    // Mark the process before anything can create a session: the shipped TUI extensions
-    // are auto-discovered from the shared agent dir into every session we run, and the
-    // gate one has to stand its relay file tools down here so a live task's own pair
-    // (bound to that task's live relay) isn't shadowed. See config/harborDaemon.ts.
-    markHarborDaemon();
-    // Same reason, one step further: every session this process builds (routines,
-    // workflows, submitted tasks, live spawns) wires its own makePermissionGate, so
-    // the discovered gate must not install a second one on top of it. See
-    // config/inlineMoat.ts for what that collision costs.
-    markInlineMoat();
     // Single-instance lock FIRST, before any other side effect: binding the IPC
     // socket is the machine's mutex. If a live harbor already holds it this throws
     // HarborAlreadyRunningError — two harbors under one ~/.privateer share a single
@@ -566,55 +572,13 @@ export class Harbor {
   }
 
   // ── Cloud outbox (sealed store-and-forward) ────────────────────────────────
-
-  private async ensureOutboxPub(): Promise<Uint8Array | undefined> {
-    if (this.outboxPub) return this.outboxPub;
-    try {
-      const res = await apiRequest("/api/outbox/pubkey");
-      if (!res.ok) return undefined;
-      const data = (await res.json()) as { outboxPublicKey?: string | null; outboxPublicKeySig?: string | null };
-      if (!data.outboxPublicKey || !data.outboxPublicKeySig) return undefined;
-      // The key comes from the UNTRUSTED server. Verify the account's signature over it
-      // against the account signing key we pinned at link — otherwise a malicious server
-      // could substitute a key it controls and read every result we seal. Fail closed
-      // (no pin, missing sig, or bad sig ⇒ don't seal): the `cloud` channel then falls
-      // back to a local notice, so the result is deferred/kept, never leaked.
-      const accountPub = loadAccountSignKey();
-      if (!accountPub) return undefined;
-      if (!verifyOutboxKey(accountPub, data.outboxPublicKey, data.outboxPublicKeySig)) return undefined;
-      this.outboxPub = decodeAccountPublicKey(data.outboxPublicKey);
-      return this.outboxPub;
-    } catch {
-      return undefined;
-    }
-  }
-
-  // This machine's origin tag, embedded (E2EE) in every sealed result so the app can
-  // show WHICH box/environment produced it — the outbox record itself is account-only,
-  // so attribution can only live inside the sealed blob (where hostnames are allowed;
-  // the server never sees it). `id` is this install's stable relay id; `label` is the
-  // hostname-based device name. Cached — it never changes for the process lifetime.
-  private originCache?: { id: string; label: string };
-  private machineOrigin(): { id: string; label: string } {
-    if (!this.originCache) this.originCache = { id: routineRelayId(), label: defaultDeviceLabel() };
-    return this.originCache;
-  }
+  // The sealing itself now lives in ../outbox/cloudOutbox.ts — an interactive
+  // remote-drive session needs the same path when the app isn't there to receive a
+  // finished turn, and two copies of an E2EE wire format is one too many. Same
+  // caches, same fail-closed key verification; this is just the harbor's caller.
 
   private async postOutbox(name: string, at: string, status: "ok" | "error", content: string, kind: OutboxKind = "routine"): Promise<boolean> {
-    const pub = await this.ensureOutboxPub();
-    if (!pub) return false;
-    const body = content.length > MAX_CLOUD_PLAINTEXT ? content.slice(0, MAX_CLOUD_PLAINTEXT) + "\n…truncated" : content;
-    const sealed = sealJson(pub, { v: 1, kind, name, status, at, content: body, origin: this.machineOrigin() });
-    try {
-      const res = await apiRequest("/api/outbox", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sealed }),
-      });
-      return res.ok;
-    } catch {
-      return false;
-    }
+    return sealToOutbox(name, at, status, content, kind);
   }
 
   private async flushPendingCloud(): Promise<void> {
@@ -790,50 +754,22 @@ export class Harbor {
           return "deny";
         },
       };
-      // MCP adapter (Phase 5): registers the tools from the shared agent/mcp.json — the
-      // same projection the app's MCP manager (mcpControl) writes over the relay. No
-      // servers configured → a no-op. Dynamically imported so it loads only when a
-      // session actually runs (Pi is already booted by here). The specifier is a
-      // variable so tsc treats it as Promise<any> and doesn't pull the third-party
-      // adapter's own .ts into our typecheck — same intent as the desktop's agentImport.
-      const mcpAdapterSpec = "pi-mcp-adapter";
-      const { default: mcpAdapter } = await import(mcpAdapterSpec);
+      // Every extension this session gets, in the one canonical order — including the MCP
+      // adapter (Phase 5), the web/media capability shaping, and the filter that ignores
+      // any moat shim an older release left in the shared agent dir (releases up to 0.11
+      // installed one per extension; the launcher sweeps them, but a daemon can outlive
+      // the launch that would have). See config/moat.ts.
+      const moat = await moatResourceOptions({ kind: "harbor-session", gate });
+      // MCP_DIRECT_TOOLS is read by the adapter when its factory RUNS, inside
+      // createAgentSessionServices — so it has to wrap the session creation, not the
+      // moatResourceOptions() call that imported it.
       const prevDirect = process.env.MCP_DIRECT_TOOLS;
       process.env.MCP_DIRECT_TOOLS = directTools.length > 0 ? directTools.join(",") : "__none__";
       try {
         return await createAgentSessionServices({
           cwd,
           agentDir: agentDir(),
-          resourceLoaderOptions: {
-            extensionFactories: [
-              makePermissionGate(gate),
-              // Per-model verified-TEE capability for pi-privacy's /models picker: show
-              // Privateer's TEE-channel models (near/tinfoil/phala) as "◆ Verifiable TEE"
-              // when logged in; ZDR-channel models stay at their honest floor. The live
-              // verdict still comes from accountPosture on select — this only lifts the label.
-              //
-              // ORDER MATTERS: pi-privacy's own catalog registers a `privateer`
-              // provider (its PUBLIC developer-key channel, one seed model), and Pi's
-              // registerProvider REPLACES a provider's models and request config. It
-              // must stay ABOVE makeAccountProvider() so the ACCOUNT channel lands last
-              // — otherwise the default model stops resolving and requests go to
-              // api.privateer.pro/v1 instead of /api/agent/v1. (The TUI hits this
-              // through extension discovery, where the order isn't ours to choose;
-              // extensions/privateer-privacy.ts re-asserts the account registration
-              // there. See registerAccountModels.)
-              makePiPrivacyExtension({
-                privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
-              }),
-              makeAccountProvider(),
-              // Web access (src/tools/web.ts), when the agent is allowed it. Registered
-              // here rather than picked up from extensions/ because the harbor never
-              // installs the launcher's shims. Omitting the factory — not just dropping
-              // the names from the allow-list — is what makes "web off" mean the tools
-              // don't exist for this run at all.
-              ...(webEnabled() ? [makeWebTools()] : []),
-              mcpAdapter,
-            ] as any,
-          },
+          resourceLoaderOptions: moat as any,
         });
       } finally {
         if (prevDirect === undefined) delete process.env.MCP_DIRECT_TOOLS;

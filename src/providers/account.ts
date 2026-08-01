@@ -37,7 +37,7 @@ import {
 
 // Seed/fallback catalog: registered synchronously so the account provider has real
 // models the instant it loads (before the live /api/models fetch resolves) — in
-// particular the default, tinfoil/glm-5-2, resolves at startup without a "model not
+// particular ACCOUNT_DEFAULT_MODEL_ID resolves at startup without a "model not
 // found" warning, which matters more than ever now that a signed-OUT terminal also
 // launches on it. The first two entries are the TEE tiers (Tinfoil, then NEAR); the
 // rest are the familiar names. Also the fallback list if the live listing is
@@ -46,6 +46,11 @@ import {
 const DEFAULT_MODELS = [
   ACCOUNT_DEFAULT_MODEL_ID,
   ACCOUNT_NEAR_MODEL_ID,
+  // The default until 2026-08-01 (see TINFOIL_MODEL_ID). It stays in the floor so a
+  // user who saved it as their own default still resolves it synchronously at launch,
+  // rather than falling through to "first model with configured auth" — the BYO dead
+  // end this seed list exists to prevent.
+  "tinfoil/glm-5-2",
   "anthropic/claude-opus-5",
   "anthropic/claude-sonnet-5",
   "openai/gpt-5.6-sol",
@@ -56,12 +61,91 @@ function seedModel(id: string) {
   return {
     id,
     name: id,
-    reasoning: false,
+    // reasoning + how to steer it, for the enclave models where we verified the
+    // control shape live; `reasoning: false` (Pi's "not a thinking model") for the rest.
+    ...(thinkingProfile(id) ?? { reasoning: false as const }),
     input: ["text"] as ("text" | "image")[],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
     maxTokens: 16384,
   };
+}
+
+// ── Thinking control ─────────────────────────────────────────────────────────
+//
+// Every account model used to register with `reasoning: false`, and that one field
+// silently pinned the whole catalog to maximum thinking. Pi gates EVERY
+// thinking-control branch on `model.reasoning` (pi-ai api/openai-completions.js
+// buildParams) and AgentSession.cycleThinkingLevel() returns undefined without it. So
+// Privateer sent no thinking parameter at all — a thinking model ran at whatever its
+// server-side default was, forever — and the user's thinking toggle was inert.
+//
+// What that cost, measured live against the account channel on 2026-08-01 with
+// "Write a haiku about the sea": the default model emitted 77 reasoning deltas and
+// ZERO content, spending all 300 tokens thinking. The same prompt with thinking off
+// answered in 18 tokens / 1.8s.
+//
+// Annotating a model is a promise that the dial actually moves, so ONLY shapes
+// verified against the live enclave appear below. Pi's default level is "medium", so
+// nothing here turns thinking off behind the user's back — it makes the toggle real.
+interface ThinkingProfile {
+  reasoning: true;
+  thinkingLevelMap?: Record<string, string | null>;
+  compat?: { thinkingFormat: string };
+}
+
+// The vLLM chat-template family (GLM, Qwen). Honours
+// `chat_template_kwargs.enable_thinking`, which is exactly what Pi's
+// "qwen-chat-template" format emits. Verified — enable_thinking=false → 0 reasoning
+// deltas and a direct answer, true → thinking restored, neither errors — on
+// tinfoil/glm-5-2, near/zai-org/GLM-5.1-FP8, near/Qwen/Qwen3.6-35B-A3B-FP8 and
+// phala/z-ai/glm-5.2.
+//
+// The switch is binary (there is no effort dial), so publish exactly two levels
+// instead of five that all mean "on": a null in thinkingLevelMap marks a level
+// unsupported and pi-ai's getSupportedThinkingLevels drops it.
+const CHAT_TEMPLATE_THINKING: ThinkingProfile = {
+  reasoning: true,
+  thinkingLevelMap: { minimal: null, low: null, high: null, xhigh: null },
+  compat: { thinkingFormat: "qwen-chat-template" },
+};
+
+// gpt-oss (harmony) is the other way round: it IGNORES chat_template_kwargs and
+// honours `reasoning_effort` — which is Pi's default format for our baseUrl, so this
+// profile deliberately carries no compat override. Verified on tinfoil/gpt-oss-120b:
+// low → 9 reasoning deltas, high → 61.
+//
+// Harmony has no "none", so "off" is pinned to the floor rather than left unset —
+// unset would send nothing and let the model fall back to its own default (medium),
+// i.e. an "off" that thinks harder than "low". This is the toggle's lowest setting,
+// not silence.
+const REASONING_EFFORT_THINKING: ThinkingProfile = {
+  reasoning: true,
+  thinkingLevelMap: { off: "low", minimal: "low", xhigh: null },
+};
+
+// Only the TEE prefixes are annotated. Those are enclaves we drive directly and can
+// probe. The rest of the catalog is proxied to a third-party gateway whose thinking
+// shape we have NOT verified from here, and an unsupported parameter fails the whole
+// turn — decisively worse than a turn that thinks too much. They keep the old
+// behaviour exactly.
+//
+// Two deliberate omissions inside the TEE set: `*-instruct` ids are the
+// non-thinking variants, and tinfoil/kimi-k2-6 reasons but ignored BOTH levers when
+// probed, so annotating it would hand the user a dial connected to nothing.
+const TEE_MODEL = /^(tinfoil|phala|near)\//;
+
+export function thinkingProfile(id: string): ThinkingProfile | null {
+  if (!TEE_MODEL.test(id)) return null;
+  if (/instruct/i.test(id)) return null;
+  const profile = /gpt-oss/i.test(id)
+    ? REASONING_EFFORT_THINKING
+    : /glm|qwen/i.test(id)
+      ? CHAT_TEMPLATE_THINKING
+      : null;
+  // Hand out a COPY. These entries end up on hundreds of registered models, and a
+  // shared nested object is one careless mutation away from retuning the whole catalog.
+  return profile && { ...profile, thinkingLevelMap: { ...profile.thinkingLevelMap }, ...(profile.compat ? { compat: { ...profile.compat } } : {}) };
 }
 
 // ── Catalog cache ────────────────────────────────────────────────────────────
@@ -396,7 +480,7 @@ const TEE_PREFIXES = ["near/", "tinfoil/", "phala/"];
 // Which privacy channel an account model routes through: confidential compute (TEE)
 // for the prefixes above, else a server-side ZDR channel. Ported from tree-cli
 // resolve.ts, then widened — it used to say `near/` only, which quietly labelled the
-// default model (tinfoil/glm-5-2, a TEE model) as a mere ZDR policy claim.
+// then-default model (tinfoil/glm-5-2, a TEE model) as a mere ZDR policy claim.
 export function privateerChannel(modelId: string): "tee" | "zdr" {
   return TEE_PREFIXES.some((p) => modelId.startsWith(p)) ? "tee" : "zdr";
 }
@@ -498,7 +582,7 @@ export function accountProviderConfig(ids: string[]): Record<string, unknown> {
 // REPLACES a provider's model list and its request config, so whichever registration
 // lands last wins — and pi extensions are discovered with an unsorted readdirSync, which
 // on a typical box puts privateer-privacy after privateer-account. The account channel's
-// whole catalog was then replaced by that one model, so the default `tinfoil/glm-5-2` no
+// whole catalog was then replaced by that one model, so the account default no
 // longer resolved ("not found for provider privateer. Using custom model id") and the
 // synthesized model inherited the PUBLIC endpoint instead of `/api/agent/v1`.
 //

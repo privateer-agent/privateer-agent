@@ -1,0 +1,26 @@
+{
+  "$comment": "The one list of extensions Privateer ships. Read by bin/privateer-launch.mjs (shim install, dependency-free, pre-patch) and src/config/moatManifest.ts (RESERVED + profile composition). JSON so both a plain .mjs and the TS side can read it without a build step. See moatManifest.ts for the field contract.",
+  "shims": [
+    { "name": "privateer-brand", "entry": "extensions/privateer-brand.ts", "note": "banner, ⚓ badge, /signin /signout" },
+    { "name": "privateer-context", "entry": "extensions/privateer-context.ts", "note": "PRIVATEER.md context + /init" },
+    { "name": "privateer-gate", "entry": "extensions/privateer-gate.ts", "note": "the permission gate (moat)" },
+    { "name": "privateer-account", "entry": "extensions/privateer-account.ts", "note": "account inference provider" },
+    { "name": "privateer-models", "entry": "extensions/privateer-models.ts", "note": "/models picker w/ privacy shields" },
+    { "name": "privateer-posture", "entry": "extensions/privateer-posture.ts", "note": "live attestation shield" },
+    { "name": "privateer-tools", "entry": "extensions/privateer-tools.ts", "note": "Privateer tool pack" },
+    { "name": "privateer-privacy", "entry": "extensions/privateer-privacy.ts", "note": "pi-privacy + account tier resolver" },
+    { "name": "privateer-connect", "entry": "extensions/privateer-connect.ts", "note": "/connect — MCP connector manager" },
+    { "name": "privateer-media", "entry": "extensions/privateer-media.ts", "note": "image/video/speech/music + ffmpeg compose" },
+    { "name": "rpiv-web-tools", "dep": ["@juicesharp/rpiv-web-tools", "index.ts"], "note": "private web tools (user's own provider key)" },
+    { "name": "rpiv-ask-user-question", "dep": ["@juicesharp/rpiv-ask-user-question", "index.ts"], "note": "ask_user_question" },
+    { "name": "pi-mcp-adapter", "dep": ["pi-mcp-adapter", "index.ts"], "note": "MCP servers as first-class tools" },
+    { "name": "pi-hypa", "dep": ["@hypabolic/pi-hypa", "extensions", "index.ts"], "note": "hypa pack" },
+    { "name": "pi-subagents", "dep": ["pi-subagents", "src", "extension", "index.ts"], "note": "bounded parallel sub-agents" }
+  ],
+  "retired": ["pi-privacy", "pi-web-access"],
+  "reservedAliases": [
+    "@juicesharp/rpiv-web-tools",
+    "@juicesharp/rpiv-ask-user-question",
+    "@hypabolic/pi-hypa"
+  ]
+}

@@ -118,6 +118,11 @@ export interface RelayCallbacks {
   onNoQuarter?: (on: boolean) => void;
   // A controller attached — push a transcript snapshot so it can catch up.
   onControllerAttached: () => void;
+  // The last controller went away (app closed / socket reaped). The terminal keeps
+  // running; the owner should stop assuming anything it sends up is being read, and
+  // deliver finished work durably instead (the cloud outbox → the app's Inbox).
+  // Optional so callbacks that predate the frame keep compiling.
+  onControllerDetached?: () => void;
   // The app ran a slash command from its composer (e.g. "/model provider/id").
   // Routed to the same command dispatcher the local REPL uses. Optional so
   // callbacks that predate the app command UI keep compiling.
@@ -353,6 +358,11 @@ export class RelayClient {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private lastInboundAt = 0;
   private connectedAt = 0;
+  // Is somebody actually on the other end? An open socket is NOT the same thing —
+  // the server holds our frames' route open and simply drops what it forwards when
+  // no controller is attached, so without this an unwatched turn writes its answer
+  // into a socket nobody is reading. See hasController() and the `handle` note.
+  private controllerHere = false;
   // Current backoff delay for the next unqualified scheduleReconnect(); reset on 'open'.
   private reconnectDelay = RECONNECT_MS;
   // Last refusal reason reported, so a 4xx is logged once instead of on every retry.
@@ -507,6 +517,9 @@ export class RelayClient {
         this.stopHeartbeat();
         if (this.ws === ws) this.ws = null;
         this.connectedAt = 0;
+        // A dead socket means no controller is reachable, whatever the last
+        // attach/detach frame said. Re-learned on the next attach or inbound frame.
+        this.controllerHere = false;
         this.cb.onDisconnected?.();
         if (!this.closed) {
           this.cb.onStatus?.(
@@ -660,6 +673,12 @@ export class RelayClient {
       return;
     }
     this.debug(`recv ${frame.type}`);
+    // Presence, learned from the traffic itself. The server forwards a frame to us
+    // only when a controller sent it (or when it announces one attaching), so ANY
+    // inbound frame is proof somebody is on the other end — which matters because
+    // `controller_attached` is missed by a terminal whose own socket reconnected
+    // mid-session. Cleared by `controller_detached` and by a dead socket.
+    if (frame.type !== "controller_detached") this.controllerHere = true;
     switch (frame.type) {
       case "prompt":
         // Forward even an empty/whitespace prompt: a file-only send carries no text,
@@ -684,6 +703,16 @@ export class RelayClient {
         break;
       case "controller_attached":
         this.cb.onControllerAttached();
+        break;
+      // The app's socket went away (closed the app, lost the network, backgrounded
+      // long enough for the server's heartbeat to reap it). The relay stays up — the
+      // terminal is still reachable — but anything we send now lands nowhere, so the
+      // owner delivers finished work through the outbox instead. Published only when
+      // the LAST controller left (CAS-guarded server-side), so a take-over doesn't
+      // masquerade as "nobody is watching".
+      case "controller_detached":
+        this.controllerHere = false;
+        this.cb.onControllerDetached?.();
         break;
       case "command":
         if (typeof frame.text === "string") this.cb.onCommand?.(frame.text);
@@ -874,6 +903,16 @@ export class RelayClient {
   // attached" — the server forwards to a controller only when one is present.)
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  // Is the app actually on the other end right now? Requires an open socket AND a
+  // controller known to be attached — learned from `controller_attached`, from any
+  // frame a controller sent us, and un-learned by `controller_detached` or a dropped
+  // socket. Conservative in the useful direction: it only reads true when we have
+  // positive evidence someone is there, so "deliver it durably instead" is the
+  // default for a turn whose audience we can't account for.
+  hasController(): boolean {
+    return this.isConnected() && this.controllerHere;
   }
 
   // Connection health, for `privateer harbor status` / the IPC status reply. `quietSec`

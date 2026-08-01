@@ -16,11 +16,20 @@ import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/modeGate.ts";
 import type { RelayCallbacks } from "./relayClient.ts";
 
+// How much of a driven turn's reply we hold for possible outbox delivery. The
+// sealed item is capped at 45k plaintext anyway; this just stops a pathological
+// turn from growing the buffer without bound.
+const MAX_TURN_CAPTURE = 60_000;
+
 // The outbound surface the bridge needs; RelayClient implements all of it.
 export interface RelayLike {
   requestApproval(id: string, req: PermissionRequest): void;
   sendEvent(ev: EngineEvent): void;
   isConnected(): boolean;
+  // Is a controller actually attached (not merely "our socket is up")? Optional:
+  // a relay that can't tell is treated as attached, so an unknown audience never
+  // turns into a duplicate of something the app already displayed.
+  hasController?(): boolean;
   sendNoQuarter(on: boolean): void;
   sendFile(file: { name: string; mediaType: string; base64: string; size: number }): Promise<{ ok: boolean; reason?: string }>;
   sendNotice(text: string): void;
@@ -99,6 +108,15 @@ export interface RemoteBridgeConfig {
   onFilesSearch?: (id: string, query: string) => void;
   // A controller (re)attached — the owner should push a transcript snapshot.
   onControllerAttached?: () => void;
+  // The last controller went away. Informational for the owner (the bridge already
+  // fails pending approvals closed); a driven turn in flight keeps running.
+  onControllerDetached?: () => void;
+  // A driven turn finished with NOBODY on the other end — the app was closed, killed,
+  // or its socket was reaped while the agent worked. Everything the turn streamed up
+  // was dropped by the relay, so the owner should deliver this durably instead (seal
+  // it to the account outbox → the app's Inbox). Called once per unwatched turn, after
+  // the turn settles; `prompt` is what was asked, `content` the reply as streamed.
+  onUnwatchedResult?: (result: { prompt: string; content: string }) => void;
   onStatus?: (text: string) => void;
   // A file finished transferring down from the app. The owner registers it (e.g. into
   // an AttachmentStore) so the save_attachment tool can persist it.
@@ -113,6 +131,17 @@ export class RemoteBridge {
   private readonly pendingSelects = new Map<string, (v: string | null) => void>();
   private readonly pendingInputs = new Map<string, (v: string | null) => void>();
   private pendingAttachments: RemoteAttachment[] = [];
+  // The driven turn in flight, kept only so it can be delivered to the outbox if it
+  // turns out nobody was watching (see settleTurn). Bounded: the outbox truncates at
+  // 45k anyway, and this must not grow with a runaway turn.
+  //
+  // `turnDriven` is deliberately NOT `remote`: a mid-turn disconnect clears `remote`
+  // (so the gate stops waiting on a controller that's gone) and that is exactly the
+  // case this feature exists for — the turn was still driven by the app, and its
+  // answer still has to reach the account. Only settleTurn clears it.
+  private turnDriven = false;
+  private turnPrompt = "";
+  private turnText = "";
 
   constructor(private readonly cfg: RemoteBridgeConfig) {}
 
@@ -128,6 +157,9 @@ export class RemoteBridge {
   readonly callbacks: Required<RelayCallbacks> = {
     onPrompt: (text) => {
       this.remote = true; // a remote turn is now in flight → gate relays each action
+      this.turnDriven = true;
+      this.turnPrompt = text;
+      this.turnText = "";
       const attachments = this.pendingAttachments;
       this.pendingAttachments = [];
       this.cfg.onPrompt(text, attachments);
@@ -195,6 +227,16 @@ export class RemoteBridge {
       this.relay?.sendNoQuarter(on); // echo the ack back so the app's toggle syncs
     },
     onControllerAttached: () => this.cfg.onControllerAttached?.(),
+    // The app left while we're still running. Same posture as a dropped socket: stop
+    // treating the turn as remote (the gate must not wait on a controller that isn't
+    // there) and fail every pending approval closed. The turn itself keeps going —
+    // and settleTurn will deliver its answer to the outbox, since `turnDriven` (unlike
+    // `remote`) survives the departure.
+    onControllerDetached: () => {
+      this.remote = false;
+      this.rejectAllPending();
+      this.cfg.onControllerDetached?.();
+    },
     onAttachment: (file) => {
       this.pendingAttachments.push(file);
       this.cfg.onAttachment?.(file);
@@ -307,13 +349,36 @@ export class RemoteBridge {
 
   // Mark the end of a turn so the next (possibly local) turn isn't treated as
   // remote. Call after each driven turn completes.
+  //
+  // Also the one moment we can tell whether the turn had an audience. If the app
+  // drove it and is now gone, everything the turn streamed up was dropped by the
+  // relay — so hand the answer to the owner for durable delivery rather than letting
+  // a completed piece of work evaporate because someone closed their phone.
   settleTurn(): void {
+    const driven = this.turnDriven;
+    const prompt = this.turnPrompt;
+    const content = this.turnText.trim();
     this.remote = false;
+    this.turnDriven = false;
+    this.turnPrompt = "";
+    this.turnText = "";
+    if (!driven || !content) return;
+    // Unknown (a relay that can't report presence) counts as watched: better to skip
+    // delivery than to duplicate something the app already showed in its feed.
+    const watched = this.relay?.hasController ? this.relay.hasController() : !!this.relay?.isConnected();
+    if (watched) return;
+    this.cfg.onUnwatchedResult?.({ prompt, content });
   }
 
   // Forward an EngineEvent up to the app. Safe to call for every event of every
   // turn (local included) — the relay only sends when a socket is open.
   forwardEvent(ev: EngineEvent): void {
+    // Keep the driven turn's reply as it streams, in case settleTurn finds nobody
+    // was there to read it. Text only: the outbox item is the answer, not a
+    // transcript of every tool call.
+    if (this.turnDriven && ev.type === "text" && this.turnText.length < MAX_TURN_CAPTURE) {
+      this.turnText += String(ev.text ?? "");
+    }
     this.relay?.sendEvent(ev);
   }
 

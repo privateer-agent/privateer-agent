@@ -9,7 +9,7 @@
 // of which replaces (not merges) whatever model list that provider already had:
 //
 //   - `tinfoil` gets a single seed model, so any other Tinfoil model — notably our
-//     default `tinfoil/glm-5-2` — resolves as a "custom model id" with a startup warning
+//     default (TINFOIL_DEFAULT_SPEC) — resolves as a "custom model id" with a startup warning
 //     and never shows in the picker. We re-register it with the current chat catalog.
 //   - `privateer` gets pi-privacy's PUBLIC developer-key channel (api.privateer.pro/v1 +
 //     `${PRIVATEER_API_KEY}`, one seed model), which clobbers the ACCOUNT channel our own
@@ -25,13 +25,13 @@
 import { makePiPrivacyExtension } from "pi-privacy";
 import { accountPosture, registerAccountModels } from "../src/providers/account.ts";
 
-// Tinfoil's live chat models (inference.tinfoil.sh/v1/models), glm-5-2 first — the
+// Tinfoil's live chat models (inference.tinfoil.sh/v1/models), kimi-k2-6 first — the
 // launcher's default. Non-chat endpoints (embeddings, tts, whisper, websearch,
 // doc-upload) are intentionally omitted. Refresh from the live catalog if Tinfoil adds
 // models; this static list just needs to cover what we default to and commonly pick.
 const TINFOIL_MODELS = [
-  "glm-5-2",
   "kimi-k2-6",
+  "glm-5-2",
   "deepseek-v4-pro",
   "gpt-oss-120b",
   "gpt-oss-safeguard-120b",

@@ -160,6 +160,26 @@ const EDIT_TOOLS = new Set(["edit", "edit_file", "str_replace", "str_replace_edi
 const WRITE_TOOLS = new Set(["write", "write_file", "create_file", "create", "save_attachment"]);
 const BASH_TOOLS = new Set(["bash", "shell", "run", "exec", "sh"]);
 
+// Media tools (src/tools/media.ts, src/tools/videoCompose.ts). See the block in
+// classifyToolCall — they are writes against a named output file, and the generation
+// ones cost real money, which is what the title says out loud.
+const MEDIA_TOOLS = new Set([
+  "generate_image",
+  "generate_video",
+  "generate_speech",
+  "generate_music",
+  "media_capabilities",
+  "video_compose",
+]);
+const MEDIA_TITLES: Record<string, string> = {
+  generate_image: "Generate an image (billed to your Privateer account)",
+  generate_video: "Generate a video (billed to your Privateer account)",
+  generate_speech: "Generate speech (billed to your Privateer account)",
+  generate_music: "Generate music (billed; music prompts have no zero-retention option)",
+  video_compose: "Compose video/audio locally",
+  media_capabilities: "Read media capabilities",
+};
+
 export function classifyToolCall(
   toolName: string,
   input: unknown,
@@ -186,6 +206,70 @@ export function classifyToolCall(
       title: "Create routine",
       detail: `${label}: ${trigger} → ${delivery.join(",")}${egress.length ? ` [${egress.join("] [")}]` : ""}`,
       alwaysAsk: egress.length > 0,
+    };
+  }
+
+  // Media generation (src/tools/media.ts) and local composition (videoCompose.ts).
+  //
+  // Left to the unknown-tool branch at the bottom these classify as bash-kind, which
+  // prompts with a JSON blob nobody can read and — worse — DENIES outright in plan and
+  // readonly mode, where a media call is exactly as legitimate as any other write.
+  // They are writes: each produces one named file, and the generation ones also spend
+  // the account's credit, so the prompt should name the file and the cost.
+  //
+  // `outside` covers BOTH directions. The output is the obvious one. The inputs matter
+  // just as much for the generation tools: `images: ["~/.ssh/id_rsa.png"]` would upload
+  // a file from outside scope to our servers, so an out-of-scope INPUT has to prompt
+  // even when the output lands neatly in cwd.
+  if (MEDIA_TOOLS.has(name)) {
+    const compose = name === "video_compose";
+    const inputs = [
+      ...(Array.isArray(obj.inputs) ? (obj.inputs as unknown[]).map(str) : []),
+      str(obj.input),
+      str(obj.audio),
+      ...(Array.isArray(obj.images) ? (obj.images as unknown[]).map(str) : []),
+      str(obj.firstFrame),
+      str(obj.lastFrame),
+    ].filter(Boolean);
+    const outsideInputs = inputs
+      .map((p) => resolveInCwd(scope.cwd, p))
+      .filter((a) => isOutsideScope(scope, a));
+
+    const outPath = str(obj.path ?? obj.output);
+    // `probe` reads and writes nothing; so does any composition call with no output
+    // (which the tool itself rejects). Gate those only when they reach outside scope.
+    if (!outPath) {
+      if (compose || name === "media_capabilities") {
+        if (outsideInputs.length === 0) return null;
+        return {
+          tool: toolName,
+          kind: "read",
+          title: "Read outside working directory",
+          detail: outsideInputs[0],
+          outside: true,
+          path: outsideInputs[0],
+        };
+      }
+      return unknownTarget(toolName, "write"); // a generation call with no destination
+    }
+
+    const absOut = resolveInCwd(scope.cwd, outPath);
+    const outside = isOutsideScope(scope, absOut) || outsideInputs.length > 0;
+    const detail = outsideInputs.length > 0 && !isOutsideScope(scope, absOut)
+      ? `${outPath} (reads ${outsideInputs[0]}, outside the working directory)`
+      : outside
+        ? absOut
+        : outPath;
+    return {
+      tool: toolName,
+      kind: "write",
+      title: outside
+        ? `${MEDIA_TITLES[name]} outside working directory`
+        : MEDIA_TITLES[name],
+      detail,
+      protected: isProtectedPath(absOut),
+      outside,
+      path: absOut,
     };
   }
 

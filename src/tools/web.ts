@@ -20,11 +20,15 @@
 //
 // SCOPE. These are the UNATTENDED paths' web tools: the harbor (routines, tasks,
 // workflow agent steps) and channels, both of which build a session from an explicit
-// extensionFactories list. The interactive TUI is deliberately untouched — its
-// launcher already shims @juicesharp/rpiv-web-tools, which registers tools by these
-// same two names against a provider key the user configures themselves. A person at a
-// terminal choosing their own search provider is fine; an unattended run holding that
-// key is not. Hence makeWebTools() and no extensions/ shim, which would collide.
+// extensionFactories list. The interactive TUI is deliberately untouched — the launcher
+// loads @juicesharp/rpiv-web-tools for it instead, which registers tools by these same
+// two names against a provider key the user configures themselves. A person at a terminal
+// choosing their own search provider is fine; an unattended run holding that key is not.
+//
+// The two must never meet: Pi resolves duplicate tool names first-registration-wins, so a
+// session that loaded both would silently get whichever came first. That is why the moat's
+// packs reach the TUI as `-e` args and the unattended paths as factories — one route each,
+// chosen per process, and config/moat.ts's per-kind table is where the choice is recorded.
 
 import { Type } from "typebox";
 import { apiRequest } from "../auth/privateer.ts";
@@ -224,9 +228,9 @@ export const webFetchToolDefinition = {
 };
 
 /**
- * Extension factory registering both tools. Used by the harbor, which builds its
- * session from an explicit `extensionFactories` list rather than from the shim
- * directory the interactive launcher populates.
+ * Extension factory registering both tools. Used by the unattended paths, which build
+ * their session from an explicit `extensionFactories` list (see config/moat.ts); the
+ * interactive TUI gets rpiv-web-tools instead, per the SCOPE note above.
  */
 export function makeWebTools() {
   return (pi: { registerTool?: (def: unknown) => void }): void => {

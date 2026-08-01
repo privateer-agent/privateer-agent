@@ -26,8 +26,6 @@ import { AttachmentStore, type StoredAttachment } from "../src/util/attachmentSt
 import { makeExtensionsControl } from "../src/remote/extensionsControl.ts";
 import { makeSkillsControl } from "../src/remote/skillsControl.ts";
 import { agentDir } from "../src/config/paths.ts";
-import { inHarborDaemon } from "../src/config/harborDaemon.ts";
-import { discoveredGateApplies } from "../src/config/inlineMoat.ts";
 import { agentVersion } from "../src/config/version.ts";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
@@ -435,22 +433,18 @@ const gate = makePermissionGate({
 
 export default function privateerControl(pi: any): void {
   piRef = pi;
-  // The moat — tool_call (block/allow) + tool_result (redact) — but ONLY when this
-  // session doesn't already carry one. A process that builds its sessions with
-  // makePermissionGate() as an inline factory (the harbor and its live task spawns,
-  // the channels runner) still auto-discovers this shim from the shared agent dir,
-  // and Pi runs EVERY tool_call handler — stopping early only on a block. Installing
-  // here too would mean two gates on one call: a second, redundant approval dialog
-  // where a UI is bound (a live task spawn), and a fail-closed local deny where one
-  // isn't (this file's bridge has no relay outside `/remote-access`). The session's
-  // own gate is the right one — it knows that session's cwd and its approver. See
-  // config/inlineMoat.ts for the full failure shape.
+  // The moat — tool_call (block/allow) + tool_result (redact).
   //
-  // A subagent child is the exception: it loads this file EXPLICITLY (`-e`, see
-  // bin/privateer-subagent.mjs) as its only gate, and inherits the parent's env — so
-  // it must keep installing regardless of the inherited marker, or children of a
-  // harbor task would run entirely ungated.
-  if (discoveredGateApplies(isSubagentChild())) gate(pi);
+  // Unconditional, because this file now only loads where it is wanted: the interactive
+  // TUI and subagent children get it as an explicit `-e` argument (bin/privateer-launch.mjs,
+  // bin/privateer-subagent.mjs), and the processes that build their own gate from
+  // makePermissionGate() never load it at all. It used to be conditional — this extension
+  // was installed as a shim in the shared agent dir, so Pi discovered it into the harbor,
+  // the channels runner and the REPL as well, and a second gate there meant either a
+  // duplicate approval dialog or a fail-closed deny before the session's real approver was
+  // consulted. The fix moved to the host: nothing of ours is discoverable any more, so the
+  // gate no longer has to ask whose process it woke up in. See src/config/moat.ts.
+  gate(pi);
 
   // Top-level session: watch the subagent approval channel and relay each child's
   // gated action to the app over this session's bridge. The bridge fails closed while
@@ -464,17 +458,15 @@ export default function privateerControl(pi: any): void {
   // save_attachment (app→CLI, from the AttachmentStore inbound files land in). Both
   // live here because they share the RemoteBridge / its attachment stream.
   //
-  // NOT inside the harbor daemon. This extension is auto-discovered from the shared
-  // ~/.privateer/agent/extensions into every session the daemon runs, but `bridge` only
-  // ever gets a relay from THIS file's /remote-access command — which the daemon never
-  // runs. Registering there would shadow (Pi: first registration per name wins, and
-  // discovered extensions load before inline factories) the session-scoped pair a live
-  // task spawn registers against its own connected relay, so send_file_to_client would
-  // always answer "remote access is off" while the app was attached and driving.
-  if (!inHarborDaemon()) {
-    pi.registerTool?.(makeSendFileTool(bridge));
-    pi.registerTool?.(makeSaveAttachmentTool(attachments));
-  }
+  // Also unconditional now, and for the same reason. These used to stand down inside the
+  // harbor daemon: this extension was discovered into every session the daemon ran, where
+  // `bridge` never gets a relay (only THIS file's /remote-access attaches one), so the pair
+  // registered here would shadow — Pi resolves duplicate tool names first-registration-wins
+  // — the session-scoped pair a live task spawn binds to its own connected relay, and
+  // send_file_to_client would answer "remote access is off" while the app sat attached and
+  // driving. The daemon no longer loads this file, so there is nothing to shadow.
+  pi.registerTool?.(makeSendFileTool(bridge));
+  pi.registerTool?.(makeSaveAttachmentTool(attachments));
 
   // Subagents (and print/rpc) run as headless child `pi` processes with no UI. There
   // no one can approve, so a "default" gate would fail-closed on every tool and the

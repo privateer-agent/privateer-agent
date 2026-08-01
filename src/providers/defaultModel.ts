@@ -15,13 +15,29 @@ import { join } from "node:path";
 import { hasCredentials } from "../auth/privateer.ts";
 import { agentDir } from "../config/paths.ts";
 
-// Tinfoil's most capable chat model, and Privateer's default everywhere. Tinfoil runs
-// GLM 5.2 inside an attestable TEE (the serving enclave's quote is published and the
-// live TLS key is bound to it), which is the strongest privacy tier we offer — so the
-// most capable model on that tier is what a privacy-first agent should boot on.
+// A capable Tinfoil chat model, and Privateer's default everywhere. Tinfoil runs it
+// inside an attestable TEE (the serving enclave's quote is published and the live TLS
+// key is bound to it), which is the strongest privacy tier we offer — so a capable
+// model on that tier is what a privacy-first agent should boot on.
 // One definition, three consumers: this resolver, providers/account.ts's seed catalog,
 // and bin/privateer-launch.mjs (which mirrors the id — keep them in step).
-export const TINFOIL_MODEL_ID = "tinfoil/glm-5-2";
+//
+// It was `tinfoil/glm-5-2` until 2026-08-01, and the swap is a LATENCY decision, not a
+// capability one. Measured over 22 requests spaced 20s apart on the account channel,
+// glm-5-2 stalled before its first token on 9 of them — 33s to 98s each, with the
+// model demonstrably warm 20 seconds earlier, so it is contention in that deployment
+// rather than a cold start anything here can warm up. kimi-k2-6 and gpt-oss-120b, same
+// enclave provider, same tier, same transport, stalled 0 times in 20 (medians 1.2s and
+// 1.0s). The same run reproduced glm-5-2's stalls on BOTH the sealed and the cleartext
+// path, which is what rules out the shim, the relay and the proxy as the cause.
+//
+// Two consequences worth knowing when revisiting this: glm-5-2 remains in the live
+// catalog and is one pick away for anyone who wants it, and kimi-k2-6 reasons on every
+// turn with no working off switch (see thinkingProfile in providers/account.ts — its
+// levers were probed and none of them moved the reasoning volume). Its reasoning is
+// short and it always reaches an answer, which is why that is acceptable here and was
+// not for glm-5-2.
+export const TINFOIL_MODEL_ID = "tinfoil/kimi-k2-6";
 
 // Same model, reached two ways:
 //   - TINFOIL_DEFAULT_SPEC — direct to inference.tinfoil.sh with the user's own

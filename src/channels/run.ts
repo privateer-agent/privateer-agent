@@ -49,6 +49,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 // Names only — the factory itself is imported lazily in main() like every other
 // module here. Safe statically: this evaluates after boot.ts and pulls in no Pi.
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
+import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
 
 // Read-only default toolset — same rationale as the routines harbor's SAFE_TOOLS:
 // a turn nobody is watching can't mutate the filesystem or shell out. Now that the
@@ -61,6 +62,14 @@ const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 // config/hosted.ts. Kept out of SAFE_TOOLS proper because they're the one "read-only"
 // capability that still sends a query off the machine.
 const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES];
+
+// Media GENERATION never joins the default set, even with the switch on: a chat
+// message is an untrusted prompt, and these spend the account's credit. A channel that
+// should be able to make pictures says so in `channels.tools`. Listed here only so
+// they can be stripped back out when generation is switched off, the same way web
+// tools are — a config naming a tool that no longer registers is a confusing failure.
+// (video_compose is local ffmpeg work and needs no such stripping.)
+const MEDIA_GEN_TOOLS: string[] = [...MEDIA_TOOL_NAMES];
 
 // A channel's posture governs how an ADMIN's risky actions are handled (members are
 // always capped to read-only — see effectivePosture). Config + restart only; there
@@ -106,13 +115,6 @@ function normalizePosture(v: unknown): Posture | undefined {
 }
 
 async function main() {
-  // Mark the process before anything can create a session. This runner builds its
-  // session with its own makePermissionGate (the in-chat approver below), but the
-  // shipped TUI gate extension is still auto-discovered from the shared agent dir —
-  // and with no UI bound here its local asker fails CLOSED, denying every gated tool
-  // before our approver is ever consulted. See config/inlineMoat.ts.
-  const { markInlineMoat } = await import("../config/inlineMoat.ts");
-  markInlineMoat();
   const { readFileSync, appendFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const {
@@ -121,13 +123,9 @@ async function main() {
     SessionManager,
   } = await import("@earendil-works/pi-coding-agent");
   const { createEngineEventAdapter } = await import("../bridge/engineAdapter.ts");
-  const { makePermissionGate } = await import("../ext/permissionGate.ts");
   type GateController = import("../ext/permissionGate.ts").GateController;
-  const { makePiPrivacyExtension } = await import("pi-privacy");
-  const { makeAccountProvider, privateerChannel } = await import("../providers/account.ts");
-  const { hasCredentials } = await import("../auth/privateer.ts");
-  const { makeWebTools } = await import("../tools/web.ts");
-  const { webEnabled } = await import("../config/hosted.ts");
+  const { moatResourceOptions } = await import("../config/moat.ts");
+  const { webEnabled, mediaEnabled } = await import("../config/hosted.ts");
   const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
   const { agentDir, configPath, globalDir } = await import("../config/paths.ts");
   const { redactText, collectSecrets } = await import("../util/redact.ts");
@@ -153,8 +151,9 @@ async function main() {
   const ch = cfg.channels ?? {};
   const defaultModel: string = resolveDefaultModel({ explicit: ch.model ?? cfg.defaultModel });
   const web = webEnabled();
+  const media = mediaEnabled();
   const defaultTools: string[] = Array.isArray(ch.tools) && ch.tools.length
-    ? (web ? ch.tools : ch.tools.filter((t: string) => !WEB_TOOLS.includes(t)))
+    ? ch.tools.filter((t: string) => (web || !WEB_TOOLS.includes(t)) && (media || !MEDIA_GEN_TOOLS.includes(t)))
     : (web ? [...SAFE_TOOLS, ...WEB_TOOLS] : [...SAFE_TOOLS]);
   const defaultPosture: Posture = normalizePosture(ch.posture) ?? "approve";
   const cwd: string = ch.cwd ?? process.cwd();
@@ -203,23 +202,15 @@ async function main() {
       return store.bridge.requestApproval(store.chatId, req, signal);
     },
   };
+  // Web and media are shaped by config/moat.ts: generation only when the agent is allowed
+  // it, composition always (local ffmpeg work). Neither joins the default tool list — a
+  // channel has to name them in its `tools`, because a message from a chat app is exactly
+  // the kind of untrusted prompt that shouldn't be able to bill for video.
   const services = await createAgentSessionServices({
     cwd,
     agentDir: agentDir(),
     resourceLoaderOptions: {
-      extensionFactories: [
-        makePermissionGate(gate),
-        // Per-model verified-TEE label for the /models picker (see harbor/index.ts):
-        // TEE-channel Privateer models verify on select when logged in; ZDR stays floored.
-        makePiPrivacyExtension({
-          privateerVerifiedTee: (m) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
-        }),
-        makeAccountProvider(),
-        // Web access (src/tools/web.ts) — same wiring as the harbor: registered here
-        // because this path builds its session explicitly, and omitted entirely when
-        // the agent isn't allowed the web.
-        ...(webEnabled() ? [makeWebTools()] : []),
-      ] as any,
+      ...((await moatResourceOptions({ kind: "channels", gate })) as any),
     },
   });
 

@@ -21,12 +21,16 @@ function makeFakeRelay() {
   const skills: any[] = [];
   const fileMatches: { id: string; matches: { path: string; isDir: boolean }[] }[] = [];
   let connected = true;
+  // Distinct from `connected`: the relay socket can be up with nobody attached, which
+  // is exactly when a finished turn has to be delivered another way.
+  let controller = true;
   const relay: RelayLike & {
     approvals: typeof approvals; events: typeof events; noQuarter: typeof noQuarter;
     notices: typeof notices; commandLists: typeof commandLists; selects: typeof selects;
     inputs: typeof inputs; extensions: typeof extensions; skills: typeof skills;
     fileMatches: typeof fileMatches;
     setConnected(v: boolean): void;
+    setController(v: boolean): void;
   } = {
     approvals,
     events,
@@ -39,9 +43,11 @@ function makeFakeRelay() {
     skills,
     fileMatches,
     setConnected(v) { connected = v; },
+    setController(v) { controller = v; },
     requestApproval(id, req) { approvals.push({ id, req }); },
     sendEvent(ev) { events.push(ev); },
     isConnected() { return connected; },
+    hasController() { return connected && controller; },
     sendNoQuarter(on) { noQuarter.push(on); },
     async sendFile() { return { ok: connected }; },
     sendNotice(text) { notices.push(text); },
@@ -325,4 +331,101 @@ test("onRevoked forwards through the bridge to the config handler", () => {
   const bridge = new RemoteBridge({ onPrompt: () => {}, onRevoked: () => { revoked += 1; } });
   bridge.callbacks.onRevoked();
   assert.equal(revoked, 1);
+});
+
+// ── unwatched-turn delivery ──────────────────────────────────────────────────
+// The whole point: a turn the app drove, that finishes after the app is gone. The
+// relay drops every frame with no controller attached, so the answer has to leave
+// by another door (the cloud outbox) instead of evaporating.
+
+test("a driven turn that ends with no controller hands its answer to the owner", () => {
+  const delivered: { prompt: string; content: string }[] = [];
+  const bridge = new RemoteBridge({ onPrompt: () => {}, onUnwatchedResult: (r) => { delivered.push(r); } });
+  const relay = makeFakeRelay();
+  relay.setController(true);
+  bridge.attachRelay(relay);
+
+  bridge.callbacks.onPrompt("summarise the build failure");
+  bridge.forwardEvent({ type: "text", text: "The build failed because " });
+  bridge.forwardEvent({ type: "text", text: "the lockfile is stale." });
+  relay.setController(false); // app closed while the agent worked
+  bridge.settleTurn();
+
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].prompt, "summarise the build failure");
+  assert.equal(delivered[0].content, "The build failed because the lockfile is stale.");
+});
+
+test("a driven turn the app actually watched is NOT re-delivered", () => {
+  const delivered: unknown[] = [];
+  const bridge = new RemoteBridge({ onPrompt: () => {}, onUnwatchedResult: (r) => { delivered.push(r); } });
+  const relay = makeFakeRelay();
+  relay.setController(true);
+  bridge.attachRelay(relay);
+
+  bridge.callbacks.onPrompt("hello");
+  bridge.forwardEvent({ type: "text", text: "hi there" });
+  bridge.settleTurn();
+
+  assert.equal(delivered.length, 0); // it's already in the app's feed
+});
+
+test("a locally-typed turn is never delivered to the outbox", () => {
+  const delivered: unknown[] = [];
+  const bridge = new RemoteBridge({ onPrompt: () => {}, onUnwatchedResult: (r) => { delivered.push(r); } });
+  const relay = makeFakeRelay();
+  relay.setController(false);
+  bridge.attachRelay(relay);
+
+  // No onPrompt → this turn came from the terminal itself, not the app.
+  bridge.forwardEvent({ type: "text", text: "local answer" });
+  bridge.settleTurn();
+
+  assert.equal(delivered.length, 0);
+});
+
+test("a mid-turn disconnect still delivers — `remote` clears, the driven flag doesn't", () => {
+  const delivered: { prompt: string; content: string }[] = [];
+  const bridge = new RemoteBridge({ onPrompt: () => {}, onUnwatchedResult: (r) => { delivered.push(r); } });
+  const relay = makeFakeRelay();
+  relay.setController(true);
+  bridge.attachRelay(relay);
+
+  bridge.callbacks.onPrompt("keep going");
+  bridge.forwardEvent({ type: "text", text: "part one " });
+  // The socket dies mid-turn: the gate must stop treating the turn as remote…
+  relay.setConnected(false);
+  relay.setController(false);
+  bridge.callbacks.onDisconnected();
+  assert.equal(bridge.getRemote(), false);
+  // …but the rest of the reply is still captured and still delivered.
+  bridge.forwardEvent({ type: "text", text: "part two" });
+  bridge.settleTurn();
+
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].content, "part one part two");
+});
+
+test("controller_detached fails pending approvals closed", async () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  relay.setController(true);
+  bridge.attachRelay(relay);
+  bridge.callbacks.onPrompt("x");
+  const decision = bridge.remoteAsk({ tool: "bash", input: { command: "rm -rf /" } } as any);
+  await tick();
+  bridge.callbacks.onControllerDetached?.();
+  assert.equal(await decision, "deny");
+});
+
+test("an empty turn is not delivered", () => {
+  const delivered: unknown[] = [];
+  const bridge = new RemoteBridge({ onPrompt: () => {}, onUnwatchedResult: (r) => { delivered.push(r); } });
+  const relay = makeFakeRelay();
+  relay.setController(false);
+  bridge.attachRelay(relay);
+  bridge.callbacks.onPrompt("nothing to say");
+  bridge.forwardEvent({ type: "text", text: "   \n " });
+  bridge.settleTurn();
+  assert.equal(delivered.length, 0);
 });
