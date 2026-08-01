@@ -143,23 +143,82 @@ function runToCompletion(cmd, cmdArgs, opts = {}) {
   });
 }
 
+// npm gives no usable progress, so on a TTY show a braille spinner while it runs
+// and keep its output buffered — shown only if the install fails. Non-TTY (CI,
+// piped) keeps the old passthrough behaviour. The global package is replaced in
+// place, so re-reading our own package.json afterwards yields the NEW version.
+function updateNpmPackage() {
+  const cmd = isWin ? "npm.cmd" : "npm";
+  const npmArgs = ["install", "-g", "privateer-agent@latest", "--no-fund", "--no-audit"];
+  if (!process.stdout.isTTY) {
+    console.log("Updating privateer-agent to the latest release…");
+    // npm is npm.cmd on Windows; Node >=18.20 needs a shell to spawn a .cmd (EINVAL otherwise).
+    runToCompletion(cmd, npmArgs, { shell: isWin });
+    return;
+  }
+  // Ask npm for the globally installed version — REPO/package.json would lie when
+  // this copy runs from somewhere other than the global root (e.g. an npx cache).
+  const globalVer = () => {
+    try {
+      const r = spawnSync(cmd, ["ls", "-g", "privateer-agent", "--depth=0", "--json"], { shell: isWin, encoding: "utf8" });
+      return JSON.parse(r.stdout).dependencies?.["privateer-agent"]?.version ?? null;
+    } catch { return null; }
+  };
+  const before = globalVer();
+  console.log(`\x1b[1m⚓ Updating Privateer\x1b[0m${before ? ` \x1b[2m(currently ${before})\x1b[0m` : ""}`);
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let captured = "";
+  const child = spawn(cmd, [...npmArgs, "--loglevel=error"], { shell: isWin, env: process.env });
+  child.stdout.on("data", (d) => (captured += d));
+  child.stderr.on("data", (d) => (captured += d));
+  process.stdout.write("\x1b[?25l");
+  const t0 = Date.now();
+  let i = 0;
+  const timer = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    process.stdout.write(`\r  \x1b[36m${frames[i++ % frames.length]}\x1b[0m updating privateer-agent@latest \x1b[2m${s}s\x1b[0m\x1b[K`);
+  }, 80);
+  const restore = () => { clearInterval(timer); process.stdout.write("\r\x1b[K\x1b[?25h"); };
+  child.on("exit", (code, signal) => {
+    restore();
+    if (code === 0) {
+      const after = globalVer();
+      if (before && after && before === after) {
+        console.log(`\x1b[32m✓\x1b[0m Already ship-shape — privateer-agent ${after} is the latest release.`);
+      } else {
+        console.log(`\x1b[32m✓\x1b[0m Updated privateer-agent${before ? ` ${before} →` : ""}${after ? ` ${after}` : ""}`);
+        console.log(`\nRun \x1b[1mprivateer\x1b[0m to set sail on the new release.`);
+      }
+      process.exit(0);
+    }
+    if (captured.trim()) process.stderr.write(captured);
+    if (signal) process.kill(process.pid, signal);
+    else process.exit(code ?? 1);
+  });
+  child.on("error", (e) => {
+    restore();
+    console.error(`privateer: failed to launch npm — ${e.message}`);
+    process.exit(1);
+  });
+}
+
 // --- `privateer update` ----------------------------------------------------
 // Fetch the latest release and exit. Bundle installs re-run the download+extract
 // installer; npm installs update the global package.
 if (sub === "update") {
   if (BUNDLED) {
-    console.log("Updating Privateer to the latest release…");
+    // PRIVATEER_UPDATE=1 flips the installer into update mode: weigh-anchor banner,
+    // "X → Y" version reporting, and an early exit (no download) when already current.
+    const env = { ...process.env, PRIVATEER_UPDATE: "1" };
     if (isWin) {
-      runToCompletion("powershell", ["-NoProfile", "-Command", "irm https://privateer.pro/install.ps1 | iex"]);
+      runToCompletion("powershell", ["-NoProfile", "-Command", "irm https://privateer.pro/install.ps1 | iex"], { env });
     } else {
-      runToCompletion("sh", ["-c", "curl -fsSL https://privateer.pro/install.sh | sh"]);
+      runToCompletion("sh", ["-c", "curl -fsSL https://privateer.pro/install.sh | sh"], { env });
     }
   } else {
-    console.log("Updating privateer-agent to the latest release…");
-    // npm is npm.cmd on Windows; Node >=18.20 needs a shell to spawn a .cmd (EINVAL otherwise).
-    runToCompletion(isWin ? "npm.cmd" : "npm", ["install", "-g", "privateer-agent@latest"], { shell: isWin });
+    updateNpmPackage();
   }
-  // runToCompletion exits via the child's exit handler.
+  // both paths exit via their child's exit handler.
 }
 
 // --- `privateer harbor [run|install|uninstall|status]` ---------------------
