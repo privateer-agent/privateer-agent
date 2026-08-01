@@ -34,7 +34,7 @@ import {
   makeAccountProvider,
   verificationLink,
 } from "../src/providers/account.ts";
-import { resolveSignedInModel } from "../src/providers/defaultModel.ts";
+import { resolveSignedInModel, savedPiDefaultSpec } from "../src/providers/defaultModel.ts";
 import { discoverContextFiles, onContextChanged } from "../src/context.ts";
 import { type Palette, paletteFor } from "../src/ui/palette.ts";
 
@@ -498,6 +498,19 @@ export default function privateerBrand(pi: any): void {
         dbg(`activateSignedInModel: already on ${spec}`);
         refresh(ctx);
         ctx?.ui?.notify?.(`${spec} is ready — private inference on your Privateer account.`, "info");
+        return;
+      }
+
+      // A saved default the user picked themselves (Pi persists every interactive
+      // switch, and the launcher now boots on it) is a standing instruction. When it
+      // points anywhere other than the sign-in target, arming the channel — done
+      // above — is all sign-in may do: auto-switching would stomp the pick the
+      // launcher just honored, one login at a time.
+      const saved = savedPiDefaultSpec();
+      if (saved && saved !== spec) {
+        dbg(`activateSignedInModel: saved default ${saved} is a deliberate pick — not switching`);
+        refresh(ctx);
+        ctx?.ui?.notify?.("Signed in — account channel armed. Staying on your saved model.", "info");
         return;
       }
 

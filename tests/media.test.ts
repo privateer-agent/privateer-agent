@@ -14,6 +14,7 @@ import {
 } from "../src/tools/media.ts";
 import { COMPOSE_TOOL_NAMES, videoComposeToolDefinition } from "../src/tools/videoCompose.ts";
 import { classifyToolCall } from "../src/permissions/classify.ts";
+import { decideAuto } from "../src/permissions/mode.ts";
 
 function scratch(): { cwd: string; cleanup: () => void } {
   const cwd = mkdtempSync(join(tmpdir(), "pv-media-"));
@@ -69,7 +70,29 @@ test("media generation classifies as a write against its output path", () => {
       assert.equal(req.kind, "write", `${name} should classify as a write`);
       assert.equal(req.outside, false, `${name} writes inside cwd and should not be flagged outside`);
       assert.ok(req.path?.startsWith(real), `${name} should resolve its target inside cwd (got ${req.path})`);
+      // The billed, egressing generation tools carry alwaysAsk so acceptEdits/bypass
+      // can't swallow them; local video_compose does not.
+      const isGen = name !== "video_compose";
+      assert.equal(!!req.alwaysAsk, isGen, `${name} alwaysAsk should be ${isGen}`);
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test("generation tools are NOT auto-allowed under acceptEdits/bypass; video_compose is", () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    for (const name of ["generate_image", "generate_video", "generate_speech", "generate_music"]) {
+      const req = classifyToolCall(name, { prompt: "x", path: "out/thing.png" }, { cwd });
+      assert.ok(req);
+      // alwaysAsk sits above every auto-allow: acceptEdits, bypass and no-quarter.
+      assert.equal(decideAuto(req, "acceptEdits", []), "ask", `${name} must ask under acceptEdits`);
+      assert.equal(decideAuto(req, "bypass", []), "ask", `${name} must ask under bypass`);
+    }
+    const compose = classifyToolCall("video_compose", { output: "out/clip.mp4", inputs: ["a.png"] }, { cwd });
+    assert.ok(compose);
+    assert.equal(decideAuto(compose, "acceptEdits", []), "allow", "local video_compose still auto-allows under acceptEdits");
   } finally {
     cleanup();
   }
@@ -82,6 +105,34 @@ test("an input image from outside the working directory prompts even when the ou
     assert.ok(req);
     assert.equal(req.outside, true);
     assert.match(req.detail, /outside the working directory/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a protected input file (e.g. .env) is flagged protected and named, even with an in-cwd output", () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    const req = classifyToolCall("generate_image", { prompt: "x", path: "thumb.png", images: [".env"] }, { cwd });
+    assert.ok(req);
+    assert.equal(req.protected, true, "reading a protected file as input must set protected");
+    assert.equal(req.outside, false, "the .env is inside cwd — only protected, not outside");
+    assert.match(req.detail, /protected file/, "the dialog must name the protected input, not just the output");
+    // protected forces a prompt above acceptEdits/allowlist for EVERY media tool...
+    assert.equal(decideAuto(req, "acceptEdits", []), "ask");
+  } finally {
+    cleanup();
+  }
+});
+
+test("video_compose reading a protected input prompts under acceptEdits (it has no alwaysAsk)", () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    const req = classifyToolCall("video_compose", { output: "out/clip.mp4", audio: ".env" }, { cwd });
+    assert.ok(req);
+    assert.equal(req.protected, true);
+    // ...including local video_compose, which is not alwaysAsk — protected is what saves it.
+    assert.equal(decideAuto(req, "acceptEdits", []), "ask");
   } finally {
     cleanup();
   }

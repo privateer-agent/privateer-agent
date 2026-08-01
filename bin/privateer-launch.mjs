@@ -264,10 +264,11 @@ else {
   // auto-install. Fire-and-forget: the event loop stays alive while the TUI child runs.
   refreshUpdateCache();
 
-  // Default model. Mirrors src/providers/defaultModel.ts resolveDefaultModel() — keep
-  // the two in step. Tinfoil's GLM 5.2 is the default either way: direct when the user
-  // has a Tinfoil key (pi-privacy can client-attest the enclave), over the Privateer
-  // subscription otherwise.
+  // Computed default model — used ONLY when the user has no saved pick and no
+  // override (see modelArgs below). Mirrors src/providers/defaultModel.ts
+  // resolveDefaultModel() — keep the two in step. Tinfoil's default is the same
+  // either way: direct when the user has a Tinfoil key (pi-privacy can client-attest
+  // the enclave), over the Privateer subscription otherwise.
   //
   // The last branch is the important one. A signed-out, keyless terminal used to launch
   // on `openrouter/openai/gpt-4o-mini`, which it had no key for — so the first prompt
@@ -313,9 +314,35 @@ else {
     .filter((dir) => fs.existsSync(dir));
   const skillArgs = SKILL_DIRS.flatMap((dir) => ["--skill", dir]);
 
+  // Honor the user's own persisted pick. Pi writes defaultProvider + defaultModel to
+  // AGENT_DIR/settings.json on EVERY interactive switch (AgentSession.setModel — the
+  // built-in selector and pi-privacy's /models picker both land there), but consults
+  // it ONLY when no --model flag is passed (sdk.js: `let model = options.model` short-
+  // circuits the settings default). Passing --model unconditionally was therefore the
+  // "model switch doesn't persist" bug: every pick saved faithfully, then stomped at
+  // the next launch. Precedence (mirrors resolveDefaultModel — keep in step):
+  //   1. a --model the user typed on the privateer command line (already in `args`)
+  //   2. PRIVATEER_MODEL — deliberate override, folded into MODEL above
+  //   3. a saved pick in settings.json → pass NO flag; Pi resolves it itself (and
+  //      falls back sanely if that model has vanished from the registry)
+  //   4. nothing saved (first run / fresh home) → the computed MODEL above
+  const userPassedModel = args.includes("--model");
+  let savedDefault = null;
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(AGENT_DIR, "settings.json"), "utf8"));
+    if (
+      typeof s.defaultProvider === "string" && s.defaultProvider.trim() &&
+      typeof s.defaultModel === "string" && s.defaultModel.trim()
+    ) {
+      savedDefault = `${s.defaultProvider}/${s.defaultModel}`;
+    }
+  } catch { /* absent/unreadable → no saved pick */ }
+  const modelArgs =
+    userPassedModel || (savedDefault && !process.env.PRIVATEER_MODEL) ? [] : ["--model", MODEL];
+
   // Dev convenience: load provider keys from the repo's .env if present.
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
-  runToCompletion(NODE_BIN, [...nodeArgs, CLI, "--model", MODEL, ...extArgs, ...skillArgs, ...args]);
+  runToCompletion(NODE_BIN, [...nodeArgs, CLI, ...modelArgs, ...extArgs, ...skillArgs, ...args]);
 }
 
 // --- helpers ---------------------------------------------------------------

@@ -41,9 +41,15 @@ export function webEnabled(): boolean {
 /**
  * Is this agent allowed to GENERATE media (images, video, speech, music)?
  *
- * Same shape as webEnabled, and for the same reason: every media call is served by the
- * account API, so credentials are a hard prerequisite. `HARBOR_MEDIA` is authoritative
- * when set; unset defaults to on once signed in.
+ * Every media call is served by the account API, so credentials are a hard prerequisite.
+ * `HARBOR_MEDIA` is authoritative when set. When it is UNSET the default splits by where
+ * we run: a hosted tenant fails CLOSED, a daemon on the user's own machine defaults on
+ * once signed in. Hosted has to be off-by-default because generation spends real credit
+ * and sends the prompt (plus any input image) out of the enclave to a model provider —
+ * that is a grant the user makes per agent (tenantEnv sets HARBOR_MEDIA=1), never one a
+ * missing env var hands out. (Contrast webEnabled, whose unset-default is on everywhere
+ * only because the orchestrator ALWAYS sets HARBOR_WEB in hosted mode; HARBOR_MEDIA is
+ * not guaranteed to be set, so the default here must be the safe one.)
  *
  * It is a separate switch from web access because it buys a different thing and costs a
  * different thing. Generation spends real credit — cents for an image, up to a dollar
@@ -60,6 +66,9 @@ export function mediaEnabled(): boolean {
   const flag = process.env.HARBOR_MEDIA;
   if (flag === "1") return hasCredentials();
   if (flag === "0") return false;
+  // Unset: hosted tenants fail closed (explicit per-agent grant only); a daemon on
+  // the user's own machine defaults on once signed in.
+  if (isHosted()) return false;
   return hasCredentials();
 }
 

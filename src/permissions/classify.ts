@@ -171,6 +171,22 @@ const MEDIA_TOOLS = new Set([
   "media_capabilities",
   "video_compose",
 ]);
+// The generation tools egress model-chosen text (and any input file bytes) to
+// Privateer's servers and onward to a provider — generate_music to one with no
+// zero-retention endpoint — and each spends the account's credit. That egress +
+// irreversible spend must never be auto-approved: classified as a plain `write`
+// they were swallowed by acceptEdits (mode.ts:45) and by bypass/no-quarter, so a
+// single injected call could leak context and bill the account with no dialog.
+// `alwaysAsk` sits ABOVE bypass/acceptEdits/allowlist (mode.ts:37) and is never
+// remembered, so every generation is a fresh human decision. video_compose is
+// excluded on purpose — it is local ffmpeg, no egress and no spend — and
+// media_capabilities is a read.
+const MEDIA_GEN_TOOLS = new Set([
+  "generate_image",
+  "generate_video",
+  "generate_speech",
+  "generate_music",
+]);
 const MEDIA_TITLES: Record<string, string> = {
   generate_image: "Generate an image (billed to your Privateer account)",
   generate_video: "Generate a video (billed to your Privateer account)",
@@ -231,44 +247,57 @@ export function classifyToolCall(
       str(obj.firstFrame),
       str(obj.lastFrame),
     ].filter(Boolean);
-    const outsideInputs = inputs
-      .map((p) => resolveInCwd(scope.cwd, p))
-      .filter((a) => isOutsideScope(scope, a));
+    // Resolve each input once, then flag the two ways an input is sensitive: it leaves
+    // the working directory, or it is a guarded file (.env, keys, credentials, …). The
+    // generation tools base64 every input up to our servers, so a PROTECTED input is a
+    // credential-exfil risk even when the output lands neatly in cwd — and the human
+    // approving what looks like a thumbnail has to see which file is being read. Both
+    // therefore feed `protected`/`outside` and are named in the prompt detail below.
+    const resolvedInputs = inputs.map((p) => resolveInCwd(scope.cwd, p));
+    const outsideInputs = resolvedInputs.filter((a) => isOutsideScope(scope, a));
+    const protectedInputs = resolvedInputs.filter((a) => isProtectedPath(a));
 
     const outPath = str(obj.path ?? obj.output);
     // `probe` reads and writes nothing; so does any composition call with no output
-    // (which the tool itself rejects). Gate those only when they reach outside scope.
+    // (which the tool itself rejects). Gate those only when they touch a sensitive input.
     if (!outPath) {
       if (compose || name === "media_capabilities") {
-        if (outsideInputs.length === 0) return null;
+        const flagged = protectedInputs[0] ?? outsideInputs[0];
+        if (!flagged) return null;
         return {
           tool: toolName,
           kind: "read",
-          title: "Read outside working directory",
-          detail: outsideInputs[0],
-          outside: true,
-          path: outsideInputs[0],
+          title: protectedInputs.length > 0 ? "Read a protected file" : "Read outside working directory",
+          detail: flagged,
+          protected: protectedInputs.length > 0,
+          outside: outsideInputs.length > 0,
+          path: flagged,
         };
       }
       return unknownTarget(toolName, "write"); // a generation call with no destination
     }
 
     const absOut = resolveInCwd(scope.cwd, outPath);
-    const outside = isOutsideScope(scope, absOut) || outsideInputs.length > 0;
-    const detail = outsideInputs.length > 0 && !isOutsideScope(scope, absOut)
-      ? `${outPath} (reads ${outsideInputs[0]}, outside the working directory)`
-      : outside
-        ? absOut
-        : outPath;
+    const outputOutside = isOutsideScope(scope, absOut);
+    const outside = outputOutside || outsideInputs.length > 0;
+    // Name the sensitive input in the prompt — protected first (the more dangerous
+    // disclosure), then outside-scope. Base target is the output, absolute when it
+    // itself leaves cwd, else the path the caller wrote.
+    const inputNote = protectedInputs.length > 0
+      ? ` (reads protected file ${protectedInputs[0]}${protectedInputs.length > 1 ? ` +${protectedInputs.length - 1} more` : ""})`
+      : outsideInputs.length > 0
+        ? ` (reads ${outsideInputs[0]}, outside the working directory)`
+        : "";
     return {
       tool: toolName,
       kind: "write",
       title: outside
         ? `${MEDIA_TITLES[name]} outside working directory`
         : MEDIA_TITLES[name],
-      detail,
-      protected: isProtectedPath(absOut),
+      detail: `${outputOutside ? absOut : outPath}${inputNote}`,
+      protected: isProtectedPath(absOut) || protectedInputs.length > 0,
       outside,
+      alwaysAsk: MEDIA_GEN_TOOLS.has(name),
       path: absOut,
     };
   }

@@ -79,6 +79,31 @@ export interface ResolveDefaultModelOptions {
   env?: NodeJS.ProcessEnv;
   // Override the signed-in check (testing). Defaults to hasCredentials().
   signedIn?: boolean;
+  // The user's saved Pi default ("provider/id"). undefined (the default) reads it
+  // from agentDir()/settings.json; null skips it entirely — resolveSignedInModel
+  // uses null because the sign-in TARGET must stay the confidential model (the
+  // decision to stay on a saved pick is made explicitly at its call sites, where
+  // the account channel still gets armed either way).
+  saved?: string | null;
+}
+
+// The user's own persisted model pick: Pi writes defaultProvider + defaultModel to
+// agentDir()/settings.json on EVERY interactive switch (AgentSession.setModel →
+// setDefaultModelAndProvider — both the built-in selector and pi-privacy's /models
+// picker land there). That makes it the strongest non-env signal of deliberate
+// intent we have, so resolveDefaultModel ranks it right after PRIVATEER_MODEL.
+// Returns "provider/id", or null when either half is missing.
+export function savedPiDefaultSpec(): string | null {
+  try {
+    const raw = readFileSync(join(agentDir(), "settings.json"), "utf8").trim();
+    if (!raw) return null;
+    const s = JSON.parse(raw) as Record<string, unknown>;
+    const provider = typeof s.defaultProvider === "string" ? s.defaultProvider.trim() : "";
+    const modelId = typeof s.defaultModel === "string" ? s.defaultModel.trim() : "";
+    return provider && modelId ? `${provider}/${modelId}` : null;
+  } catch {
+    return null;
+  }
 }
 
 // Resolve the model spec ("provider/id") to use when no model is named. Pure and
@@ -87,10 +112,13 @@ export interface ResolveDefaultModelOptions {
 // so the launcher, the REPL, and the next-launch seed all agree):
 //   1. explicit user choice (config/channel)      — deliberate, always wins
 //   2. PRIVATEER_MODEL env                         — dev/global override
-//   3. Tinfoil key present → Tinfoil GLM 5.2       — strongest (client-attested) privacy
-//   4. signed into Privateer → the same model over the subscription
-//   5. a BYO provider whose key is present         — anthropic, openai, openrouter
-//   6. nothing at all → the account default anyway — so the failure names Privateer
+//   3. the SAVED Pi default (settings.json)        — the model the user last picked
+//      interactively; Pi persists every switch, so honoring it here is what makes a
+//      /models pick actually stick across launches on every entry point
+//   4. Tinfoil key present → the Tinfoil default   — strongest (client-attested) privacy
+//   5. signed into Privateer → the same model over the subscription
+//   6. a BYO provider whose key is present         — anthropic, openai, openrouter
+//   7. nothing at all → the account default anyway — so the failure names Privateer
 //      and /login is the visible fix, instead of a keyless OpenRouter dead end
 export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): string {
   const env = opts.env ?? process.env;
@@ -100,6 +128,9 @@ export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): stri
 
   const fromEnv = env.PRIVATEER_MODEL?.trim();
   if (fromEnv) return fromEnv;
+
+  const saved = opts.saved === undefined ? savedPiDefaultSpec() : opts.saved;
+  if (saved) return saved;
 
   // Privacy-first: a Tinfoil key means we can run verifiable TEE inference right now,
   // which we prefer even over the account's NEAR channel — same order the launcher uses.
@@ -126,8 +157,11 @@ export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): stri
 // model sign-in should activate RIGHT AWAY: Tinfoil GLM 5.2, direct when a Tinfoil key
 // is present and over the subscription otherwise — no BYO key needed.
 // PRIVATEER_MODEL still wins — a deliberate override is never stomped.
+// `saved: null` on purpose: this is the sign-in TARGET, and the target is always the
+// confidential model. Whether to actually move a session that sits on a deliberate
+// saved pick is decided at the call sites (which arm the account channel either way).
 export function resolveSignedInModel(env: NodeJS.ProcessEnv = process.env): string {
-  return resolveDefaultModel({ env, signedIn: true });
+  return resolveDefaultModel({ env, signedIn: true, saved: null });
 }
 
 // Split a "provider/id" spec on its first slash (model ids themselves contain "/", so
@@ -151,7 +185,12 @@ function splitSpec(spec: string): { provider: string; modelId: string } | null {
 // `defaultModel` key), so a deliberate /model choice is never stomped. Best-effort —
 // any read/parse/write failure is swallowed; a missing seed just means the user picks
 // a model once via /model. Returns the spec written, or null if we left it alone.
-export function ensurePiDefaultModel(spec: string = ACCOUNT_DEFAULT_SPEC): string | null {
+//
+// The default seed is resolveSignedInModel(), not the static account spec: now that
+// the launcher HONORS a saved default (omits --model when one exists), seeding
+// `privateer/…` for a Tinfoil-keyed user would demote them from direct
+// client-attested inference to the subscription proxy on every later launch.
+export function ensurePiDefaultModel(spec: string = resolveSignedInModel()): string | null {
   const parts = splitSpec(spec);
   if (!parts) return null;
   const settingsPath = join(agentDir(), "settings.json");

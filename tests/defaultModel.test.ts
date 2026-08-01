@@ -1,6 +1,10 @@
 // PRIVATEER_HOME must point somewhere disposable before the paths module resolves
 // (globalDir reads it lazily). ensurePiDefaultModel writes agentDir/settings.json.
 process.env.PRIVATEER_HOME = "/private/tmp/claude-501/pv-default-model-test";
+// The runner's ambient env must not leak into defaults that read process.env
+// (ensurePiDefaultModel's default seed is resolveSignedInModel(), which does).
+delete process.env.TINFOIL_API_KEY;
+delete process.env.PRIVATEER_MODEL;
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,6 +18,7 @@ import {
   ensurePiDefaultModel,
   resolveDefaultModel,
   resolveSignedInModel,
+  savedPiDefaultSpec,
 } from "../src/providers/defaultModel.ts";
 import { agentDir } from "../src/config/paths.ts";
 
@@ -21,6 +26,10 @@ function freshHome() {
   rmSync(process.env.PRIVATEER_HOME!, { recursive: true, force: true });
   mkdirSync(agentDir(), { recursive: true });
 }
+
+// A crashed earlier run could leave a settings.json behind, and resolveDefaultModel
+// now reads it by default — start every run from a clean slate.
+freshHome();
 
 test("resolveDefaultModel: an explicit choice wins over everything", () => {
   assert.equal(
@@ -90,6 +99,51 @@ test("the default is one Tinfoil model, however it's reached", () => {
 test("resolveSignedInModel: Tinfoil when keyed, else the account channel", () => {
   assert.equal(resolveSignedInModel({ TINFOIL_API_KEY: "tk" }), TINFOIL_DEFAULT_SPEC);
   assert.equal(resolveSignedInModel({}), ACCOUNT_DEFAULT_SPEC);
+});
+
+test("resolveDefaultModel: a saved Pi default (the user's own pick) sticks", () => {
+  freshHome();
+  writeFileSync(
+    join(agentDir(), "settings.json"),
+    JSON.stringify({ defaultProvider: "anthropic", defaultModel: "claude-opus-4-8" }),
+  );
+  // The pick outranks key-inference and the signed-in default — this is what makes
+  // a /models switch actually persist across launches.
+  assert.equal(
+    resolveDefaultModel({ env: { TINFOIL_API_KEY: "tk" }, signedIn: true }),
+    "anthropic/claude-opus-4-8",
+  );
+  // …but never a deliberate override.
+  assert.equal(resolveDefaultModel({ env: { PRIVATEER_MODEL: "x/y" }, signedIn: true }), "x/y");
+  assert.equal(resolveDefaultModel({ explicit: "a/b", signedIn: true }), "a/b");
+  // resolveSignedInModel is the sign-in TARGET and ignores the saved pick — the
+  // stay-or-switch decision lives at its call sites.
+  assert.equal(resolveSignedInModel({}), ACCOUNT_DEFAULT_SPEC);
+});
+
+test("savedPiDefaultSpec: needs both halves, tolerates absence", () => {
+  freshHome();
+  assert.equal(savedPiDefaultSpec(), null, "no settings.json → null");
+  writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ defaultModel: "solo-id" }));
+  assert.equal(savedPiDefaultSpec(), null, "model without provider → null");
+  writeFileSync(
+    join(agentDir(), "settings.json"),
+    JSON.stringify({ defaultProvider: "privateer", defaultModel: "tinfoil/glm-5-2" }),
+  );
+  assert.equal(savedPiDefaultSpec(), "privateer/tinfoil/glm-5-2");
+});
+
+test("ensurePiDefaultModel: a Tinfoil key seeds the direct (client-attested) route", () => {
+  freshHome();
+  process.env.TINFOIL_API_KEY = "tk";
+  try {
+    assert.equal(ensurePiDefaultModel(), TINFOIL_DEFAULT_SPEC);
+    const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
+    assert.equal(settings.defaultProvider, "tinfoil");
+    assert.equal(settings.defaultModel, "kimi-k2-6");
+  } finally {
+    delete process.env.TINFOIL_API_KEY;
+  }
 });
 
 test("ensurePiDefaultModel: seeds provider+model when settings.json has no default", () => {

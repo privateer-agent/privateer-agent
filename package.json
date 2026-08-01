@@ -1,7 +1,7 @@
 {
   "name": "privateer-agent",
-  "version": "0.11.0",
-  "description": "Privateer — a provider-agnostic, safe-by-default terminal coding agent with TEE/Tinfoil attestation, rebuilt on the Pi toolkit. Bring your own model across 20 providers.",
+  "version": "0.12.0",
+  "description": "Privacy-first terminal coding agent — bring your own model across 20 providers (Anthropic, OpenAI, OpenRouter, Google, local Ollama…). Safe-by-default permissions, MCP, sub-agents, workflows, and verifiable TEE inference. Built on the Pi toolkit.",
   "type": "module",
   "license": "MIT",
   "author": "Patrick (zahnno)",
@@ -15,22 +15,31 @@
   },
   "keywords": [
     "ai",
+    "ai-agent",
     "coding-agent",
+    "code-assistant",
+    "llm",
+    "claude",
+    "mcp",
     "cli",
     "tui",
     "terminal",
+    "developer-tools",
+    "privacy",
     "pi",
     "tee",
     "confidential-computing",
     "attestation",
-    "tinfoil",
-    "openrouter",
     "anthropic",
     "openai",
+    "openrouter",
     "ollama",
-    "nearai",
-    "venice"
+    "local-llm"
   ],
+  "funding": {
+    "type": "individual",
+    "url": "https://privateer.pro/fund"
+  },
   "bin": {
     "privateer": "./bin/privateer-launch.mjs"
   },
@@ -72,7 +81,7 @@
     "@zed-industries/agent-client-protocol": "^0.4.5",
     "patch-package": "^8.0.1",
     "pi-mcp-adapter": "^2.11.0",
-    "pi-privacy": "^0.9.0",
+    "pi-privacy": "^0.11.0",
     "pi-subagents": "^0.34.0",
     "picomatch": "^4.0.4",
     "privateer-workflow": "^0.1.0",

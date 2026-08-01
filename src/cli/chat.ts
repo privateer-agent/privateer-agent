@@ -47,7 +47,7 @@ async function main() {
     dropPersistedAccountCredential,
   } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
-  const { resolveDefaultModel, resolveSignedInModel } = await import("../providers/defaultModel.ts");
+  const { resolveDefaultModel, resolveSignedInModel, savedPiDefaultSpec } = await import("../providers/defaultModel.ts");
   const { postOutbox } = await import("../outbox/cloudOutbox.ts");
   const { addPendingCloud } = await import("../routines/store.ts");
 
@@ -596,11 +596,15 @@ async function main() {
       console.log(`${GREEN}Signed in as ${user.email ?? user.id}.${RESET}`);
       // Move the live session onto a confidential model right away, so the next prompt
       // doesn't dead-end on the launch model's missing key. resolveSignedInModel picks
-      // Tinfoil GLM 5.2 — direct with a Tinfoil key, over the subscription otherwise;
-      // PRIVATEER_MODEL (a deliberate override) is respected and left alone.
+      // the Tinfoil default — direct with a Tinfoil key, over the subscription
+      // otherwise. Two deliberate choices are respected and left alone: a
+      // PRIVATEER_MODEL override, and a saved default the user picked themselves
+      // (Pi persists every interactive switch) that points anywhere other than the
+      // target — sign-in arms the account channel, it doesn't move a chosen model.
       if (!process.env.PRIVATEER_MODEL?.trim()) {
         const target = resolveSignedInModel();
-        if (target !== currentSpec) await switchModel(target, false);
+        const saved = savedPiDefaultSpec();
+        if (target !== currentSpec && (!saved || saved === target)) await switchModel(target, false);
       }
     } catch (e) {
       console.log(`${RED}${(e as Error).message}${RESET}`);

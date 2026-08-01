@@ -172,6 +172,8 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   const { makeAccountProvider, privateerChannel } = await import("../providers/account.ts");
   const { hasCredentials } = await import("../auth/privateer.ts");
   const { webEnabled, mediaEnabled } = await import("./hosted.ts");
+  const { noQuarterActive } = await import("../permissions/noQuarter.ts");
+  const { cliPalette, detectScheme } = await import("../ui/palette.ts");
 
   const factories: ExtensionFactory[] = [makePermissionGate(opts.gate)];
 
@@ -182,6 +184,19 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   factories.push(
     makePiPrivacyExtension({
       privateerVerifiedTee: (m: any) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
+      // No quarter = unattended: the PII send-or-redact question would block a session
+      // the operator explicitly stepped away from, so it's swallowed the safe way —
+      // auto-redact + send — and what was masked surfaces as output instead. A live
+      // function, not a boolean: shift+tab / /no-quarter flips this mid-session.
+      piiUnattended: noQuarterActive,
+      // Color-coat that notice as the moat acting on your behalf: the red no-quarter
+      // flag (same glyph/color as the no-quarter banner in chat.ts), body in the
+      // accent color — distinct from yellow warnings and red errors.
+      renderPiiAutoRedact: (notice: string) => {
+        const p = cliPalette(detectScheme());
+        const body = notice.startsWith("⚑ ") ? notice.slice(2) : notice;
+        return `${p.RED}⚑${p.RESET} ${p.CYAN}${body}${p.RESET}`;
+      },
     }),
   );
   factories.push(makeAccountProvider()); // must follow pi-privacy — see header

@@ -12,6 +12,9 @@
   <a href="https://www.npmjs.com/package/privateer-agent">
     <img src="https://img.shields.io/npm/v/privateer-agent" alt="npm" />
   </a>
+  <a href="https://www.npmjs.com/package/privateer-agent">
+    <img src="https://img.shields.io/npm/dm/privateer-agent" alt="npm downloads" />
+  </a>
   <a href="https://github.com/privateer-agent/privateer-agent/releases">
     <img src="https://img.shields.io/badge/changelog-what's%20new-5b8def" alt="Changelog" />
   </a>
