@@ -209,11 +209,12 @@ if (sub === "update") {
   if (BUNDLED) {
     // PRIVATEER_UPDATE=1 flips the installer into update mode: weigh-anchor banner,
     // "X → Y" version reporting, and an early exit (no download) when already current.
+    // ?update=1 tells the server this fetch is an update, not a fresh install.
     const env = { ...process.env, PRIVATEER_UPDATE: "1" };
     if (isWin) {
-      runToCompletion("powershell", ["-NoProfile", "-Command", "irm https://privateer.pro/install.ps1 | iex"], { env });
+      runToCompletion("powershell", ["-NoProfile", "-Command", "irm 'https://privateer.pro/install.ps1?update=1' | iex"], { env });
     } else {
-      runToCompletion("sh", ["-c", "curl -fsSL https://privateer.pro/install.sh | sh"], { env });
+      runToCompletion("sh", ["-c", "curl -fsSL 'https://privateer.pro/install.sh?update=1' | sh"], { env });
     }
   } else {
     updateNpmPackage();
