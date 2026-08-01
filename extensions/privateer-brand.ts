@@ -35,6 +35,7 @@ import {
   verificationLink,
 } from "../src/providers/account.ts";
 import { resolveSignedInModel, savedPiDefaultSpec } from "../src/providers/defaultModel.ts";
+import { canOpenBrowser, openInBrowser } from "../src/util/openBrowser.ts";
 import { discoverContextFiles, onContextChanged } from "../src/context.ts";
 import { type Palette, paletteFor } from "../src/ui/palette.ts";
 
@@ -382,13 +383,22 @@ export default function privateerBrand(pi: any): void {
           // user copies into a browser. See providers/account.ts verificationLink.
           const uri = clean(verificationLink(code.verification_uri_complete ?? code.verification_uri));
           const userCode = clean(code.user_code);
+          // Browser-first sign-in: the URL carries the code, so the page opens straight
+          // onto the Authorize screen — the user clicks, never types. Best-effort and
+          // fire-and-forget: the copy below decides its wording SYNCHRONOUSLY off
+          // canOpenBrowser (SSH/headless → the old app-approve copy), and the printed
+          // link stays either way, so a launcher that silently fails costs nothing.
+          const opening = Boolean(uri) && canOpenBrowser();
+          if (opening) void openInBrowser(uri);
           ctx?.ui?.setWidget?.(
             "privateer-signin",
             [
               `${p.INK}⚓ Sign in to Privateer${p.RESET}`,
-              `${p.DIM}Approve this terminal in the Privateer app:${p.RESET}`,
-              `   code   ${p.BOLD}${p.ACCENT}${userCode}${p.RESET}`,
-              uri ? `${p.DIM}   or open ${p.RESET}${p.INK}${uri}${p.RESET}` : "",
+              opening
+                ? `${p.DIM}Authorize this terminal in the browser window that just opened.${p.RESET}`
+                : `${p.DIM}Approve this terminal in the Privateer app:${p.RESET}`,
+              `   code   ${p.BOLD}${p.ACCENT}${userCode}${p.RESET}${opening ? `${p.DIM} — check it matches the one in your browser${p.RESET}` : ""}`,
+              uri ? `${p.DIM}   ${opening ? "no browser? open" : "or open"} ${p.RESET}${p.INK}${uri}${p.RESET}` : "",
               `${p.DIM}   waiting for approval… ${p.RESET}${p.DIM}(esc to cancel · ${p.RESET}${p.INK}/login keys${p.DIM} to use your own API key instead)${p.RESET}`,
             ].filter(Boolean),
             { placement: "aboveEditor" },

@@ -25,6 +25,7 @@ import {
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { globalDir } from "../config/paths.ts";
+import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
 import {
@@ -398,15 +399,21 @@ export const privateerOAuthProvider = {
       try {
         await runDeviceLogin({
           signal: cb.signal,
-          onCode: (code) =>
+          onCode: (code) => {
+            // Absolute url — the server's value is scheme-less and Pi renders this as
+            // a terminal hyperlink. See verificationLink.
+            const uri = verificationLink(code.verification_uri_complete ?? code.verification_uri);
+            // Browser-first: the URL carries the code, so the page lands on the
+            // Authorize screen and the user just clicks. Best-effort fire-and-forget —
+            // Pi's dialog keeps showing the code + link as the fallback either way.
+            if (uri && canOpenBrowser()) void openInBrowser(uri);
             cb.onDeviceCode?.({
               userCode: code.user_code,
-              // Absolute url — the server's value is scheme-less and Pi renders this as
-              // a terminal hyperlink. See verificationLink.
-              verificationUri: verificationLink(code.verification_uri_complete ?? code.verification_uri),
+              verificationUri: uri,
               intervalSeconds: code.interval,
               expiresInSeconds: code.expires_in,
-            }),
+            });
+          },
         });
       } catch (e) {
         // Normalize the cancel message to exactly "Login cancelled" (no period):

@@ -116,13 +116,18 @@ dependency.
 
 ## 4. Terminal sessions & linking
 
-### 4.1 Device-code login (RFC 8628)
+### 4.1 Device-code login (RFC 8628), browser-first
 The terminal never sees a password or wallet key. Instead:
 1. Terminal → `POST /auth/device/code` → short `user_code` + secret `device_code`.
    The terminal also sends its **identity public key** (`terminalPub`, see §6.1).
-2. The human enters `user_code` in the already-logged-in app
-   (`LinkTerminalScreen` → `POST /auth/device/approve`), binding the pending login to
-   their account. The app **pins** the returned `terminalPub` (see §6.2).
+2. The terminal **auto-opens** `verification_uri_complete` in the user's browser
+   (`src/util/openBrowser.ts` — skipped over SSH, on display-less hosts, or with
+   `PRIVATEER_NO_BROWSER=1`, where the printed link/code is the fallback). The page
+   (`LinkTerminalScreen` in authorize mode) shows the code for a **visual match-check**
+   plus what's being approved (`GET /auth/device/info`: device label, request age) and
+   Authorize/Deny buttons → `POST /auth/device/approve`, binding the pending login to
+   their account. The app **pins** the returned `terminalPub` (see §6.2). Typing the
+   code into the app's Link-a-terminal form still works and is the same endpoint.
 3. Terminal polls `POST /auth/device/token`, receives a CLI-scoped JWT session.
 
 This works identically for email and wallet accounts — all identity proof happens in

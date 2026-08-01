@@ -275,8 +275,11 @@ a guarantee.
 
 ## Privateer account (billed inference)
 
-Instead of bringing your own key, run **`/signin`** to sign into a Privateer account — an
-app-brokered device flow where you approve a short code in the Privateer app, so wallet and
+Instead of bringing your own key, run **`/signin`** to sign into a Privateer account. Your
+browser opens straight onto an **Authorize this terminal?** page on privateer.pro — check the
+code on the page matches the one in your terminal and click Authorize; the terminal signs
+itself in moments later. (Over SSH or on a headless box the terminal prints the link and code
+to approve from the app instead — set `PRIVATEER_NO_BROWSER=1` to always do that.) Wallet and
 email accounts work identically and no password or key ever touches the terminal. Inference
 is then billed to your subscription and defaults to a **NEAR TEE** model. Sign out any time
 with `/signout`; manage linked terminals from the app.
@@ -293,10 +296,11 @@ and a management surface for it.
 
 ### Linking a terminal
 
-1. Run **`privateer`** and **`/signin`**. It prints a short device code.
-2. Open the app → **Link a terminal**, enter the code (or tap the deep link). No password or
-   wallet key ever touches the terminal, and the app pins the terminal's public key on first
-   link.
+1. Run **`privateer`** and **`/signin`**. Your browser opens an authorize page — check the
+   code matches the terminal's and click **Authorize**. (No browser handy? The terminal also
+   prints the link and code: open the app → **Link a terminal** and enter it there.) No
+   password or wallet key ever touches the terminal, and the app pins the terminal's public
+   key on first link.
 3. In the terminal, turn on **`/remote-access`** (off by default). The terminal now shows
    **Online** in the app.
 
