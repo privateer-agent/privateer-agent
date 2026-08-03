@@ -139,6 +139,36 @@ jobs:
           done
           echo "all bundles attached"
 
+      # Publish the release for real, and mark it Latest. This step exists because
+      # DELETING A TAG DEMOTES ITS RELEASE TO A DRAFT — so re-pushing a tag to fix a
+      # failed run (as v0.12.5 did) leaves a fully-built release that `releases/latest`
+      # refuses to see, since that endpoint skips drafts. create-release's
+      # `gh release view || gh release create` can't catch it either: a draft IS
+      # viewable, so it reuses the draft and nobody flips it back. The visible symptom
+      # is `privateer update` reporting the PREVIOUS version as "the latest release"
+      # (install.sh resolves the version off the releases/latest redirect), while npm
+      # is correctly on the new one. Idempotent on a normal first-time release.
+      - name: Publish the release and mark it latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
+          test "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft)" = "false"
+          # The endpoint the installers actually read must now point at this tag.
+          # Retried: the redirect can lag the API by a few seconds.
+          for i in 1 2 3 4 5; do
+            latest="$(curl -fsI "https://github.com/${GITHUB_REPOSITORY}/releases/latest" \
+              | tr -d '\r' | sed -n 's|^[Ll]ocation:.*/tag/||p')"
+            [ "$latest" = "${GITHUB_REF_NAME}" ] && break
+            echo "releases/latest is '${latest}' (attempt ${i}) — retrying"
+            sleep 5
+          done
+          test "$latest" = "${GITHUB_REF_NAME}" \
+            || { echo "releases/latest resolves to '${latest}', expected '${GITHUB_REF_NAME}'"; exit 1; }
+          echo "published ${GITHUB_REF_NAME} — releases/latest agrees"
+
   # Publish to npm WITH PROVENANCE. This is the load-bearing trust signal: npm
   # records a signed Sigstore attestation binding the published tarball to this
   # repo, this commit and this workflow run, and the package page then renders a
