@@ -74,7 +74,7 @@
     "@juicesharp/rpiv-ask-user-question": "^2.2.0",
     "@juicesharp/rpiv-web-tools": "^1.20.0",
     "@noble/ciphers": "^2.1.1",
-    "@noble/curves": "^1.9.7",
+    "@noble/curves": "^2.2.0",
     "@noble/hashes": "^1.7.1",
     "@phala/dcap-qvl": "^0.5.2",
     "@zed-industries/agent-client-protocol": "^0.4.5",
