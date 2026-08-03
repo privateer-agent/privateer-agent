@@ -390,6 +390,37 @@ the app are write-only — the app can name them but never read them back. Note 
 live in plaintext in `config.json` on your machine, and every channel action is appended to
 `~/.privateer/channels-audit.log`.
 
+## Drive it from Buzz or Zed — ACP
+
+Privateer speaks the [Agent Client Protocol](https://agentclientprotocol.com) (ACP v1 over
+stdio). Any ACP host — [Buzz](https://buzz.xyz), Block's team messenger where agents are
+teammates, or the [Zed](https://zed.dev) editor — can spawn `privateer acp` and drive it:
+prompts stream back, tool activity shows live, and the host's model picker lists Privateer's
+catalog with TEE-backed models labelled **confidential (TEE)**.
+
+The part we care about: **the host renders the UI, but authority never leaves your machine.**
+
+- Every action is classified by Privateer's own permission gate — ACP's
+  `session/request_permission` only delivers the prompt.
+- The **tool ceiling** comes from your local config, not the host, and ships **read-only**
+  (`read`, `grep`, `find`, `ls`). The host cannot widen it.
+- Filesystem access is **confined to one directory root**; out-of-tree access is refused,
+  not prompted.
+- Every ambiguous outcome — unreachable host, cancelled dialog, unknown answer, aborted
+  turn — resolves to **deny**.
+- "Allow for this session" lives in memory and dies with the session; dangerous shell
+  (`curl … | sh` and friends) can never become standing permission.
+
+Zed setup (`settings.json`):
+
+```json
+{ "agent_servers": { "Privateer": { "command": "privateer", "args": ["acp"] } } }
+```
+
+Honest caveat for Buzz: **Buzz currently auto-approves permission prompts**, so under Buzz
+the tool ceiling *is* the control — which is exactly why the default is read-only. Full
+setup, config, and limitations: [`docs/acp.md`](docs/acp.md).
+
 ## Connectors — MCP
 
 Privateer is an **MCP client**. Point it at a [Model Context Protocol](https://modelcontextprotocol.io)
@@ -543,7 +574,8 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/update` · `/privateer` | update to the latest release / Privateer status and posture |
 
 Shell subcommands: `privateer` (interactive), `privateer update`, `privateer harbor …`,
-`privateer --no-quarter`, `privateer --version`.
+`privateer acp` (serve the agent to an ACP host like Buzz or Zed — see
+[`docs/acp.md`](docs/acp.md)), `privateer --no-quarter`, `privateer --version`.
 
 ## Develop
 
