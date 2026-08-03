@@ -187,6 +187,13 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
 
+      # Verify registry signatures and provenance attestations for the entire
+      # installed tree before publishing anything built from it. Catches a
+      # registry-side tarball swap that a lockfile integrity hash alone would
+      # only catch if the lockfile predates the swap.
+      - name: Audit dependency signatures
+        run: npm audit signatures
+
       # The tag must match the version we're about to publish, or a mistagged push
       # publishes something nobody reviewed under that tag's provenance.
       - name: Verify tag matches package version

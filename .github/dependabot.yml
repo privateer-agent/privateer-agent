@@ -1,0 +1,14 @@
+# Supply-chain: dependency updates ride a cooldown so we are never among the
+# first installs of a fresh release. Almost every npm malware incident is
+# caught and unpublished within days of publish — waiting a week means the
+# ecosystem steps on the mine before we do. See docs/supply-chain.md.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    open-pull-requests-limit: 5
