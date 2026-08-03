@@ -56,6 +56,10 @@ const DEFAULT_MODELS = [
   "anthropic/claude-sonnet-5",
   "openai/gpt-5.6-sol",
   "deepseek/deepseek-v4-flash",
+  // 2026-08 releases, confirmed live on OpenRouter (ZDR-covered ids reach the
+  // account catalog automatically; these seeds just make them resolve at launch).
+  "moonshotai/kimi-k3",
+  "z-ai/glm-5.2",
 ];
 
 function seedModel(id: string) {
@@ -816,7 +820,10 @@ export async function armAccountCredential(
     // so staying silent leaves the user to discover it as a bare "No API key found for
     // privateer" on their first prompt.
     const c = ctx as SeedContext;
-    if (opts.notify !== false && c?.hasUI) {
+    // If the credentials vanished during the call, the spawn hit a 401 and
+    // onSessionExpired already announced the sign-out — a second line here would
+    // just repeat it (we returned early above if we STARTED signed out).
+    if (opts.notify !== false && c?.hasUI && hasCredentials()) {
       c.ui?.notify?.(`Privateer account channel unavailable — ${(e as Error).message}`, "error");
     }
     return false;

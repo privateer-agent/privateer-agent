@@ -451,8 +451,14 @@ export async function runDeviceLogin(opts: {
 // Pass the server's own message through so the user learns what to actually do.
 async function spawnFailure(res: Response): Promise<Error> {
   if (res.status === 401) {
-    clearCredentials();
-    notifySessionExpired();
+    // Announce only the signed-in → signed-out transition: concurrent launch-time
+    // spawns (warmSession + the account-channel seed) can both 401 on the same dead
+    // login, and whichever lands second must stay silent. Same guard as
+    // handleServerRevoke.
+    if (hasCredentials()) {
+      clearCredentials();
+      notifySessionExpired();
+    }
     return new Error("Your Privateer session expired. Run /login to sign in again.");
   }
   let message: string | undefined;

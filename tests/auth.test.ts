@@ -17,6 +17,7 @@ import {
   defaultDeviceLabel,
   spawnAccountCredentials,
   warmSession,
+  onSessionExpired,
   revokeLocalSessions,
   revokeAccountSession,
   logout,
@@ -236,6 +237,41 @@ test("logout wipes local state even when the server is unreachable", async () =>
 
     assert.equal(hasCredentials(), false);
   } finally {
+    globalThis.fetch = savedFetch;
+    if (savedEnv === undefined) delete process.env.PRIVATEER_SERVER_URL;
+    else process.env.PRIVATEER_SERVER_URL = savedEnv;
+    clearCredentials();
+  }
+});
+
+// One dead login must be announced ONCE. At launch, warmSession (child session) and the
+// account-channel seed (spawnAccountCredentials) both hit /auth/session/spawn while the
+// stale credentials still exist locally; both 401. Without the transition guard in
+// spawnFailure the user read "session expired" twice.
+test("concurrent 401 spawns announce the expiry once", async () => {
+  const savedFetch = globalThis.fetch;
+  const savedEnv = process.env.PRIVATEER_SERVER_URL;
+  let expiredFires = 0;
+  const unsubscribe = onSessionExpired(() => { expiredFires += 1; });
+  globalThis.fetch = (async () => new Response(null, { status: 401 })) as typeof fetch;
+  try {
+    process.env.PRIVATEER_SERVER_URL = "https://acct.example.com";
+    saveCredentials({
+      accessToken: "stale-at",
+      refreshToken: "stale-rt",
+      user: { id: "u1", email: "a@b.co", solanaPublicKey: null, kekSource: null },
+      serverBaseUrl: "https://acct.example.com",
+    });
+
+    await Promise.all([
+      warmSession(), // swallows the expiry — it's announced via onSessionExpired
+      spawnAccountCredentials().catch(() => { /* expected: session expired */ }),
+    ]);
+
+    assert.equal(expiredFires, 1, "one dead login → exactly one expiry announcement");
+    assert.equal(hasCredentials(), false, "the dead machine login was wiped");
+  } finally {
+    unsubscribe();
     globalThis.fetch = savedFetch;
     if (savedEnv === undefined) delete process.env.PRIVATEER_SERVER_URL;
     else process.env.PRIVATEER_SERVER_URL = savedEnv;

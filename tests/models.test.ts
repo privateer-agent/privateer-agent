@@ -28,10 +28,14 @@ test("qwen entry uses an env template key, never a literal", () => {
   assert.equal(q.api, "openai-completions");
   assert.deepEqual(q.compat, { thinkingFormat: "qwen" });
   assert.ok(q.models.some((m) => m.id === "qwen3-max"));
-  // A.4 defaults
-  assert.equal(q.models[0].contextWindow, 128000);
-  assert.equal(q.models[0].maxTokens, 16384);
-  assert.deepEqual(q.models[0].cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  // Day-one seed (2026-08-03) leads with its real ~1M window (SEED_CONTEXT override).
+  assert.equal(q.models[0].id, "qwen3.8-max-preview");
+  assert.equal(q.models[0].contextWindow, 1_000_000);
+  // A.4 defaults for everything without an override
+  const qwen3max = q.models.find((m) => m.id === "qwen3-max")!;
+  assert.equal(qwen3max.contextWindow, 128000);
+  assert.equal(qwen3max.maxTokens, 16384);
+  assert.deepEqual(qwen3max.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 });
 
 test("writeModelsJson merges without clobbering existing providers", () => {

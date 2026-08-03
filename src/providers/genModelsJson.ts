@@ -36,6 +36,13 @@ export interface ModelsJson {
   providers: Record<string, ModelsJsonProvider>;
 }
 
+// Per-id context-window overrides for seeds whose real window is far from the
+// Appendix A.4 default (kept until the live listing refines them). Qwen3.8-Max
+// serves ~1M tokens (983,616 advertised at launch, 2026-08-03).
+const SEED_CONTEXT: Record<string, number> = {
+  "qwen3.8-max-preview": 1_000_000,
+};
+
 function seedModel(id: string, compat?: Record<string, unknown>): ModelsJsonModel {
   return {
     id,
@@ -43,7 +50,7 @@ function seedModel(id: string, compat?: Record<string, unknown>): ModelsJsonMode
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000,
+    contextWindow: SEED_CONTEXT[id] ?? 128000,
     maxTokens: 16384,
     ...(compat ? { compat } : {}),
   };

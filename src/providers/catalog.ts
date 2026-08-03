@@ -59,7 +59,7 @@ export const PROVIDERS: ProviderEntry[] = [
     api: "openai-completions",
     keyEnv: "${DASHSCOPE_API_KEY}",
     compat: { thinkingFormat: "qwen" },
-    seedModels: ["qwen3-max", "qwen3-coder-plus", "qwen-max-latest"],
+    seedModels: ["qwen3.8-max-preview", "qwen3-max", "qwen3-coder-plus", "qwen-max-latest"],
   },
   { id: "ollama", source: "pi-privacy" },
   { id: "nearai", source: "pi-privacy" },
