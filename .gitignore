@@ -20,6 +20,9 @@ secrets.json
 # Spike/scratch working dirs
 work/
 
+# Isolated home used by `npm run dev:fresh`
+.dev-home/
+
 # pi-subagents runtime artifacts (transcripts/outputs from subagent runs)
 .pi-subagents/
 

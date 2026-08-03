@@ -1,6 +1,6 @@
 {
   "name": "privateer-agent",
-  "version": "0.12.4",
+  "version": "0.12.5",
   "description": "Privacy-first terminal coding agent — bring your own model across 20 providers (Anthropic, OpenAI, OpenRouter, Google, local Ollama…). Safe-by-default permissions, MCP, sub-agents, workflows, and verifiable TEE inference. Built on the Pi toolkit.",
   "type": "module",
   "license": "MIT",
@@ -60,7 +60,8 @@
     "start": "tsx src/main.ts",
     "chat": "node --env-file=.env --import tsx src/cli/chat.ts",
     "channels": "node --env-file=.env --import tsx src/channels/run.ts",
-    "dev": "tsx watch src/main.ts",
+    "dev": "node bin/privateer-launch.mjs",
+    "dev:fresh": "PRIVATEER_HOME=\"$PWD/.dev-home\" node bin/privateer-launch.mjs",
     "typecheck": "tsc --noEmit",
     "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done"
   },
@@ -83,6 +84,7 @@
     "pi-privacy": "^0.11.0",
     "pi-subagents": "^0.34.0",
     "picomatch": "^4.0.4",
+    "privateer-speak": "file:../pi-speak",
     "privateer-workflow": "^0.1.0",
     "tinfoil": "^1.1.11",
     "tsx": "^4.16.0",
