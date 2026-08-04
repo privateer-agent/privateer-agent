@@ -107,10 +107,80 @@ function buildMark(p: Palette): string[] {
   return rows;
 }
 
-// Visible width = characters after stripping SGR escapes. Everything we render inside
-// the box is ASCII or a BMP width-1 symbol, so a plain length is exact here.
+// Code points that terminals render two cells wide. Two groups matter to us: the CJK /
+// fullwidth ranges, and the symbols Unicode gives *emoji presentation by default* — the
+// second group is the trap, because they look like ordinary BMP dingbats. ⚓ (U+2693) is
+// one, and counting it as one cell pushed the banner's right border a column past the
+// frame on the PRIVATEER.md row. The list is the complete BMP Emoji_Presentation set plus
+// the astral emoji planes, so swapping in another glyph can't quietly reintroduce that.
+const WIDE_RANGES: Array<[number, number]> = [
+  [0x1100, 0x115f], [0x231a, 0x231b], [0x2329, 0x232a], [0x23e9, 0x23ec], [0x23f0, 0x23f0],
+  [0x23f3, 0x23f3], [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f],
+  [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be], [0x26c4, 0x26c5],
+  [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea], [0x26f2, 0x26f3], [0x26f5, 0x26f5],
+  [0x26fa, 0x26fa], [0x26fd, 0x26fd], [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728],
+  [0x274c, 0x274c], [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
+  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55],
+  [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0xa4cf], [0xa960, 0xa97f],
+  [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f], [0xff00, 0xff60],
+  [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff], [0x1f900, 0x1f9ff],
+  [0x1fa70, 0x1faff],
+];
+
+function isWide(cp: number): boolean {
+  return WIDE_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
+}
+
+// Visible width in terminal cells: SGR escapes are free, combining marks are free, and
+// wide glyphs cost two. A variation selector re-negotiates the *previous* glyph's
+// presentation (FE0F → emoji/wide, FE0E → text/narrow), so it adjusts the running total
+// rather than contributing width of its own.
 function vlen(s: string): number {
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+  const plain = s.replace(/\x1b\[[0-9;]*m/g, "");
+  let w = 0;
+  let prevWide = false;
+  for (const ch of plain) {
+    const cp = ch.codePointAt(0)!;
+    if (cp === 0xfe0f) {
+      if (!prevWide) { w += 1; prevWide = true; }
+      continue;
+    }
+    if (cp === 0xfe0e) {
+      if (prevWide) { w -= 1; prevWide = false; }
+      continue;
+    }
+    // Combining marks and zero-width joiners/spaces stack onto the previous cell.
+    if ((cp >= 0x0300 && cp <= 0x036f) || cp === 0x200b || cp === 0x200d || cp === 0xfeff) continue;
+    prevWide = isWide(cp);
+    w += prevWide ? 2 : 1;
+  }
+  return w;
+}
+
+// Clip a colored line to `max` cells. The banner caps its inner width to the terminal, so
+// on a narrow window a long row (a deep cwd, a long update notice) would otherwise run
+// past the right border and wrap — the same broken frame, from the other direction. SGR
+// escapes are copied through free of charge and a RESET is appended so the truncation
+// can't leak a color into the border. A wide glyph straddling the boundary is dropped and
+// replaced by a space, so the count still lands exactly on `max`.
+function vclip(s: string, max: number, reset: string): string {
+  if (vlen(s) <= max) return s;
+  const parts = s.split(/(\x1b\[[0-9;]*m)/);
+  let out = "";
+  let w = 0;
+  for (const part of parts) {
+    if (part.startsWith("\x1b[")) {
+      out += part;
+      continue;
+    }
+    for (const ch of part) {
+      const cw = vlen(ch);
+      if (w + cw > max) return `${out}${w < max ? " " : ""}${reset}`;
+      out += ch;
+      w += cw;
+    }
+  }
+  return `${out}${reset}`;
 }
 
 // Strip ESC/C0/C1 control bytes from any value we did NOT author before it lands in a
@@ -256,8 +326,9 @@ function renderBanner(width: number, p: Palette, mark: string[], modelProvider?:
   const bar = "─".repeat(inner + 2);
   const out = [`${p.BORDER}╭${bar}╮${p.RESET}`];
   for (const row of rows) {
-    const pad = Math.max(0, inner - vlen(row));
-    out.push(`${p.BORDER}│${p.RESET} ${row}${" ".repeat(pad)} ${p.BORDER}│${p.RESET}`);
+    const line = vclip(row, inner, p.RESET);
+    const pad = Math.max(0, inner - vlen(line));
+    out.push(`${p.BORDER}│${p.RESET} ${line}${" ".repeat(pad)} ${p.BORDER}│${p.RESET}`);
   }
   out.push(`${p.BORDER}╰${bar}╯${p.RESET}`);
   return out;
@@ -267,7 +338,9 @@ function renderBanner(width: number, p: Palette, mark: string[], modelProvider?:
 // provider so the account line reflects the picked model, and the live theme so every
 // colour tracks the terminal background (dark ink on light, light ink on dark). The
 // palette and mark are resolved once here (per theme), not per frame.
-function headerComponent(theme: any, modelProvider?: string) {
+// Exported for tests/banner.test.ts, which renders the real banner and checks the frame
+// is square — the failure mode is a one-cell drift no typecheck can catch.
+export function headerComponent(theme: any, modelProvider?: string) {
   const p = paletteFor(theme);
   const mark = buildMark(p);
   return {
