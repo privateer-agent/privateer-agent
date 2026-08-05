@@ -8,6 +8,7 @@
  *   token — one prompt per env key (masked); `credUrl` is shown as "get one at …"
  *   path  — one prompt replacing the `fill` placeholder ARG (a folder, a DSN)
  *   oauth — nothing to type here; you authorize in a browser on THIS machine
+ *   url   — one prompt to confirm the endpoint of a server already running HERE
  *   none  — runs locally with no credentials, save it as-is
  *
  * Keep this list conservative and correct: a broken command in the catalog is worse
@@ -16,7 +17,7 @@
  */
 import type { McpDraft, McpTransport } from "../remote/mcpControl.ts";
 
-export type CatalogNeeds = "token" | "path" | "oauth" | "none";
+export type CatalogNeeds = "token" | "path" | "oauth" | "url" | "none";
 
 export interface CatalogEntry {
   // Stable key for the picker; also the default server name written to config.
@@ -36,6 +37,25 @@ export interface CatalogEntry {
   fill?: string;
   // Where to get the credential, shown as a hint in the form.
   credUrl?: string;
+  /**
+   * An HTTP server running on THIS MACHINE that needs no credential at all.
+   *
+   * A third shape alongside `oauth` and a stored bearer token, and it needs its own
+   * flag rather than falling out of the URL: every other http entry here is a remote
+   * service the user authorizes, so "must authenticate" is derived from
+   * `transport === "http"` alone. That is false here — there is nothing to authorize
+   * — so the flag is what makes draftFromCatalog emit `auth: "none"`. Without it the
+   * adapter goes hunting for an authorization server that does not exist.
+   *
+   * Always pair with `hosted: false`: a hosted enclave has no route to the user's
+   * loopback, and hostedCapable()'s derived rule keys on `oauth`, not on this.
+   */
+  localHttp?: boolean;
+  /**
+   * Where to learn how to TURN THE SERVER ON — deliberately not `credUrl`, which
+   * means "get a credential here" and would be a lie for an entry that has none.
+   */
+  docsUrl?: string;
   // Can this connector run on a HOSTED (Harbor) agent? Leave unset to take the derived
   // answer from hostedCapable() below; set it explicitly only to say "no" to something
   // that would otherwise qualify.
@@ -110,7 +130,10 @@ export const MCP_CATALOG: CatalogEntry[] = [
     label: "Linear",
     blurb: "Issues and projects. Sign in via browser.",
     transport: "http",
-    url: "https://mcp.linear.app/sse",
+    // /sse is GONE — it 404s on both GET and POST (checked 2026-07-31). Linear moved
+    // to the Streamable HTTP endpoint; the old URL silently failed for anyone who
+    // added Linear from this picker. Mirrored from the client copy on 2026-08-06.
+    url: "https://mcp.linear.app/mcp",
     oauth: true,
     needs: "oauth",
   },
@@ -320,6 +343,38 @@ export const MCP_CATALOG: CatalogEntry[] = [
     args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
     needs: "none",
   },
+
+  // ── Local apps that host their own MCP server ───────────────────────────────
+  // http, but on 127.0.0.1: nothing to install, nothing to authorize, nothing
+  // leaving the machine. See `localHttp` on CatalogEntry for why that needs a flag.
+  {
+    // Unreal Engine 5.8 embeds an MCP server in the EDITOR PROCESS (plugin
+    // `ModelContextProtocol`, surfaced as "Unreal MCP"; the tools come from the
+    // "All Toolsets" plugin, which has to be enabled too). Three facts shape this:
+    //
+    //  1. NO AUTHENTICATION, of any kind. Hence localHttp + auth:"none".
+    //  2. LOOPBACK ONLY. It binds per [HTTPServer.Listeners] DefaultBindAddress
+    //     (default `localhost`) AND rejects non-loopback `Origin` headers — so the
+    //     agent has to be on the same machine as the editor. True for this CLI and
+    //     for the desktop app; not true for a hosted agent, hence hosted: false.
+    //  3. IT IS ONLY UP WHILE THE EDITOR IS. A connector that fails here usually
+    //     means "Unreal isn't running", not "this is misconfigured".
+    //
+    // The port and path are editable in Editor Preferences → Model Context
+    // Protocol, so `needs: "url"`: the one setup step is confirming the endpoint
+    // rather than pasting a secret. `ModelContextProtocol.GenerateClientConfig` in
+    // the UE console prints the URL the editor is actually serving.
+    id: "unreal",
+    name: "unreal",
+    label: "Unreal Engine",
+    blurb: "Drive the Unreal Editor — actors, lighting, materials, tests.",
+    transport: "http",
+    url: "http://127.0.0.1:8000/mcp",
+    localHttp: true,
+    needs: "url",
+    hosted: false,
+    docsUrl: "https://dev.epicgames.com/documentation/unreal-engine/unreal-mcp-in-unreal-editor",
+  },
 ];
 
 export function catalogEntry(id: string): CatalogEntry | undefined {
@@ -341,9 +396,11 @@ export function promptOrder(e: CatalogEntry): string[] {
 //                and mcpControl treats that as "clear this key" — so a skipped
 //                optional credential is simply absent, never a bogus empty one.
 //   input.fill — the real path/DSN replacing the placeholder ARG (needs:"path").
+//   input.url  — the endpoint the user confirmed (needs:"url"); blank keeps the
+//                catalog default, so a straight <enter> is the documented port.
 export function draftFromCatalog(
   e: CatalogEntry,
-  input: { env?: Record<string, string>; fill?: string } = {},
+  input: { env?: Record<string, string>; fill?: string; url?: string } = {},
 ): McpDraft {
   const draft: McpDraft = { name: e.name, transport: e.transport };
 
@@ -354,11 +411,13 @@ export function draftFromCatalog(
     const filled = input.fill?.trim();
     draft.args = (e.args ?? []).map((a) => (e.fill && a === e.fill && filled ? filled : a));
   } else {
-    draft.url = e.url;
-    // Every http entry in this catalog is an OAuth connector. Emit the adapter's own
-    // vocabulary (`auth`) rather than the legacy boolean, so the projection carries
-    // `auth: "oauth"` and not a bogus boolean in the adapter's OAuthConfig slot.
-    draft.auth = (e.oauth ?? true) ? "oauth" : "none";
+    draft.url = input.url?.trim() || e.url;
+    // Emit the adapter's own vocabulary (`auth`) rather than the legacy boolean, so
+    // the projection carries a string and not a bogus boolean in the adapter's
+    // OAuthConfig slot. A localHttp entry authenticates to nothing — saying "oauth"
+    // there would send the adapter looking for an authorization server that does not
+    // exist, which fails at connect time rather than at save time.
+    draft.auth = e.localHttp ? "none" : (e.oauth ?? true) ? "oauth" : "none";
   }
 
   const keys = Object.keys(e.env ?? {});

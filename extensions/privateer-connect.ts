@@ -297,6 +297,20 @@ function pendingFromCatalog(e: CatalogEntry): Pending {
       hint: `Replaces the placeholder ${e.fill}`,
       initial: e.fill,
     });
+  } else if (e.needs === "url") {
+    // A server hosted by an app already running HERE. Nothing to paste, but the
+    // endpoint is the one thing that can differ per machine (Unreal's port and path
+    // are editable in Editor Preferences), and a wrong port is a connector that
+    // saves cleanly and never answers — the failure this catalog exists to avoid.
+    // Pre-filled with the documented default, so <enter> is the common case.
+    steps.push({
+      key: "url",
+      prompt: "Server URL",
+      hint: `Default is ${e.url} — change it only if you moved it.`,
+      initial: e.url,
+      validate: (v) =>
+        /^https?:\/\//i.test(v.trim()) ? undefined : "That needs to be an http:// or https:// URL.",
+    });
   }
   return {
     title: e.label,
@@ -307,12 +321,17 @@ function pendingFromCatalog(e: CatalogEntry): Pending {
       for (const [k, v] of Object.entries(answers)) {
         if (k.startsWith("env:")) env[k.slice(4)] = v;
       }
-      return draftFromCatalog(e, { env, fill: answers.fill });
+      return draftFromCatalog(e, { env, fill: answers.fill, url: answers.url });
     },
     note:
       e.needs === "oauth"
         ? `Authorize it in a browser on THIS machine: /mcp-auth ${e.name}`
-        : undefined,
+        : e.localHttp
+          // Not a warning — a localHttp connector is correct the moment it saves. But
+          // it answers only while its host app is up, so a later failure means "the
+          // app is closed", and saying that now beats debugging it then.
+          ? `Works whenever ${e.label} is running on this machine. Nothing to authorize.`
+          : undefined,
   };
 }
 
@@ -329,6 +348,7 @@ const NEEDS_LABEL: Record<string, string> = {
   token: "needs a token",
   path: "needs a path",
   oauth: "browser sign-in",
+  url: "confirm the URL",
   none: "no setup",
 };
 

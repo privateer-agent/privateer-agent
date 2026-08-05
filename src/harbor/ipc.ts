@@ -1,5 +1,6 @@
 import { createServer, createConnection, type Socket, type Server } from "node:net";
 import { existsSync, unlinkSync, chmodSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { globalDir } from "../config/paths.ts";
 import type { Routine } from "../routines/schema.ts";
@@ -8,7 +9,26 @@ import type { Routine } from "../routines/schema.ts";
 // is one JSON request per connection, answered with one JSON response, both
 // newline-terminated. Kept tiny and local — nothing crosses the machine boundary.
 
+const isWindows = process.platform === "win32";
+
+/**
+ * Where the harbor listens.
+ *
+ * POSIX: a unix socket inside PRIVATEER_HOME, so it inherits that directory's
+ * ownership and lives beside the log it writes.
+ *
+ * Windows has no unix sockets: `listen()` there accepts ONLY a name under
+ * \\.\pipe\, and handing it a file path fails — which is why `privateer harbor`
+ * could never start on Windows at all. The pipe name is derived from
+ * globalDir() so a non-default PRIVATEER_HOME still gets its own harbor (the
+ * pipe namespace is machine-global and has no directories to separate them),
+ * and hashed because that namespace takes no backslashes.
+ */
 export function harborSocketPath(): string {
+  if (isWindows) {
+    const id = createHash("sha256").update(globalDir().toLowerCase()).digest("hex").slice(0, 16);
+    return `\\\\.\\pipe\\privateer-harbor-${id}`;
+  }
   return join(globalDir(), "harbor.sock");
 }
 
@@ -115,6 +135,9 @@ export function startIpcServer(handler: IpcHandler): Promise<Server> {
       const server = build();
       server.once("error", (err: NodeJS.ErrnoException) => {
         if (err.code !== "EADDRINUSE") { reject(err); return; }
+        // Windows has nothing to reclaim: a named pipe exists only while a
+        // process holds it, so EADDRINUSE there always means a live harbor.
+        if (isWindows) { reject(new HarborAlreadyRunningError()); return; }
         void probeExistingListener(path).then((live) => {
           if (live) { reject(new HarborAlreadyRunningError()); return; }
           if (reclaimed) { reject(err); return; } // already reclaimed once — give up
@@ -140,7 +163,10 @@ export function startIpcServer(handler: IpcHandler): Promise<Server> {
 export function sendToHarbor(req: IpcRequest, timeoutMs = 5_000): Promise<IpcResponse> {
   const path = harborSocketPath();
   return new Promise<IpcResponse>((resolve, reject) => {
-    if (!existsSync(path)) {
+    // The fast "nothing is there" path. Skipped on Windows: a named pipe isn't a
+    // filesystem entry, so existsSync() is false even for a live harbor and this
+    // check would report every one of them as not running.
+    if (!isWindows && !existsSync(path)) {
       reject(new HarborNotRunningError());
       return;
     }
