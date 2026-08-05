@@ -5,6 +5,21 @@
 // confidential STT (/api/audio/transcribe, same tinfoil/near routing the app's voice
 // features use). Both inherit the account's entitlement, caps and billing.
 //
+// STREAMING, AND WHAT IT COSTS. Since pi-speak 0.2.0 a turn is spoken while it is still
+// being written: the stream is cut at sentence boundaries and each piece is synthesized
+// a clip or two ahead of playback. For this provider that means SEVERAL /api/audio/speech
+// calls per answer instead of one — same characters, same billing basis, more round
+// trips — which is the trade that makes the reply start in about the time one sentence
+// takes to speak. /speak stream off puts it back to one call at the end of the turn.
+//
+// NOT WIRED, DELIBERATELY. pi-speak passes two hints this account path has nowhere to
+// put: `rate` (0.5–3× pace) and the transcriber's vocabulary `prompt`. /api/audio/speech
+// takes { text, voice, format, ttsModelId } and /api/audio/transcribe takes
+// { audioBase64, format, language, sttModelId } — neither has a speed or bias field — so
+// sending them would be dead weight on the wire (and, for the vocabulary hint, project
+// nouns leaving the machine to be ignored). They stay unsent until the endpoints grow
+// them; both work today on the local and openai-compatible providers.
+//
 // PROVIDER ATTUNEMENT, NOT STOMPING. The provider registers with preferWhen: signed-in,
 // which the registry ranks ABOVE the built-in local voice but BELOW a deliberate /speak
 // provider pick — sign in and speech quietly upgrades from the OS voice to confidential

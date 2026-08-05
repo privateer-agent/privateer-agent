@@ -22,6 +22,7 @@
 // Pi never reads that file) — read-modify-write, preserving unrelated keys.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { keyText } from "@earendil-works/pi-coding-agent";
 import { configPath, globalDir } from "../src/config/paths.ts";
 
@@ -38,6 +39,19 @@ function key(binding: Parameters<typeof keyText>[0], fallback: string): string {
   }
 }
 
+// Push-to-talk is pi-speak's own binding, not a Pi keybinding action, so keyText
+// can't see it — it lives in speak.json beside config.json and /talk key rebinds
+// it. Read it the same defensive way (any failure = the default).
+function talkKey(): string {
+  try {
+    const shortcut = JSON.parse(readFileSync(join(globalDir(), "speak.json"), "utf8"))?.input?.shortcut;
+    // An explicit "" is "unbound", not "missing" — only an absent field defaults.
+    return typeof shortcut === "string" ? shortcut : "ctrl+x";
+  } catch {
+    return "ctrl+x";
+  }
+}
+
 // Lazy thunks, not strings: keys resolve at display time, after the app has
 // loaded (and possibly remapped) its keybindings.
 const HINTS: Array<() => string> = [
@@ -50,6 +64,12 @@ const HINTS: Array<() => string> = [
   () => `/init writes a PRIVATEER.md so the agent knows this project`,
   () => `/connect adds MCP connectors to this terminal`,
   () => `${key("app.editor.external", "ctrl+g")} drafts long prompts in your $EDITOR`,
+  () => {
+    const k = talkKey();
+    return k
+      ? `${k} is push-to-talk — /speak on reads the answer back`
+      : `/talk types what you say — /speak on reads the answer back`;
+  },
   () => `these tips are /hints — /hints off silences them`,
 ];
 

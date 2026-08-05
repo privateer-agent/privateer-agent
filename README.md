@@ -125,6 +125,10 @@ silently. The moat is swappable; the floor under it holds.
   shots stay continuous, cut them together, then score and narrate the result. Generated media
   is handed straight back as files on your machine; none of it is stored in our cloud. See
   [docs/media-generation.md](docs/media-generation.md).
+- **Talk to it.** `/speak on` reads answers aloud as they're written; **ctrl+x** is push-to-talk
+  and the mic closes when you stop talking. Your OS voice by default — nothing leaves the
+  machine — or your account's confidential-compute TTS/STT once you sign in. `/talk loop on`
+  makes it hands-free. See [Talk to it](#talk-to-it--voice-both-directions).
 - **MCP servers, sub-agents & skills.** Connect Model Context Protocol servers (local stdio
   or remote HTTP with OAuth) with [`/connect`](#connectors--mcp), delegate work to bounded
   parallel sub-agents, and drop in skills — all gated like everything else.
@@ -287,6 +291,42 @@ with `/signout`; manage linked terminals from the app.
 > **Only approve a sign-in code you generated yourself.** The code authorizes *this* terminal
 > to spend on your account. If someone sends you a code and asks you to approve it, don't —
 > that hands *them* a billed session on *your* account.
+
+## Talk to it — voice, both directions
+
+`/speak on` and answers are read aloud **as they are written**, sentence by sentence, with
+code blocks, tables and URLs stripped. Press **ctrl+x** and talk; the mic closes when you
+stop talking and the transcript lands in the composer for you to read before Enter sends it.
+
+```
+/speak on             read answers aloud    ctrl+x    push to talk (press again to send)
+/speak voice <name>   pick a speaker        /talk     the same thing, typed
+/speak rate <n>       0.5–3× pace           /talk loop on   conversation mode, hands-free
+/speak stream off     wait for the full answer instead of speaking as it arrives
+/speak provider       list engines (→ marks the active one); /talk provider does the same
+```
+
+Out of the box it uses your **OS voice** (`say`, `espeak-ng`, System.Speech) and nothing
+leaves the machine. Signed in, both directions quietly upgrade to your account's
+**confidential-compute TTS and STT** — attested-enclave models, the same ones the app's voice
+features use, inherited entitlement and billing. That is an upgrade, not a stomp: a provider
+you picked deliberately stays picked, and `/speak provider local` pins the offline voice for
+good. Be clear-eyed about the difference — the local voice never speaks to the network, while
+the account voice sends the utterance text to an enclave we can't read into but that is still
+off your machine.
+
+One caveat while the account endpoints catch up: `/speak rate` and `/talk vocab` are honored
+by the local and OpenAI-compatible engines, not yet by the account's TTS/STT.
+
+Voice is **off by default and interactive-only** — harbor, ACP and channel sessions never
+speak. The mic opens only on something you did (`/talk`, the push-to-talk key, or a
+conversation turn you switched on); there is no wake word, capture is hard-capped, audio is
+held in memory and never written to disk, and a mis-heard transcript is still just a prompt —
+every tool call it leads to hits the same permission gate as anything you type. Recording
+needs a capture tool on PATH: `sox` anywhere, or `arecord`/`parecord`/`ffmpeg` on Linux,
+`ffmpeg` on macOS. Everything is stored in `~/.privateer/speak.json`; the engine itself is the
+standalone [`privateer-speak`](https://www.npmjs.com/package/privateer-speak) package, usable
+in any Pi agent.
 
 ## The Privateer app
 
@@ -569,6 +609,7 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/signin` · `/signout` | sign in to a Privateer account (device flow) / sign out |
 | `/remote-access` | link this terminal to the app and allow it to drive (off by default) |
 | `/connect` · `/mcp` | add, enable, or remove MCP connectors / see what actually connected |
+| `/speak` · `/talk` | read answers aloud / voice input (**ctrl+x** is push-to-talk) |
 | `/extensions` | list loaded Pi extensions |
 | `/init` | scaffold a starter `PRIVATEER.md` in this directory |
 | `/update` · `/privateer` | update to the latest release / Privateer status and posture |

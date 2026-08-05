@@ -1,6 +1,6 @@
 {
   "name": "privateer-agent",
-  "version": "0.12.5",
+  "version": "0.12.6",
   "description": "Privacy-first terminal coding agent — bring your own model across 20 providers (Anthropic, OpenAI, OpenRouter, Google, local Ollama…). Safe-by-default permissions, MCP, sub-agents, workflows, and verifiable TEE inference. Built on the Pi toolkit.",
   "type": "module",
   "license": "MIT",
@@ -84,7 +84,7 @@
     "pi-privacy": "^0.11.0",
     "pi-subagents": "^0.34.0",
     "picomatch": "^4.0.4",
-    "privateer-speak": "0.1.0",
+    "privateer-speak": "0.2.0",
     "privateer-workflow": "^0.1.0",
     "tinfoil": "^1.1.11",
     "tsx": "^4.16.0",
