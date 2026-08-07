@@ -570,8 +570,9 @@ posts a warning to the transcript, and while it's on the footer carries a perman
 Toggling takes effect from the next gated action — an approval already on screen still
 needs an answer. It's a physical-terminal switch: a phone driving this terminal over
 `/remote-access` can't reach it. The app has its own no-quarter toggle for driven turns,
-which is `bypass` exactly — never less — so dangerous shell and destructive actions
-still surface an Allow there, precisely as they do under `/mode bypass` locally.
+and it means the same thing this flag does: the moat down, dangerous shell and destructive
+actions included — stronger than `/mode bypass`, which keeps those two above it. A hard
+plan-mode deny is the one thing it doesn't talk around.
 
 > shift+tab is Pi's default "cycle thinking level" chord; Privateer takes it for this.
 > Thinking level is still under `/settings`, or bind `app.thinking.cycle` to another key

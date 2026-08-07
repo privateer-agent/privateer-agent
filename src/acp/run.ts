@@ -125,7 +125,7 @@ export async function runAcp(): Promise<void> {
     cwd: baseCwd,
     confineToCwd: true,
     getRemote: () => true,
-    getNoQuarter: () => posture === "auto",
+    getAutoApprove: () => posture === "auto",
     async localAsk() {
       return "deny";
     },

@@ -43,7 +43,12 @@ export interface GateController {
   cwd: string;
   confineToCwd?: boolean;
   getRemote?(): boolean;
+  // The controller raised the flag: total bypass for remote turns — see
+  // ModeGate.getNoQuarter.
   getNoQuarter?(): boolean;
+  // The weaker "auto" posture used by the non-interactive runtimes (ACP, channels):
+  // bypass-equivalent, dangerous/destructive still relayed. See ModeGate.getAutoApprove.
+  getAutoApprove?(): boolean;
   // Total bypass — see ModeGate.getSkipAllPermissions. Set by the `--no-quarter`
   // launch flag (env PRIVATEER_NO_QUARTER); when true the gate auto-allows every
   // action with no prompt.
@@ -129,13 +134,15 @@ export async function decideToolCall(
     setMode: ctrl.setMode,
     allowlist: ctrl.allowlist,
     allowedOutsideRoots: ctrl.allowedOutsideRoots,
-    // Default to the built-in dangerous-command patterns so bypass / no-quarter /
+    // Default to the built-in dangerous-command patterns so bypass / "auto"-posture /
     // headless-subagent runs still force dangerous shell + secret-exfil to "ask"
     // (→ headless deny). A controller can extend, but never silently disable, this.
+    // The two no-quarter switches sit above the denylist by design and clear it.
     denylist: ctrl.denylist ?? DEFAULT_DENYLIST,
     ask,
     getRemote: ctrl.getRemote,
     getNoQuarter: ctrl.getNoQuarter,
+    getAutoApprove: ctrl.getAutoApprove,
     getSkipAllPermissions: ctrl.getSkipAllPermissions,
   });
 

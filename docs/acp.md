@@ -66,7 +66,7 @@ fields optional:
 |---|---|---|
 | `model` | your signed-in default | Starting model. The host's model picker can switch it per session; `privateer/*` TEE models are labelled **confidential (TEE)**. |
 | `tools` | `read`, `grep`, `find`, `ls` (+ web tools if web is enabled) | **Hard ceiling.** The host cannot widen it — not via `session/new`, not via anything. Media-generation tools are opt-in only (they spend your account's credit). |
-| `posture` | `approve` | `readonly` — plan mode, remote asks are denied outright, never prompted. `approve` — the host renders each ask. `auto` — non-dangerous actions run unattended, like `--no-quarter`. |
+| `posture` | `approve` | `readonly` — plan mode, remote asks are denied outright, never prompted. `approve` — the host renders each ask. `auto` — non-dangerous actions run unattended; dangerous shell and destructive tools still come back to the host as asks (weaker than `--no-quarter`, which clears those too). |
 | `cwd` | the process's spawn cwd | **The confinement root** for both tools and the permission gate. |
 
 ### ⚠️ The cwd footgun

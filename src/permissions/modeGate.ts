@@ -30,10 +30,23 @@ export interface ModeGateDeps {
   // Hard denies (e.g. plan mode) are still honored without bothering the phone.
   getRemote?: () => boolean;
   // True while the controller has toggled no-quarter (unattended) mode: remote
-  // turns auto-approve like bypass mode so the agent runs to completion without
-  // pinging the phone. Dangerous shell and alwaysAsk-destructive actions rank
-  // above bypass in decideAuto, so those still relay for an explicit Allow/Deny.
+  // turns auto-approve so the agent runs to completion without pinging the phone.
+  // This is the SAME total bypass as the `--no-quarter` launch flag below, only
+  // scoped to remote turns — dangerous shell, secret-exfil shapes and alwaysAsk-
+  // destructive tools included. It has to be: "no quarter" is a step-away-from-
+  // the-keyboard switch, and a mode that still stops on the one command the user
+  // walked away from isn't unattended, it's a turn that wedges until it times out
+  // (a relayed prompt with nobody to answer it fails closed). A hard "deny" — plan
+  // mode — is still honored, so a read-only stance can't be talked around remotely.
   getNoQuarter?: () => boolean;
+  // True while a non-interactive runtime is running under its "auto" posture (the
+  // ACP host's `posture: "auto"`, a channel whose role resolves to it). Weaker than
+  // no-quarter on purpose: re-decide as if in bypass mode, so ordinary writes and
+  // bash run unattended but dangerous shell / alwaysAsk-destructive actions still
+  // relay for an explicit Allow/Deny. The party choosing it there is a host config
+  // or a chat-app role, not someone who tapped through a confirm on their own
+  // terminal, so it does not get to clear the denylist.
+  getAutoApprove?: () => boolean;
   // True when the operator launched with `--no-quarter` (env PRIVATEER_NO_QUARTER):
   // a session-wide TOTAL bypass of the gate. Every request auto-approves — including
   // dangerous shell, destructive tools, out-of-cwd and protected-file access — with
@@ -66,10 +79,16 @@ export class ModeGate implements PermissionGate {
     // remembered — we don't let a remote operator mutate local allowlist/mode.
     if (this.deps.getRemote?.()) {
       if (auto === "deny") return "deny";
-      // No-quarter: re-evaluate as if in bypass mode. Dangerous/destructive
-      // actions still come back "ask" (they sit above bypass) and fall through
-      // to the relayed prompt; everything else runs unattended.
-      if (this.deps.getNoQuarter?.() && decideAuto(req, "bypass", this.deps.allowlist, denylist) === "allow") {
+      // No-quarter: the controller has lowered the moat for this session, so
+      // auto-allow everything the plan-mode deny above didn't already stop —
+      // dangerous shell and alwaysAsk-destructive tools included. Stronger than
+      // `/mode bypass` (which keeps those two above it) and deliberately so: it
+      // is the remote-scoped twin of the `--no-quarter` flag, and the app's
+      // confirm says as much before the flag goes up.
+      if (this.deps.getNoQuarter?.()) return "allow";
+      // "auto" posture: the weaker cousin — bypass-equivalent, with dangerous and
+      // alwaysAsk-destructive actions still falling through to the relayed prompt.
+      if (this.deps.getAutoApprove?.() && decideAuto(req, "bypass", this.deps.allowlist, denylist) === "allow") {
         return "allow";
       }
       return (await this.deps.ask(req)) === "deny" ? "deny" : "allow";

@@ -127,7 +127,7 @@ Prompts go down. Engine events stream up as `event` frames, projected and bounde
 - tool input/output is normalized to text and truncated (2–4k chars);
 - everything passes through `redactSecrets()` — a **safety net, not a guarantee**: bearer tokens, `sk_`/`ghp_`/`AKIA`-style keys, `*_SECRET=`-style assignments, and PEM private keys. Redaction runs on the full text *before* clipping, so a secret straddling the cut isn't missed.
 
-**Tool execution always stays local and gated.** A remotely-driven turn relays each would-be action up as an `approval_request` and blocks on the app's Allow/Deny (`src/permissions/modeGate.ts`). Under no-quarter (unattended) mode remote turns auto-approve like bypass mode, but genuinely dangerous/destructive actions still relay — they sit above bypass locally too.
+**Tool execution always stays local and gated.** A remotely-driven turn relays each would-be action up as an `approval_request` and blocks on the app's Allow/Deny (`src/permissions/modeGate.ts`). Under no-quarter (unattended) mode — the flag the app raises, behind its own confirm — remote turns auto-approve outright, dangerous and destructive actions included: it is the same total bypass as the `--no-quarter` launch flag, scoped to remote turns. (An action it stopped on would be an action nobody is there to approve, so the relayed prompt would just time out closed.) The non-interactive runtimes' weaker `auto` posture (ACP, channels) is the one that still relays those — `getAutoApprove`, not `getNoQuarter`.
 
 Files move chunked in both directions to stay under the relay's 256 KB per-frame cap:
 

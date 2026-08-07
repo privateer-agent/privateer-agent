@@ -1055,3 +1055,71 @@ index f81b4b4..9712a37 100644
    -a, --approve     Trust project-local files for this command
    -na, --no-approve Ignore project-local files for this command
  
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
+index 68d0308..f7208f1 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
+@@ -1,5 +1,5 @@
+ import { isAbsolute, relative, resolve, sep } from "node:path";
+-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
++import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+ import { areExperimentalFeaturesEnabled } from "../../../core/experimental.js";
+ import { theme } from "../theme/theme.js";
+ /**
+@@ -13,6 +13,43 @@ function sanitizeStatusText(text) {
+         .replace(/ +/g, " ")
+         .trim();
+ }
++/**
++ * Lay extension statuses out over as many lines as the terminal needs, keeping
++ * each status whole. Upstream joined them into ONE line and truncated it to the
++ * width, which silently hid whatever didn't fit — and what didn't fit was often
++ * the loudest indicator on screen (Privateer's "permission gate OFF" flag). A
++ * status too wide to fit on a line of its own is wrapped, never clipped.
++ */
++function packStatusLines(statuses, width) {
++    if (width <= 0)
++        return [];
++    const lines = [];
++    let current = "";
++    let currentWidth = 0;
++    const flush = () => {
++        if (current)
++            lines.push(current);
++        current = "";
++        currentWidth = 0;
++    };
++    for (const status of statuses) {
++        if (!status)
++            continue;
++        const statusWidth = visibleWidth(status);
++        if (statusWidth > width) {
++            flush();
++            lines.push(...wrapTextWithAnsi(status, width));
++            continue;
++        }
++        const separator = current ? 1 : 0;
++        if (currentWidth + separator + statusWidth > width)
++            flush();
++        current = current ? `${current} ${status}` : status;
++        currentWidth += separator + statusWidth;
++    }
++    flush();
++    return lines;
++}
+ /**
+  * Format token counts for compact footer display.
+  */
+@@ -211,9 +248,9 @@ export class FooterComponent {
+             const sortedStatuses = Array.from(extensionStatuses.entries())
+                 .sort(([a], [b]) => a.localeCompare(b))
+                 .map(([, text]) => sanitizeStatusText(text));
+-            const statusLine = sortedStatuses.join(" ");
+-            // Truncate to terminal width with dim ellipsis for consistency with footer style
+-            lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
++            // Wrap onto extra lines instead of truncating: a status is there because
++            // something wants to be seen, so none of them may be cut off.
++            lines.push(...packStatusLines(sortedStatuses, width));
+         }
+         return lines;
+     }

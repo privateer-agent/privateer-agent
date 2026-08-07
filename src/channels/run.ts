@@ -191,7 +191,7 @@ async function main() {
     cwd,
     confineToCwd: true,
     getRemote: () => true,
-    getNoQuarter: () => posture() === "auto",
+    getAutoApprove: () => posture() === "auto",
     async localAsk() {
       return "deny";
     },
