@@ -47,10 +47,11 @@ import {
 const DEFAULT_MODELS = [
   ACCOUNT_DEFAULT_MODEL_ID,
   ACCOUNT_NEAR_MODEL_ID,
-  // The default until 2026-08-01 (see TINFOIL_MODEL_ID). It stays in the floor so a
-  // user who saved it as their own default still resolves it synchronously at launch,
-  // rather than falling through to "first model with configured auth" — the BYO dead
-  // end this seed list exists to prevent.
+  // Both former defaults (see TINFOIL_MODEL_ID for the dates). They stay in the floor
+  // so a user who saved either as their own default still resolves it synchronously at
+  // launch, rather than falling through to "first model with configured auth" — the BYO
+  // dead end this seed list exists to prevent.
+  "tinfoil/kimi-k2-6",
   "tinfoil/glm-5-2",
   "anthropic/claude-opus-5",
   "anthropic/claude-sonnet-5",

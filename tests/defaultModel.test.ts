@@ -92,8 +92,8 @@ test("the default is one Tinfoil model, however it's reached", () => {
   // Same model both ways — direct with a key, over the subscription without one.
   // Pinned to the literal on purpose: moving the default is a deliberate, measured
   // decision (see TINFOIL_MODEL_ID), not something a refactor should do quietly.
-  assert.equal(TINFOIL_DEFAULT_SPEC, "tinfoil/kimi-k2-6");
-  assert.equal(ACCOUNT_DEFAULT_SPEC, "privateer/tinfoil/kimi-k2-6");
+  assert.equal(TINFOIL_DEFAULT_SPEC, "tinfoil/gpt-oss-120b");
+  assert.equal(ACCOUNT_DEFAULT_SPEC, "privateer/tinfoil/gpt-oss-120b");
 });
 
 test("resolveSignedInModel: Tinfoil when keyed, else the account channel", () => {
@@ -140,7 +140,7 @@ test("ensurePiDefaultModel: a Tinfoil key seeds the direct (client-attested) rou
     assert.equal(ensurePiDefaultModel(), TINFOIL_DEFAULT_SPEC);
     const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
     assert.equal(settings.defaultProvider, "tinfoil");
-    assert.equal(settings.defaultModel, "kimi-k2-6");
+    assert.equal(settings.defaultModel, "gpt-oss-120b");
   } finally {
     delete process.env.TINFOIL_API_KEY;
   }

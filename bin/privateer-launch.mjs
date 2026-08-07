@@ -341,11 +341,11 @@ else {
   const signedIn = fs.existsSync(CRED);
   // Mirrors TINFOIL_MODEL_ID in src/providers/defaultModel.ts — keep them in step; that
   // file carries the measurements behind the choice.
-  const ACCOUNT_MODEL = "privateer/tinfoil/kimi-k2-6";
+  const ACCOUNT_MODEL = "privateer/tinfoil/gpt-oss-120b";
   const MODEL = process.env.PRIVATEER_MODEL
     ? process.env.PRIVATEER_MODEL
     : haveTinfoilKey()
-      ? "tinfoil/kimi-k2-6"
+      ? "tinfoil/gpt-oss-120b"
       : signedIn
         ? ACCOUNT_MODEL
         : haveKey("ANTHROPIC_API_KEY")

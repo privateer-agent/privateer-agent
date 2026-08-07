@@ -22,22 +22,43 @@ import { agentDir } from "../config/paths.ts";
 // One definition, three consumers: this resolver, providers/account.ts's seed catalog,
 // and bin/privateer-launch.mjs (which mirrors the id — keep them in step).
 //
-// It was `tinfoil/glm-5-2` until 2026-08-01, and the swap is a LATENCY decision, not a
-// capability one. Measured over 22 requests spaced 20s apart on the account channel,
-// glm-5-2 stalled before its first token on 9 of them — 33s to 98s each, with the
-// model demonstrably warm 20 seconds earlier, so it is contention in that deployment
-// rather than a cold start anything here can warm up. kimi-k2-6 and gpt-oss-120b, same
-// enclave provider, same tier, same transport, stalled 0 times in 20 (medians 1.2s and
-// 1.0s). The same run reproduced glm-5-2's stalls on BOTH the sealed and the cleartext
-// path, which is what rules out the shim, the relay and the proxy as the cause.
+// This has moved twice. The history matters, because both moves were about the same
+// two axes — first-token latency and reasoning control — pulling in opposite directions:
 //
-// Two consequences worth knowing when revisiting this: glm-5-2 remains in the live
-// catalog and is one pick away for anyone who wants it, and kimi-k2-6 reasons on every
-// turn with no working off switch (see thinkingProfile in providers/account.ts — its
-// levers were probed and none of them moved the reasoning volume). Its reasoning is
-// short and it always reaches an answer, which is why that is acceptable here and was
-// not for glm-5-2.
-export const TINFOIL_MODEL_ID = "tinfoil/kimi-k2-6";
+//   • until 2026-08-01 — glm-5-2.
+//   • 2026-08-01 → 2026-08-06 — kimi-k2-6, a LATENCY swap, not a capability one. Over
+//     22 requests spaced 20s apart on the account channel, glm-5-2 stalled before its
+//     first token on 9 of them — 33s to 98s each, with the model demonstrably warm 20
+//     seconds earlier, so it was contention in that deployment rather than a cold start
+//     anything here can warm up. kimi-k2-6 and gpt-oss-120b, same enclave provider,
+//     same tier, same transport, stalled 0 times in 20 (medians 1.2s and 1.0s). That
+//     run reproduced the stalls on BOTH the sealed and the cleartext path, which is
+//     what ruled out the shim, the relay and the proxy as the cause.
+//   • 2026-08-06 — gpt-oss-120b, on REASONING CONTROL, having ruled out a return to
+//     glm-5-2 by re-measuring. kimi-k2-6 reasons on every turn with no working off
+//     switch: thinkingProfile (providers/account.ts) omits it deliberately because both
+//     levers were probed and neither moved the reasoning volume. On an agent that makes
+//     many small tool calls, a toggle that works is worth real latency — but not glm's
+//     latency. Re-run of the probe above (14 rounds, 20s apart, TTFT to the first token
+//     of any kind, all three models per round):
+//
+//         glm-5-2        median 4.6s  max 55.0s  stalls(>10s) 5/14
+//         kimi-k2-6      median 0.9s  max  1.1s  stalls        0/14
+//         gpt-oss-120b   median 0.4s  max  0.4s  stalls        0/14
+//
+//     glm-5-2's stalls (55.0 / 46.3 / 46.3 / 55.0 / 29.9s) interleave with 1.0s
+//     responses on the same key in the same minute while the other two never waver —
+//     the 2026-08-01 signature, unchanged. At ~36% per request a ten-tool-call task
+//     stalls with ~99% probability, so it is not defaultable however good the model is.
+//     gpt-oss-120b takes the latency crown outright AND honours reasoning_effort
+//     (verified: low → 9 reasoning deltas, high → 61), so it is the only one of the
+//     three that gives the user a working dial. It is a smaller model than GLM 5.2 and
+//     Kimi K2.6; that capability trade was made knowingly. It also serves from NEAR as
+//     well as Tinfoil — the only capable model here with two attested homes.
+//
+// Re-measure before moving this again. The stall behaviour is a property of a
+// provider's deployment, not of a model, and it has already changed under us twice.
+export const TINFOIL_MODEL_ID = "tinfoil/gpt-oss-120b";
 
 // Same model, reached two ways:
 //   - TINFOIL_DEFAULT_SPEC — direct to inference.tinfoil.sh with the user's own
