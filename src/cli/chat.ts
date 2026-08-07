@@ -47,6 +47,7 @@ async function main() {
     dropPersistedAccountCredential,
   } = await import("../providers/account.ts");
   const { agentVersion } = await import("../config/version.ts");
+  const { pickerCatalog, hiddenAccountNotice, hiddenAccountTitleSuffix } = await import("../providers/modelCatalog.ts");
   const { resolveDefaultModel, resolveSignedInModel, savedPiDefaultSpec } = await import("../providers/defaultModel.ts");
   const { postOutbox } = await import("../outbox/cloudOutbox.ts");
   const { addPendingCloud } = await import("../routines/store.ts");
@@ -625,11 +626,14 @@ async function main() {
   console.log(`${DIM}shift+tab toggles no quarter — unattended mode, no approval prompts.${RESET}`);
   await showPosture();
 
-  // The available model catalog as sorted "provider/id" specs. Same source the
-  // /models list and the app's picker draw from.
-  async function availableModelSpecs(): Promise<string[]> {
-    const all: any[] = (services.modelRegistry as any).getAvailable ? await (services.modelRegistry as any).getAvailable() : [];
-    return all.map((m) => `${m.provider}/${m.id}`).sort();
+  // The available model catalog as sorted "provider/id" specs, plus what the
+  // registry had to leave out. Same source the /models list and the app's picker
+  // draw from — see providers/modelCatalog.ts for the two things that make this
+  // more than a map+sort (sealed models register late; the whole account catalog
+  // is filtered out until the credential is armed).
+  const SIGN_IN_HINT = "Run /login.";
+  async function modelCatalog() {
+    return pickerCatalog(services.modelRegistry as any);
   }
 
   // Switch the live session's model in place (history preserved — see
@@ -660,9 +664,17 @@ async function main() {
   // as a selection prompt and switch to whatever the driver picks. This is the
   // remote /model flow — the terminal owns the options, the app just renders them.
   async function pickModelRemote(filter: string): Promise<void> {
-    const specs = (await availableModelSpecs()).filter((sp) => !filter || sp.toLowerCase().includes(filter));
+    const cat = await modelCatalog();
+    const specs = cat.specs.filter((sp) => !filter || sp.toLowerCase().includes(filter));
+    // Say why the list is short BEFORE opening it — a driver looking at a catalog
+    // with no confidential models has no way to tell "we don't carry them" from
+    // "this terminal is signed out", and only one of those has a fix.
+    const notice = hiddenAccountNotice(cat, SIGN_IN_HINT);
+    if (notice) relay?.sendNotice(notice);
     const choice = await bridge.selectRemote({
-      title: "Choose a model",
+      // The suffix puts the same fact in the sheet itself, where the driver is
+      // actually looking. Terminal chrome, so English like the rest of the title.
+      title: `Choose a model${hiddenAccountTitleSuffix(cat)}`,
       options: specs.map((sp) => ({ value: sp, label: sp })),
       current: currentSpec,
     });
@@ -689,8 +701,11 @@ async function main() {
     if (line === "/model" || line === "/models" || line.startsWith("/models ")) {
       const filter = line.startsWith("/models ") ? line.slice(8).trim().toLowerCase() : "";
       if (remote) { await pickModelRemote(filter); return true; }
-      const rows = (await availableModelSpecs()).filter((sp) => !filter || sp.toLowerCase().includes(filter));
+      const cat = await modelCatalog();
+      const rows = cat.specs.filter((sp) => !filter || sp.toLowerCase().includes(filter));
       console.log(rows.slice(0, 40).join("\n") + (rows.length > 40 ? `\n${DIM}… ${rows.length - 40} more (try /models <filter>)${RESET}` : ""));
+      const hidden = hiddenAccountNotice(cat, SIGN_IN_HINT);
+      if (hidden) console.log(`${DIM}${hidden}${RESET}`);
       return true;
     }
     // Extensions: remote drives the app's manager (list frame); local prints the list.
