@@ -97,3 +97,75 @@ test("deleteSkill refuses an unknown skill", async () => {
   const res = await control.deleteSkill("nope");
   assert.equal(res.ok, false);
 });
+
+// ── per-spawn skills (extraSkillPaths) ────────────────────────────────────────
+//
+// A folder's own skills live under ~/.privateer/spawns/<key>/skills rather than in
+// the user's tree — see extensions/privateer-spawn-skills.ts. The control takes the
+// directory so its listing matches what the session actually loads.
+
+/** A loadable skill directory: <dir>/<name>/SKILL.md with valid frontmatter. */
+async function seedSkill(dir: string, name: string, description: string): Promise<void> {
+  await fs.mkdir(path.join(dir, name), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, name, "SKILL.md"),
+    `---\nname: "${name}"\ndescription: "${description}"\n---\n\nDo the thing.\n`,
+  );
+}
+
+test("extraSkillPaths surfaces a per-spawn skill, and it is NOT editable", async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), "priv-skills-spawn-"));
+  const agentDir = path.join(base, "agent");
+  const cwd = path.join(base, "work");
+  const spawnSkills = path.join(base, "spawn", "skills");
+  await fs.mkdir(agentDir, { recursive: true });
+  await fs.mkdir(cwd, { recursive: true });
+  await seedSkill(spawnSkills, "folder-skill", "Only in this folder");
+
+  const control = makeSkillsControl({
+    cwd,
+    agentDir,
+    settingsManager: SettingsManager.inMemory({}),
+    extraSkillPaths: [spawnSkills],
+  });
+
+  const skill = control.listSkills().find((s) => s.name === "folder-skill");
+  assert.ok(skill, "the per-spawn skill is listed");
+  // Editability is still "under <agentDir>/skills" — the app must not offer to
+  // rewrite or delete a skill through a path it does not own.
+  assert.equal(skill!.editable, false);
+  assert.equal(skill!.description, "Only in this folder");
+});
+
+test("without extraSkillPaths the same directory contributes nothing", async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), "priv-skills-spawn-off-"));
+  const agentDir = path.join(base, "agent");
+  const cwd = path.join(base, "work");
+  const spawnSkills = path.join(base, "spawn", "skills");
+  await fs.mkdir(agentDir, { recursive: true });
+  await fs.mkdir(cwd, { recursive: true });
+  await seedSkill(spawnSkills, "folder-skill", "Only in this folder");
+
+  const control = makeSkillsControl({ cwd, agentDir, settingsManager: SettingsManager.inMemory({}) });
+  assert.equal(control.listSkills().some((s) => s.name === "folder-skill"), false);
+});
+
+test("a per-spawn path already in settings is not loaded twice", async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), "priv-skills-dupe-"));
+  const agentDir = path.join(base, "agent");
+  const cwd = path.join(base, "work");
+  const spawnSkills = path.join(base, "spawn", "skills");
+  await fs.mkdir(agentDir, { recursive: true });
+  await fs.mkdir(cwd, { recursive: true });
+  await seedSkill(spawnSkills, "dupe-skill", "Listed once");
+
+  const control = makeSkillsControl({
+    cwd,
+    agentDir,
+    settingsManager: SettingsManager.inMemory({ skillPaths: [spawnSkills] }),
+    extraSkillPaths: [spawnSkills],
+  });
+
+  const hits = control.listSkills().filter((s) => s.name === "dupe-skill");
+  assert.equal(hits.length, 1, "de-duplicated against settings' own skillPaths");
+});

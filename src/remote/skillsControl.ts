@@ -79,6 +79,17 @@ export function makeSkillsControl(opts: {
   cwd: string;
   agentDir: string;
   settingsManager: SettingsManager;
+  /**
+   * Extra skill directories to load beyond settings' own `skillPaths`.
+   *
+   * The desktop passes this folder's per-spawn skills dir (config/spawns.ts). Pi
+   * discovers project skills only under `<cwd>/.privateer/skills`, which would mean
+   * writing into the user's tree to give a folder its own skills — so they live
+   * under the global dir with the folder's other defaults and arrive here instead.
+   * Read-only from this control's point of view: `editable` still means "under
+   * <agentDir>/skills", so create/delete keep targeting the one dir they always did.
+   */
+  extraSkillPaths?: string[];
 }): SkillsControl {
   // The user's own global skills live here; only these are editable.
   const userSkillsDir = path.join(opts.agentDir, "skills");
@@ -98,6 +109,12 @@ export function makeSkillsControl(opts: {
       skillPaths = opts.settingsManager.getSkillPaths() ?? [];
     } catch {
       skillPaths = [];
+    }
+    // Appended, not prepended: a path the user configured in settings outranks a
+    // per-spawn one on a name clash, the same way an explicit setting outranks a
+    // default everywhere else. De-duplicated so a dir named in both is loaded once.
+    for (const extra of opts.extraSkillPaths ?? []) {
+      if (extra && !skillPaths.includes(extra)) skillPaths.push(extra);
     }
     let result;
     try {
