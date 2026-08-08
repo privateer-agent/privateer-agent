@@ -20,8 +20,29 @@ test("manifest: every privateer extension is listed, and every entry resolves", 
     .map((f) => f.replace(/\.ts$/, ""));
   assert.ok(files.length > 0, "no extensions found — is the path still right?");
 
+  // There are two ways a first-party extension reaches a user, and this test has to
+  // know both or it fails on a correct one. Nearly all of them are global shims in the
+  // manifest, installed for every session. `privateer-spawn-skills` deliberately is
+  // not: it contributes a per-FOLDER skills directory (~/.privateer/spawns/<hash>),
+  // which only exists inside a spawned folder agent, and the desktop loads it by path
+  // in agentSession.ts. Shimming it would load it into every interactive CLI session,
+  // where there is no spawn and the directory it points at is absent.
+  //
+  // Adding a name here is a claim that some host loads it explicitly — say which one,
+  // or the exemption is just a way to silence this test.
+  const HOST_LOADED = new Map([
+    ["privateer-spawn-skills", "desktop/src/main/agentSession.ts — per-folder spawn sessions only"],
+  ]);
+
   const listed = new Set(MOAT_SHIMS.map((s) => s.name));
   for (const name of files) {
+    if (HOST_LOADED.has(name)) {
+      assert.ok(
+        !listed.has(name),
+        `${name} is in the manifest AND listed as host-loaded — it would load twice`,
+      );
+      continue;
+    }
     assert.ok(listed.has(name), `${name} is missing from src/config/moatManifest.json, so it never loads`);
   }
   // Each entry names exactly one target, and a first-party `entry` must actually exist —

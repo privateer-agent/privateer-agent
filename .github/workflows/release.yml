@@ -103,6 +103,48 @@ jobs:
           Write-Host "boot output: $out"
           if (-not $out.Trim()) { throw "empty output — bundle failed to boot" }
 
+      # The harbor on Windows, actually started.
+      #
+      # harborSocketPath() returns a \\.\pipe\ name on win32 because listen()
+      # there accepts nothing else — and that branch shipped once having never
+      # run on a real Windows machine, which is how 0.12.6 went out with a
+      # harbor that could not start at all. A unit test can't catch it: the bug
+      # lives in the shape of the address the OS is handed, so only a real
+      # Windows kernel can say whether it was the right shape.
+      #
+      # Two processes are the whole point. One runs the harbor; the other asks
+      # it for status over the pipe, which is the exact path (client connect +
+      # the EADDRINUSE / no-existsSync-precheck handling) that was broken.
+      # `publish` needs this job, so a Windows harbor that can't start now stops
+      # the release rather than shipping inside it.
+      - name: Start a harbor and talk to it over the pipe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = "extract\privateer-win32-x64"
+          $env:PRIVATEER_HOME = "$PWD\pvhome"
+          $proc = Start-Process -FilePath "$app\bin\privateer.cmd" -ArgumentList 'harbor','run' `
+            -PassThru -NoNewWindow -RedirectStandardOutput harbor-out.txt -RedirectStandardError harbor-err.txt
+          try {
+            $running = $false
+            # Cold start on a Windows runner is slow (tsx + the whole agent), so
+            # poll rather than sleep-and-hope.
+            for ($i = 0; $i -lt 30; $i++) {
+              Start-Sleep -Seconds 4
+              if ($proc.HasExited) { break }
+              $status = & "$app\bin\privateer.cmd" harbor status 2>&1 | Out-String
+              if ($status -match 'harbor:\s+running') { $running = $true; Write-Host $status; break }
+            }
+            if (-not $running) {
+              Write-Host "=== harbor stdout ==="; Get-Content harbor-out.txt -ErrorAction SilentlyContinue
+              Write-Host "=== harbor stderr ==="; Get-Content harbor-err.txt -ErrorAction SilentlyContinue
+              Write-Host "=== last status ===";   Write-Host $status
+              throw "harbor never answered on the named pipe"
+            }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }
+
   publish:
     needs: [build, smoke-windows]
     if: startsWith(github.ref, 'refs/tags/')

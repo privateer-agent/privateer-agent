@@ -162,7 +162,12 @@ test("a per-spawn path already in settings is not loaded twice", async () => {
   const control = makeSkillsControl({
     cwd,
     agentDir,
-    settingsManager: SettingsManager.inMemory({ skillPaths: [spawnSkills] }),
+    // The setting is `skills`, not `skillPaths` — SettingsManager.getSkillPaths()
+    // reads `settings.skills`. Seeding the wrong key typechecked as a plain
+    // excess-property error, and the assertion below would have passed anyway
+    // (nothing to de-duplicate against), which is the kind of green that means
+    // nothing.
+    settingsManager: SettingsManager.inMemory({ skills: [spawnSkills] }),
     extraSkillPaths: [spawnSkills],
   });
 
