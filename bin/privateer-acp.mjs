@@ -18,7 +18,7 @@
 // process.loadEnvFile and tsx's register() are both silent; keep it that way, and
 // send any diagnostic you add to stderr.
 import { register } from "tsx/esm/api";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -36,5 +36,5 @@ try {
 process.env.PI_SUBAGENT_PI_BINARY ??= resolve(repo, "bin/privateer-subagent.mjs");
 
 register();
-const { runAcp } = await import(resolve(repo, "src/acp/run.ts"));
+const { runAcp } = await import(pathToFileURL(resolve(repo, "src/acp/run.ts")).href);
 await runAcp();

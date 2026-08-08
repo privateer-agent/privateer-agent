@@ -7,7 +7,7 @@
 // Invoked two ways: interactively via the bash launcher (`privateer harbor …`), and
 // by the installed launchd/systemd service (`node privateer-harbor.mjs run`).
 import { register } from "tsx/esm/api";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -26,5 +26,5 @@ try {
 process.env.PI_SUBAGENT_PI_BINARY ??= resolve(repo, "bin/privateer-subagent.mjs");
 
 register();
-const { runHarborCli } = await import(resolve(repo, "src/cli/harborCli.ts"));
+const { runHarborCli } = await import(pathToFileURL(resolve(repo, "src/cli/harborCli.ts")).href);
 await runHarborCli(process.argv.slice(2));
