@@ -153,8 +153,16 @@ export function writeTemplate(dir: string = process.cwd()): WriteResult {
 // Lets /init (in the context extension) tell the banner (in the brand extension) that
 // PRIVATEER.md state changed, so the header re-renders its loaded/hint line immediately —
 // without either extension importing the other. Mirrors priv.onSignedIn.
+//
+// ⚠️ The listener set CANNOT be plain module state. Pi gives every extension its own jiti
+// instance with moduleCache:false, so this module is instantiated once per extension that
+// imports it: /init's copy and the banner's copy are different objects, and an emit on one
+// never reaches a listener registered on the other — the refresh silently did nothing.
+// globalThis is the one thing the two copies share. Same fix, same reason, as the pack
+// state in src/updates.ts.
 type Listener = () => void;
-const listeners = new Set<Listener>();
+const LISTENERS = Symbol.for("privateer.context.listeners");
+const listeners: Set<Listener> = (((globalThis as any)[LISTENERS] ??= new Set<Listener>()) as Set<Listener>);
 
 export function onContextChanged(fn: Listener): void {
   listeners.add(fn);

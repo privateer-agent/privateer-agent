@@ -904,157 +904,6 @@ index 3355a47..8c6bba9 100644
      }
      getResourcePattern(item) {
          const scope = item.metadata.scope;
-diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index 5d65200..f827cd7 100644
---- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-+++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-@@ -10,7 +10,7 @@ import { getProviders, } from "@earendil-works/pi-ai/compat";
- import { CombinedAutocompleteProvider, Container, fuzzyFilter, getCapabilities, hyperlink, Markdown, matchesKey, ProcessTerminal, Spacer, setKeybindings, Text, TruncatedText, TUI, visibleWidth, } from "@earendil-works/pi-tui";
- import chalk from "chalk";
- import { spawn, spawnSync } from "child_process";
--import { APP_NAME, APP_TITLE, CONFIG_DIR_NAME, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, getShareViewerUrl, VERSION, } from "../../config.js";
-+import { APP_NAME, APP_TITLE, formatProjectConfigDirNames, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, getShareViewerUrl, VERSION, } from "../../config.js";
- import { parseSkillBlock } from "../../core/agent-session.js";
- import { SessionImportFileNotFoundError } from "../../core/agent-session-runtime.js";
- import { FooterDataProvider } from "../../core/footer-data-provider.js";
-@@ -110,7 +110,12 @@ export function formatResumeCommand(sessionManager) {
-     const sessionFile = sessionManager.getSessionFile();
-     if (!sessionFile || !fs.existsSync(sessionFile))
-         return undefined;
--    const args = [APP_NAME];
-+    // Privateer rename: APP_NAME is "pi", and no `pi` binary exists on a Privateer
-+    // machine — the published bin is `privateer`. So this hint, whose entire job is to
-+    // be copy-pasted, resolved to "bash: pi: command not found". The launcher exports
-+    // PRIVATEER_CMD with the name it was actually invoked under (npm's bin symlink, or
-+    // a user's own symlink of bin/privateer-tui); fall back to the published name.
-+    const args = [process.env.PRIVATEER_CMD || "privateer"];
-     if (!sessionManager.usesDefaultSessionDir()) {
-         args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
-     }
-@@ -301,9 +306,15 @@ export class InteractiveMode {
-     }
-     getBuiltInCommandConflictDiagnostics(extensionRunner) {
-         const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
-+        // Privateer redirect: these built-ins are patched above to dispatch into the
-+        // Privateer extension, so an extension command of the same name is deliberate,
-+        // not a mistake — and it stays live in the modes that have no such redirect
-+        // (rpc, print). Warning about it just tells the user their own shipped auth
-+        // commands are broken when they aren't.
-+        const redirectedBuiltins = new Set(["login", "logout"]);
-         return extensionRunner
-             .getRegisteredCommands()
--            .filter((command) => builtinNames.has(command.name))
-+            .filter((command) => builtinNames.has(command.name) && !redirectedBuiltins.has(command.name))
-             .map((command) => ({
-             type: "warning",
-             message: command.invocationName === command.name
-@@ -2042,7 +2053,17 @@ export class InteractiveMode {
-             if (text === "/model" || text.startsWith("/model ")) {
-                 const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
-                 this.editor.setText("");
--                await this.handleModelCommand(searchTerm);
-+                // Privateer redirect: when the shielded picker extension is loaded
-+                // (registers `/models`), route `/model` to it so users get the
-+                // privacy-posture picker via muscle memory. Falls back to Pi's
-+                // built-in picker when the extension isn't present.
-+                const privateerModels = searchTerm ? `/models ${searchTerm}` : "/models";
-+                if (this.isExtensionCommand(privateerModels)) {
-+                    await this.session.prompt(privateerModels);
-+                }
-+                else {
-+                    await this.handleModelCommand(searchTerm);
-+                }
-                 return;
-             }
-             if (text === "/export" || text.startsWith("/export ")) {
-@@ -2105,14 +2126,44 @@ export class InteractiveMode {
-                 this.editor.setText("");
-                 return;
-             }
--            if (text === "/login") {
--                this.showOAuthSelector("login");
-+            if (text === "/login" || text.startsWith("/login ")) {
-                 this.editor.setText("");
-+                // Privateer redirect: a bare /login IS the account sign-in. Pi's built-in
-+                // opens a two-step menu ("Use a subscription" → a list of 20+ providers)
-+                // that buries the one option a Privateer user wants, and — because it
-+                // only auto-selects a model when the current one is UNKNOWN — a
-+                // successful login through it left the terminal on its launch model and
-+                // the next prompt died on "No API key found". The extension's own flow
-+                // signs in, arms the account channel, and selects the model.
-+                // `/login <anything>` (documented as `/login keys`) still opens Pi's own
-+                // selector, so BYO provider keys stay reachable; and if the extension
-+                // isn't loaded we fall back to Pi's selector for both.
-+                if (text === "/login" && this.isExtensionCommand("/privateer")) {
-+                    await this.session.prompt("/privateer login");
-+                }
-+                else {
-+                    this.showOAuthSelector("login");
-+                }
-                 return;
-             }
-             if (text === "/logout") {
--                this.showOAuthSelector("logout");
-                 this.editor.setText("");
-+                // Privateer redirect: /logout must actually log you out. Pi's built-in
-+                // only clears Pi's authStorage, which leaves the Privateer machine
-+                // login in ~/.privateer/credentials.json untouched — so on a signed-in
-+                // machine it reported "No stored credentials to remove" and changed
-+                // nothing. Route to the account logout instead, which revokes this
-+                // machine's whole token family (login + every terminal spawned from it)
-+                // and wipes local state. Target is `/privateer logout` rather than the
-+                // extension's own `/logout` so this can never re-enter the branch it
-+                // was dispatched from. Falls back to Pi's selector when the extension
-+                // isn't loaded.
-+                if (this.isExtensionCommand("/privateer")) {
-+                    await this.session.prompt("/privateer logout");
-+                }
-+                else {
-+                    this.showOAuthSelector("logout");
-+                }
-                 return;
-             }
-             if (text === "/new") {
-@@ -2650,7 +2701,7 @@ export class InteractiveMode {
-         if (this.chatContainer.children.length > 0) {
-             this.chatContainer.addChild(new Spacer(1));
-         }
--        this.chatContainer.addChild(new Text(theme.fg("warning", `This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart pi.`), 1, 0));
-+        this.chatContainer.addChild(new Text(theme.fg("warning", `This project is not trusted. Project ${formatProjectConfigDirNames()} resources and packages are ignored. Use /trust to save a trust decision, then restart ${process.env.PRIVATEER_CMD || APP_NAME}.`), 1, 0));
-     }
-     async getUserInput() {
-         const queuedInput = this.pendingUserInputs.shift();
-diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
-index f81b4b4..9712a37 100644
---- a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
-+++ b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
-@@ -2,7 +2,7 @@ import { Markdown } from "@earendil-works/pi-tui";
- import chalk from "chalk";
- import { selectConfig } from "./cli/config-selector.js";
- import { createProjectTrustContext } from "./cli/project-trust.js";
--import { APP_NAME, CONFIG_DIR_NAME, detectInstallMethod, getAgentDir, getPackageDir, getSelfUpdateCommand, getSelfUpdateUnavailableInstruction, PACKAGE_NAME, VERSION, } from "./config.js";
-+import { APP_NAME, detectInstallMethod, getAgentDir, getPackageDir, getSelfUpdateCommand, getSelfUpdateUnavailableInstruction, PACKAGE_NAME, PROJECT_CONFIG_DIR_NAMES, VERSION, } from "./config.js";
- import { DefaultPackageManager } from "./core/package-manager.js";
- import { resolveProjectTrusted } from "./core/project-trust.js";
- import { DefaultResourceLoader } from "./core/resource-loader.js";
-@@ -57,7 +57,7 @@ function printPackageCommandHelp(command) {
- Install a package and add it to settings.
- 
- Options:
--  -l, --local       Install project-locally (${CONFIG_DIR_NAME}/settings.json)
-+  -l, --local       Install project-locally (${PROJECT_CONFIG_DIR_NAMES[0]}/settings.json)
-   -a, --approve     Trust project-local files for this command
-   -na, --no-approve Ignore project-local files for this command
- 
-@@ -78,7 +78,7 @@ Remove a package and its source from settings.
- Alias: ${APP_NAME} uninstall <source> [-l]
- 
- Options:
--  -l, --local       Remove from project settings (${CONFIG_DIR_NAME}/settings.json)
-+  -l, --local       Remove from project settings (${PROJECT_CONFIG_DIR_NAMES[0]}/settings.json)
-   -a, --approve     Trust project-local files for this command
-   -na, --no-approve Ignore project-local files for this command
- 
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
 index 68d0308..f7208f1 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
@@ -1123,3 +972,175 @@ index 68d0308..f7208f1 100644
          }
          return lines;
      }
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
+index 5d65200..397a7b7 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
+@@ -10,7 +10,7 @@ import { getProviders, } from "@earendil-works/pi-ai/compat";
+ import { CombinedAutocompleteProvider, Container, fuzzyFilter, getCapabilities, hyperlink, Markdown, matchesKey, ProcessTerminal, Spacer, setKeybindings, Text, TruncatedText, TUI, visibleWidth, } from "@earendil-works/pi-tui";
+ import chalk from "chalk";
+ import { spawn, spawnSync } from "child_process";
+-import { APP_NAME, APP_TITLE, CONFIG_DIR_NAME, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, getShareViewerUrl, VERSION, } from "../../config.js";
++import { APP_NAME, APP_TITLE, formatProjectConfigDirNames, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, getShareViewerUrl, VERSION, } from "../../config.js";
+ import { parseSkillBlock } from "../../core/agent-session.js";
+ import { SessionImportFileNotFoundError } from "../../core/agent-session-runtime.js";
+ import { FooterDataProvider } from "../../core/footer-data-provider.js";
+@@ -110,7 +110,12 @@ export function formatResumeCommand(sessionManager) {
+     const sessionFile = sessionManager.getSessionFile();
+     if (!sessionFile || !fs.existsSync(sessionFile))
+         return undefined;
+-    const args = [APP_NAME];
++    // Privateer rename: APP_NAME is "pi", and no `pi` binary exists on a Privateer
++    // machine — the published bin is `privateer`. So this hint, whose entire job is to
++    // be copy-pasted, resolved to "bash: pi: command not found". The launcher exports
++    // PRIVATEER_CMD with the name it was actually invoked under (npm's bin symlink, or
++    // a user's own symlink of bin/privateer-tui); fall back to the published name.
++    const args = [process.env.PRIVATEER_CMD || "privateer"];
+     if (!sessionManager.usesDefaultSessionDir()) {
+         args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
+     }
+@@ -301,9 +306,15 @@ export class InteractiveMode {
+     }
+     getBuiltInCommandConflictDiagnostics(extensionRunner) {
+         const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
++        // Privateer redirect: these built-ins are patched above to dispatch into the
++        // Privateer extension, so an extension command of the same name is deliberate,
++        // not a mistake — and it stays live in the modes that have no such redirect
++        // (rpc, print). Warning about it just tells the user their own shipped auth
++        // commands are broken when they aren't.
++        const redirectedBuiltins = new Set(["login", "logout"]);
+         return extensionRunner
+             .getRegisteredCommands()
+-            .filter((command) => builtinNames.has(command.name))
++            .filter((command) => builtinNames.has(command.name) && !redirectedBuiltins.has(command.name))
+             .map((command) => ({
+             type: "warning",
+             message: command.invocationName === command.name
+@@ -549,12 +560,14 @@ export class InteractiveMode {
+                 this.showNewVersionNotification(newRelease);
+             }
+         });
+-        // Start package update check asynchronously
+-        this.checkForPackageUpdates().then((updates) => {
+-            if (updates.length > 0) {
+-                this.showPackageUpdateNotification(updates);
+-            }
+-        });
++        // Privateer owns the package ("tool pack") update surface — see
++        // extensions/privateer-update.ts. Upstream ran its own check here and drew a
++        // warning-bordered box telling the user to run `pi update --extensions`: a
++        // binary that is installed nowhere on a Privateer machine, so the only
++        // instruction on screen could not be followed. We replace it with a single
++        // line in the startup banner plus /update, which applies packs in place. The
++        // CHECK is removed too, not just the box, so this costs no registry round
++        // trip — the extension does exactly one, on the same startup.
+         // Check tmux keyboard setup asynchronously
+         this.checkTmuxKeyboardSetup().then((warning) => {
+             if (warning) {
+@@ -2042,7 +2055,17 @@ export class InteractiveMode {
+             if (text === "/model" || text.startsWith("/model ")) {
+                 const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
+                 this.editor.setText("");
+-                await this.handleModelCommand(searchTerm);
++                // Privateer redirect: when the shielded picker extension is loaded
++                // (registers `/models`), route `/model` to it so users get the
++                // privacy-posture picker via muscle memory. Falls back to Pi's
++                // built-in picker when the extension isn't present.
++                const privateerModels = searchTerm ? `/models ${searchTerm}` : "/models";
++                if (this.isExtensionCommand(privateerModels)) {
++                    await this.session.prompt(privateerModels);
++                }
++                else {
++                    await this.handleModelCommand(searchTerm);
++                }
+                 return;
+             }
+             if (text === "/export" || text.startsWith("/export ")) {
+@@ -2105,14 +2128,44 @@ export class InteractiveMode {
+                 this.editor.setText("");
+                 return;
+             }
+-            if (text === "/login") {
+-                this.showOAuthSelector("login");
++            if (text === "/login" || text.startsWith("/login ")) {
+                 this.editor.setText("");
++                // Privateer redirect: a bare /login IS the account sign-in. Pi's built-in
++                // opens a two-step menu ("Use a subscription" → a list of 20+ providers)
++                // that buries the one option a Privateer user wants, and — because it
++                // only auto-selects a model when the current one is UNKNOWN — a
++                // successful login through it left the terminal on its launch model and
++                // the next prompt died on "No API key found". The extension's own flow
++                // signs in, arms the account channel, and selects the model.
++                // `/login <anything>` (documented as `/login keys`) still opens Pi's own
++                // selector, so BYO provider keys stay reachable; and if the extension
++                // isn't loaded we fall back to Pi's selector for both.
++                if (text === "/login" && this.isExtensionCommand("/privateer")) {
++                    await this.session.prompt("/privateer login");
++                }
++                else {
++                    this.showOAuthSelector("login");
++                }
+                 return;
+             }
+             if (text === "/logout") {
+-                this.showOAuthSelector("logout");
+                 this.editor.setText("");
++                // Privateer redirect: /logout must actually log you out. Pi's built-in
++                // only clears Pi's authStorage, which leaves the Privateer machine
++                // login in ~/.privateer/credentials.json untouched — so on a signed-in
++                // machine it reported "No stored credentials to remove" and changed
++                // nothing. Route to the account logout instead, which revokes this
++                // machine's whole token family (login + every terminal spawned from it)
++                // and wipes local state. Target is `/privateer logout` rather than the
++                // extension's own `/logout` so this can never re-enter the branch it
++                // was dispatched from. Falls back to Pi's selector when the extension
++                // isn't loaded.
++                if (this.isExtensionCommand("/privateer")) {
++                    await this.session.prompt("/privateer logout");
++                }
++                else {
++                    this.showOAuthSelector("logout");
++                }
+                 return;
+             }
+             if (text === "/new") {
+@@ -2650,7 +2703,7 @@ export class InteractiveMode {
+         if (this.chatContainer.children.length > 0) {
+             this.chatContainer.addChild(new Spacer(1));
+         }
+-        this.chatContainer.addChild(new Text(theme.fg("warning", `This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart pi.`), 1, 0));
++        this.chatContainer.addChild(new Text(theme.fg("warning", `This project is not trusted. Project ${formatProjectConfigDirNames()} resources and packages are ignored. Use /trust to save a trust decision, then restart ${process.env.PRIVATEER_CMD || APP_NAME}.`), 1, 0));
+     }
+     async getUserInput() {
+         const queuedInput = this.pendingUserInputs.shift();
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
+index f81b4b4..9712a37 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
+@@ -2,7 +2,7 @@ import { Markdown } from "@earendil-works/pi-tui";
+ import chalk from "chalk";
+ import { selectConfig } from "./cli/config-selector.js";
+ import { createProjectTrustContext } from "./cli/project-trust.js";
+-import { APP_NAME, CONFIG_DIR_NAME, detectInstallMethod, getAgentDir, getPackageDir, getSelfUpdateCommand, getSelfUpdateUnavailableInstruction, PACKAGE_NAME, VERSION, } from "./config.js";
++import { APP_NAME, detectInstallMethod, getAgentDir, getPackageDir, getSelfUpdateCommand, getSelfUpdateUnavailableInstruction, PACKAGE_NAME, PROJECT_CONFIG_DIR_NAMES, VERSION, } from "./config.js";
+ import { DefaultPackageManager } from "./core/package-manager.js";
+ import { resolveProjectTrusted } from "./core/project-trust.js";
+ import { DefaultResourceLoader } from "./core/resource-loader.js";
+@@ -57,7 +57,7 @@ function printPackageCommandHelp(command) {
+ Install a package and add it to settings.
+ 
+ Options:
+-  -l, --local       Install project-locally (${CONFIG_DIR_NAME}/settings.json)
++  -l, --local       Install project-locally (${PROJECT_CONFIG_DIR_NAMES[0]}/settings.json)
+   -a, --approve     Trust project-local files for this command
+   -na, --no-approve Ignore project-local files for this command
+ 
+@@ -78,7 +78,7 @@ Remove a package and its source from settings.
+ Alias: ${APP_NAME} uninstall <source> [-l]
+ 
+ Options:
+-  -l, --local       Remove from project settings (${CONFIG_DIR_NAME}/settings.json)
++  -l, --local       Remove from project settings (${PROJECT_CONFIG_DIR_NAMES[0]}/settings.json)
+   -a, --approve     Trust project-local files for this command
+   -na, --no-approve Ignore project-local files for this command
+ 

@@ -26,8 +26,9 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
+import { routeUpdate } from "./update-route.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
 const REPO = path.resolve(HERE, "..");
@@ -202,10 +203,9 @@ function updateNpmPackage() {
   });
 }
 
-// --- `privateer update` ----------------------------------------------------
-// Fetch the latest release and exit. Bundle installs re-run the download+extract
-// installer; npm installs update the global package.
-if (sub === "update") {
+// Update the CLI itself: fetch the latest release and exit. Bundle installs re-run the
+// download+extract installer; npm installs update the global package.
+function updateSelf() {
   if (BUNDLED) {
     // PRIVATEER_UPDATE=1 flips the installer into update mode: weigh-anchor banner,
     // "X → Y" version reporting, and an early exit (no download) when already current.
@@ -220,6 +220,67 @@ if (sub === "update") {
     updateNpmPackage();
   }
   // both paths exit via their child's exit handler.
+}
+
+// Update TOOL PACKS (Pi "packages": npm/git sources contributing extensions, skills,
+// prompts, themes) by handing the job to Pi's package-manager CLI, which owns npm/git
+// installs, scopes and project trust. `then` runs only on a clean exit — that's how
+// `--all` chains packs → self without either half being silently skipped.
+//
+// PI_CODING_AGENT_DIR is NOT optional here: without it Pi resolves the agent dir to a
+// standalone ~/.pi/agent and would update packages belonging to a different install
+// entirely, leaving the Privateer terminal's own packs untouched (and reporting success).
+function updatePacks(cliArgs, then) {
+  const CLI = resolveDep(REPO, "@earendil-works/pi-coding-agent", "dist", "cli.js");
+  if (!CLI || !fs.existsSync(CLI)) {
+    console.error(
+      "privateer: couldn't find pi-coding-agent — the install looks incomplete.\n" +
+        "  Try reinstalling: npm install -g privateer-agent@latest",
+    );
+    process.exit(1);
+  }
+  ensurePatches(); // project `.privateer/` config dirs are a patch; -l scope needs them
+  const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
+  const env = { ...process.env, PI_CODING_AGENT_DIR: AGENT_DIR };
+  const child = spawn(NODE_BIN, [...nodeArgs, CLI, "update", ...cliArgs], { stdio: "inherit", env });
+  child.on("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else if (code === 0 && then) then();
+    else process.exit(code ?? 0);
+  });
+  child.on("error", (e) => {
+    console.error(`privateer: failed to launch the package manager — ${e.message}`);
+    process.exit(1);
+  });
+}
+
+// --- `privateer update [--extensions | --all | <pack>]` --------------------
+// Two different things wear the same verb — the CLI itself and the tool packs — so the
+// grammar and the reasoning behind it live in bin/update-route.mjs, next to its test.
+// Tool packs can also be updated from inside a running terminal with /update, with no
+// restart at all; see extensions/privateer-update.ts.
+if (sub === "update") {
+  const rest = args.slice(1);
+  const route = routeUpdate(rest);
+  if (route === "help") {
+    const cmd = process.env.PRIVATEER_CMD || "privateer";
+    console.log(
+      [
+        `${cmd} update — fetch the latest release, or newer tool packs.`,
+        "",
+        `  ${cmd} update                  update the Privateer CLI itself`,
+        `  ${cmd} update --extensions     update every installed tool pack`,
+        `  ${cmd} update <pack>           update one pack (npm name or git URL)`,
+        `  ${cmd} update --all            tool packs, then the CLI`,
+        "",
+        "Inside a running terminal, /update fetches tool packs in place — no restart.",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
+  if (route === "all") updatePacks(["--extensions"], updateSelf);
+  else if (route === "packs") updatePacks(rest);
+  else updateSelf();
 }
 
 // --- `privateer harbor [run|install|uninstall|status]` ---------------------
@@ -402,6 +463,15 @@ else {
 
   // Dev convenience: load provider keys from the repo's .env if present.
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
+
+  // The boot splash. `--import` so it runs before Pi's entry module — most of the wait
+  // it covers IS that module graph loading, so a splash started any later would miss it.
+  // TUI branch only: harbor/acp/subagent children have no terminal to animate on (and
+  // acp's stdout is a JSON-RPC stream). pathToFileURL, not the bare path — a Windows
+  // absolute path reads as the URL scheme "d:"; see bin/privateer.mjs for the same trap.
+  const splash = path.join(HERE, "privateer-splash.mjs");
+  if (fs.existsSync(splash)) nodeArgs.push("--import", pathToFileURL(splash).href);
+
   runToCompletion(NODE_BIN, [...nodeArgs, CLI, ...modelArgs, ...extArgs, ...skillArgs, ...args]);
 }
 

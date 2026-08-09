@@ -37,6 +37,7 @@ import {
 import { resolveSignedInModel, savedPiDefaultSpec } from "../src/providers/defaultModel.ts";
 import { canOpenBrowser, openInBrowser } from "../src/util/openBrowser.ts";
 import { discoverContextFiles, onContextChanged } from "../src/context.ts";
+import { onPackUpdatesChanged, pendingCliUpdate, pendingPackUpdates } from "../src/updates.ts";
 import { type Palette, paletteFor } from "../src/ui/palette.ts";
 
 const VERSION: string = (() => {
@@ -225,32 +226,30 @@ function accountLine(p: Palette, modelProvider?: string): string {
   return `${p.DIM}not signed in · ${p.INK}/login${p.DIM} to connect your account${p.RESET}`;
 }
 
-// Is dotted version `a` newer than `b`? Plain numeric compare of major.minor.patch —
-// enough for our npm releases; anything unparseable sorts as 0 and is treated as older.
-function isNewer(a: string, b: string): boolean {
-  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
-  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return true;
-    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return false;
-  }
-  return false;
-}
-
 // The "update available" banner line, or "" when we're current / offline / unchecked.
 // Reads the cache the launcher refreshes in the background (see bin/privateer-tui) —
 // never fetches here, so the banner stays synchronous and never blocks on the network.
 function updateNotice(p: Palette): string {
-  try {
-    const home = process.env.PRIVATEER_HOME || join(homedir(), ".privateer");
-    const { latest } = JSON.parse(readFileSync(join(home, "update-check.json"), "utf8"));
-    if (typeof latest === "string" && isNewer(latest, VERSION)) {
-      return `${p.YELLOW}↑ v${latest} available${p.DIM} · run ${p.RESET}${p.INK}privateer update${p.RESET}`;
-    }
-  } catch {
-    // no cache yet, unreadable, or malformed — show nothing.
-  }
-  return "";
+  const latest = pendingCliUpdate(VERSION);
+  if (!latest) return "";
+  return `${p.YELLOW}↑ v${latest} available${p.DIM} · run ${p.RESET}${p.INK}privateer update${p.RESET}`;
+}
+
+// The tool-pack sibling of that line: a pack (an npm/git package contributing extensions,
+// skills, prompts or themes) has a newer version installed-able. Pi's own surface for this
+// was a warning-bordered box below the banner naming a command that doesn't exist here —
+// see extensions/privateer-update.ts, which owns the check and the /update that acts on it.
+// One line, same rule as the release notice: nothing at all when there's nothing to fetch.
+// Empty at startup and fills in when the background check lands (onPackUpdatesChanged
+// re-renders the header), so a slow registry never holds up the banner.
+function packNotice(p: Palette): string {
+  const packs = pendingPackUpdates();
+  if (packs.length === 0) return "";
+  const what =
+    packs.length === 1
+      ? `update ready for ${clean(packs[0].displayName)}`
+      : `${packs.length} tool pack updates ready`;
+  return `${p.YELLOW}⚑ ${what}${p.DIM} · ${p.RESET}${p.INK}/update${p.RESET}`;
 }
 
 // The PRIVATEER.md line under the block: green anchor when a project-context file is
@@ -307,6 +306,8 @@ function renderBanner(width: number, p: Palette, mark: string[], modelProvider?:
   ];
   const notice = updateNotice(p);
   if (notice) text.push(notice);
+  const packs = packNotice(p);
+  if (packs) text.push(packs);
   // A blank spacer, then the What's New block — set off below the identity lines.
   text.push("", ...whatsNewRows(p));
 
@@ -683,6 +684,10 @@ export default function privateerBrand(pi: any): void {
   // /init (in privateer-context) just created or changed a PRIVATEER.md — re-render the
   // banner so its context line flips from the "/init" hint to "PRIVATEER.md loaded".
   onContextChanged(() => refresh(ctxRef));
+
+  // privateer-update's background check came back (or an /update cleared the list) —
+  // re-render so the ⚑ line appears or disappears without waiting for the next event.
+  onPackUpdatesChanged(() => refresh(ctxRef));
 
   // The terminal is quitting (Ctrl+C, Ctrl+D, /quit, SIGTERM …). Pi awaits this
   // handler inside runtimeHost.dispose() BEFORE process.exit, so it's our one
