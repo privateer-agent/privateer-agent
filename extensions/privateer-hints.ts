@@ -39,6 +39,12 @@ function key(binding: Parameters<typeof keyText>[0], fallback: string): string {
   }
 }
 
+// Mirror of privateer-speak's DEFAULT_SHORTCUT. One constant, not a literal at each
+// return, so the two paths below can't drift apart from each other — they can still
+// drift from the package, which is why the value is named here rather than inlined:
+// grep for it when bumping privateer-speak.
+const DEFAULT_TALK_KEY = "alt+t";
+
 // Push-to-talk is pi-speak's own binding, not a Pi keybinding action, so keyText
 // can't see it — it lives in speak.json beside config.json and /talk key rebinds
 // it. Read it the same defensive way (any failure = the default).
@@ -46,9 +52,9 @@ function talkKey(): string {
   try {
     const shortcut = JSON.parse(readFileSync(join(globalDir(), "speak.json"), "utf8"))?.input?.shortcut;
     // An explicit "" is "unbound", not "missing" — only an absent field defaults.
-    return typeof shortcut === "string" ? shortcut : "ctrl+x";
+    return typeof shortcut === "string" ? shortcut : DEFAULT_TALK_KEY;
   } catch {
-    return "ctrl+x";
+    return DEFAULT_TALK_KEY;
   }
 }
 

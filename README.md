@@ -125,7 +125,7 @@ silently. The moat is swappable; the floor under it holds.
   shots stay continuous, cut them together, then score and narrate the result. Generated media
   is handed straight back as files on your machine; none of it is stored in our cloud. See
   [docs/media-generation.md](docs/media-generation.md).
-- **Talk to it.** `/speak on` reads answers aloud as they're written; **ctrl+x** is push-to-talk
+- **Talk to it.** `/speak on` reads answers aloud as they're written; **alt+t** is push-to-talk
   and the mic closes when you stop talking. Your OS voice by default — nothing leaves the
   machine — or your account's confidential-compute TTS/STT once you sign in. `/talk loop on`
   makes it hands-free. See [Talk to it](#talk-to-it--voice-both-directions).
@@ -295,11 +295,11 @@ with `/signout`; manage linked terminals from the app.
 ## Talk to it — voice, both directions
 
 `/speak on` and answers are read aloud **as they are written**, sentence by sentence, with
-code blocks, tables and URLs stripped. Press **ctrl+x** and talk; the mic closes when you
+code blocks, tables and URLs stripped. Press **alt+t** and talk; the mic closes when you
 stop talking and the transcript lands in the composer for you to read before Enter sends it.
 
 ```
-/speak on             read answers aloud    ctrl+x    push to talk (press again to send)
+/speak on             read answers aloud    alt+t     push to talk (press again to send)
 /speak voice <name>   pick a speaker        /talk     the same thing, typed
 /speak rate <n>       0.5–3× pace           /talk loop on   conversation mode, hands-free
 /speak stream off     wait for the full answer instead of speaking as it arrives
@@ -610,7 +610,7 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/signin` · `/signout` | sign in to a Privateer account (device flow) / sign out |
 | `/remote-access` | link this terminal to the app and allow it to drive (off by default) |
 | `/connect` · `/mcp` | add, enable, or remove MCP connectors / see what actually connected |
-| `/speak` · `/talk` | read answers aloud / voice input (**ctrl+x** is push-to-talk) |
+| `/speak` · `/talk` | read answers aloud / voice input (**alt+t** is push-to-talk) |
 | `/extensions` | list loaded Pi extensions |
 | `/init` | scaffold a starter `PRIVATEER.md` in this directory |
 | `/update` · `/privateer` | update to the latest release / Privateer status and posture |
