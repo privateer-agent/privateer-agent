@@ -62,9 +62,26 @@ export function piAuthStore(agentDir?: string): Promise<PiCredentialStore> {
   if (cached?.path !== path) {
     cached = {
       path,
-      store: import("@earendil-works/pi-coding-agent").then(
-        (pi) => (pi as { AuthStorage: { create(p: string): PiCredentialStore } }).AuthStorage.create(path),
-      ),
+      store: import("@earendil-works/pi-coding-agent").then((pi) => {
+        // `AuthStorage` reaches the index through OUR pi patch (0.84 stopped exporting
+        // it), and patches are best-effort — `bin/apply-patches.mjs` degrades to stock
+        // pi when it cannot write to node_modules, the `sudo npm i -g` case. This is
+        // the one place left that genuinely needs the patched export: only pi's own
+        // class knows auth.json's locking, revision checks and file format, and pi's
+        // package exports map blocks the deep path it still lives at. So say what
+        // happened. Unpatched, the alternative is `undefined.create is not a function`
+        // at whatever moment the account channel first writes a credential.
+        const ctor = (pi as { AuthStorage?: { create(p: string): PiCredentialStore } }).AuthStorage;
+        if (!ctor) {
+          throw new Error(
+            "pi's AuthStorage export is missing — the privateer patch for " +
+              "@earendil-works/pi-coding-agent has not been applied to this install. " +
+              "Run `privateer` once with write access to node_modules (a root-owned " +
+              "global install needs sudo), or reinstall with a release bundle.",
+          );
+        }
+        return ctor.create(path);
+      }),
     };
   }
   return cached.store;

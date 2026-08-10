@@ -336,6 +336,23 @@ jobs:
       # regardless. --ignore-scripts proves the package installs without running any
       # (there is no postinstall by design — see bin/apply-patches.mjs).
       - run: npm ci --ignore-scripts
+
+      # Typecheck against the tree we actually RUN, which is the patched one.
+      #
+      # Our patches add exports that pi does not ship — `AuthStorage` is the one that
+      # bit: pi 0.80 exported it, 0.84 stopped, and the 0.84 patch re-adds it because
+      # session.ts and piAuthStore.ts both need it. Unpatched, tsc is reading a pi whose
+      # shape never exists at runtime: it failed the 0.12.9 publish on two errors that
+      # were correct about node_modules and wrong about the product. Applying the
+      # patches first makes this step check the real thing — and makes a patch that has
+      # gone stale against a bumped pi fail here, loudly, instead of at someone's launch.
+      #
+      # --error-on-fail rather than the launcher's best-effort path: at launch a patch
+      # that won't apply degrades to stock pi, which is the right call on a user's
+      # machine and the wrong one in the gate that decides what gets published.
+      - name: Apply dependency patches
+        run: npx patch-package --error-on-fail
+
       - run: npm run typecheck
 
       # Verify registry signatures and provenance attestations for the entire

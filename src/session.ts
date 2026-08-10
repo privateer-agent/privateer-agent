@@ -17,8 +17,17 @@ import {
   SettingsManager,
   ModelRegistry,
   ModelRuntime,
-  AuthStorage,
 } from "@earendil-works/pi-coding-agent";
+// From pi-ai, deliberately, not pi-coding-agent's `AuthStorage.inMemory()`. 0.84
+// stopped exporting AuthStorage and our pi patch puts the export back — which is
+// fine for the one caller that genuinely needs the file-backed store
+// (providers/piAuthStore.ts) and wrong here, because patches are best-effort by
+// design: `bin/apply-patches.mjs` degrades to stock pi when it cannot write to
+// node_modules (the `sudo npm i -g` case it calls out). A static import of a
+// patched-in export turns that graceful degradation into a hard ERR_IMPORT crash
+// on every session start. pi-ai exports this store unpatched and it implements the
+// same CredentialStore interface, so nothing about the session changes.
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 
 import { agentDir as defaultAgentDir } from "./config/paths.ts";
 import { createEngineEventAdapter } from "./bridge/engineAdapter.ts";
@@ -51,7 +60,7 @@ export async function createSession(opts: CreateSessionOptions): Promise<Private
   // a synchronous facade over a ModelRuntime, and the runtime is what owns credentials —
   // so the store this session used to hand to the registry is injected into the runtime
   // instead. Still in-memory: a headless session must not touch the machine's auth.json.
-  const authStorage = AuthStorage.inMemory();
+  const authStorage = new InMemoryCredentialStore();
   const modelRuntime = await ModelRuntime.create({
     credentials: authStorage,
     modelsPath: `${AGENT_DIR}/models.json`,
