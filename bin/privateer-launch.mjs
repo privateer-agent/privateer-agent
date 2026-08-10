@@ -294,6 +294,16 @@ else if (sub === "harbor" || sub === "daemon") {
   runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-harbor.mjs"), ...args.slice(1)]);
 }
 
+// --- `privateer verify` ----------------------------------------------------
+// Check the install that is on this disk right now. Every other trust signal we
+// publish is an install-time one (npm provenance at `npm i`, a checksum inside
+// install.sh, a badge on a web page nobody revisits); this is the one a user can
+// run afterwards, on the machine they're worried about. Runs BEFORE ensurePatches
+// so it can report the real patch state rather than the state it just created.
+else if (sub === "verify") {
+  runToCompletion(NODE_BIN, [path.join(REPO, "bin", "privateer-verify.mjs"), ...args.slice(1)]);
+}
+
 // --- `privateer acp` -------------------------------------------------------
 // Privateer as an Agent Client Protocol server, spawned by an ACP host (Buzz's
 // `buzz-acp`, Zed, …) and driven over newline-delimited JSON-RPC on stdio.

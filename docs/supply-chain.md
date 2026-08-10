@@ -70,6 +70,23 @@ flag, not business as usual.
   any release is proposed, 14 for majors. Nearly all npm malware is caught and
   unpublished within days of publish; a cooldown means the ecosystem steps on
   the mine before we do.
+- **Every direct dependency is pinned exactly in the published
+  `package.json`** — not just in our lockfile.
+
+That last point is a distinction worth spelling out, because for a long time we
+had the first three and quietly lacked the fourth. `save-exact`, `npm ci` and
+the cooldown protect **our** builds: the lockfile is the source of truth for CI
+and for the bundles. None of them reach a user running `npm i -g
+privateer-agent`, because **npm ignores a dependency's lockfile**. With caret
+ranges in the manifest, that install resolved ~500 packages live, adopting any
+matching release the moment it appeared — no cooldown, no review, no lockfile.
+
+The gap was not theoretical. A fresh install of 0.12.8 on 2026-08-10 resolved
+`@earendil-works/pi-ai` and `pi-tui` to **0.80.10** against a `pi-coding-agent`
+pinned at 0.80.3, and `@juicesharp/rpiv-ask-user-question` to **2.4.0** where
+2.2.0 was tested. Exact pins in the manifest close it for direct dependencies
+(transitives still float — see "What this does not solve"), and make drift
+detectable: `privateer verify` compares each resolved version against its pin.
 
 ### 3. Publishing: provenance, no tokens
 
@@ -102,6 +119,72 @@ execute a dependency resolution, never run an install script, and get the same
 bytes CI smoke-tested. That removes the entire class of install-time attacks
 from the user's machine. See `docs/shipping.md`.
 
+The bundle is the path we *recommend*, so it must not be the least verifiable
+one. Two controls, both added 2026-08-10:
+
+- **The installers fail closed.** `install.sh` / `install.ps1` fetch the
+  release's published `.sha256` and refuse to install on a mismatch, on a
+  missing digest, or on a machine with no way to compute one. Previously all
+  three of those cases silently installed anyway — the verification was
+  best-effort, and the two failure modes that actually matter (no checksum
+  served, no hashing tool) both took the quiet path.
+  `PRIVATEER_SKIP_CHECKSUM=1` overrides, loudly.
+- **The bundles are attested.** A checksum served from the same origin as the
+  file it describes proves integrity, not provenance: whoever can swap one can
+  swap both. `release.yml` now runs `actions/attest-build-provenance` over
+  every archive, so each bundle's digest is bound by a signed Sigstore
+  statement to this repo, commit and workflow run — the same guarantee npm
+  provenance gives the tarball. The installers verify it automatically when
+  `gh` is present, and anyone can check by hand:
+
+  ```bash
+  gh attestation verify privateer-darwin-arm64.tar.gz \
+    --repo privateer-agent/privateer-agent
+  ```
+
+  Note for whoever next touches that code path: `gh` reports a *missing*
+  attestation as a bare `HTTP 404`, not as anything containing the words "no
+  attestation". Treating 404 as a verification failure would abort every
+  install of a release cut before this landed.
+
+### 5. Checkable after the fact: `privateer verify` and an SBOM
+
+Every control above is an install-time signal, which is no use to someone
+asking "is this still what you published?" weeks later. Two answers ship for
+that:
+
+- **`privateer verify`** (`bin/privateer-verify.mjs`) reads the install on
+  disk: its shape (bundle vs npm), whether this exact version is published and
+  carries a provenance attestation, whether any direct dependency drifted from
+  its pin, and which launch-time patches are applied. It reports "verified",
+  "failed" and "couldn't check" as three distinct outcomes and never renders
+  the third as the first; inconclusive checks do not set a failing exit code,
+  so it is safe in CI. It is **not a security boundary** — anything that can
+  rewrite `node_modules` can rewrite the checker — but nearly all real
+  breakage is accidental, and it catches that.
+- **A CycloneDX SBOM** is attached to every release and attested alongside the
+  bundles (~450 components). When an advisory lands against something
+  transitive, anyone can determine whether a given release was affected
+  without waiting for us to say so.
+
+### 6. Known concentration risk: `@juicesharp/*`
+
+`@juicesharp/rpiv-ask-user-question` and `@juicesharp/rpiv-web-tools` are Pi
+extensions we depend on directly, and they sit on two of the most sensitive
+paths in the agent: the prompt the user is asked to answer, and web fetch.
+Audited 2026-08-10:
+
+- **Good:** MIT, public source (`github.com/juicesharp/rpiv-mono`), no install
+  scripts, a tiny transitive surface (`@juicesharp/rpiv-config`, `typebox`),
+  and real adoption beyond us (~17k weekly downloads for the questionnaire).
+- **Risk:** a **single maintainer**, **no npm provenance**, published from an
+  account rather than a trusted publisher, at a fast cadence (111 versions
+  since April 2026). We cannot verify that a given tarball matches that repo.
+
+Mitigation today is the exact pin plus the cooldown: a new release is adopted
+deliberately, not automatically. If these ever need to move faster than we can
+review them, vendoring is the answer, not a caret.
+
 ## Checklist: adding a dependency
 
 1. Is it worth a dependency at all? Check the transitive weight
@@ -125,3 +208,45 @@ from the user's machine. See `docs/shipping.md`.
   benign. It converts "trust the publisher's laptop" into "audit the public
   repo", which is the point of the transparency mirror — but someone still has
   to read the code.
+- **Transitive dependencies still float on the npm install path.** Pinning the
+  manifest fixes our ~24 direct dependencies; the other ~425 packages resolve
+  from their parents' ranges. Bundle users are unaffected (the tree is
+  vendored, already resolved). Closing this for npm users too would mean
+  shipping a lockfile npm actually honours — which, for a dependency, it does
+  not. The honest recommendation for anyone who wants a fixed tree is the
+  bundle.
+- **`npm i -g` still runs dependency install scripts** on a default npm
+  config. `ignore-scripts=true` in our `.npmrc` governs *our* installs, not a
+  user's: seven packages in the resolved tree declare hooks (`esbuild`,
+  `koffi`, `fsevents`, `protobufjs` ×2, `@google/genai` ×2). None are needed,
+  which is why `README.md` and `SECURITY.md` document
+  `npm install -g privateer-agent --ignore-scripts` as the install we test.
+  Wording that implies otherwise is a claims bug — it is trivially falsifiable
+  and it is exactly the sort of thing this project cannot afford to get wrong.
+
+## Advisory status
+
+Cleared 2026-08-10: **10 vulnerabilities (2 high) → 2 low.**
+
+- The five `undici` advisories (response desynchronisation, cross-user
+  information disclosure, CRLF injection, cookie-attribute injection) came from
+  `undici` 8.0.0–8.8.0 nested under `@earendil-works/pi-coding-agent` 0.80.3.
+  Fixed by upgrading pi to **0.84.1**, which ships `undici` 8.9.0.
+- Our own top-level `undici` was **also** affected and had been miscounted as
+  clean — 7.28.0 falls inside the vulnerable 7.x range. Pinned to 7.29.0.
+- `npm audit fix` cleared the remaining transitive highs (`fast-uri`,
+  `ip-address`) and the `hono` moderates without touching a direct pin.
+
+What remains is 2 low (`@phala/dcap-qvl` → `elliptic`), where the only offered
+"fix" is a semver-major **downgrade** of dcap-qvl. Not taken.
+
+Worth recording, since it looks like an easy out: an `overrides` block in our
+own `package.json` would NOT have fixed this for npm users. npm reads
+`overrides` only from the root project, and a globally-installed package is not
+the root — verified empirically. The bundles would have been covered and `npm
+i -g` users would not, which is the worse half of the audience to protect.
+
+## Open
+
+- Nothing tracked. See the pi-0.84 migration note in `docs/pi-migration-plan.md`
+  for the credential-store change that upgrade required.

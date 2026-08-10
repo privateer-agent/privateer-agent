@@ -149,10 +149,36 @@ jobs:
     needs: [build, smoke-windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # An explicit block REPLACES the workflow-level one, so contents: write has to
+    # be restated here or `gh release upload` loses its token.
+    permissions:
+      contents: write # gh release upload / edit
+      id-token: write # Sigstore OIDC, for the bundle attestation below
+      attestations: write # record the attestation against this repo
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dl
+
+      # Attest the bundles the way npm attests the tarball.
+      #
+      # The bundle is the install path we RECOMMEND (curl | sh), and until now it
+      # was the least verifiable one: the only integrity signal on a ~100MB
+      # download was a .sha256 served from the same origin as the file it
+      # describes, so whoever could swap one could swap both. This signs a
+      # Sigstore statement binding each bundle's digest to this repo, this commit
+      # and this workflow run — checkable offline with
+      # `gh attestation verify <file> --repo privateer-agent/privateer-agent`,
+      # which install.sh now runs automatically when gh is present.
+      #
+      # Only the archives are subjects; the .sha256 sidecars are not worth signing
+      # (an attested archive makes them redundant).
+      - name: Attest the release bundles
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dl/*/privateer-*.tar.gz
+            dl/*/privateer-*.zip
       # GH_REPO is load-bearing: this job downloads artifacts but never checks out the
       # repo, so `gh` has no git remote to infer the target from and dies with
       # "fatal: not a git repository". That is why every release from v0.6.2 on ended
@@ -210,6 +236,59 @@ jobs:
           test "$latest" = "${GITHUB_REF_NAME}" \
             || { echo "releases/latest resolves to '${latest}', expected '${GITHUB_REF_NAME}'"; exit 1; }
           echo "published ${GITHUB_REF_NAME} — releases/latest agrees"
+
+  # Publish a dependency inventory alongside the release.
+  #
+  # "What am I actually running?" currently requires cloning the repo and reading a
+  # lockfile. A CycloneDX SBOM answers it from the release page — and matters more
+  # here than for most packages, because a coding agent's dependency tree is its
+  # real attack surface and ours is ~500 packages deep. It also means that when an
+  # advisory lands against something transitive, anyone can check whether a GIVEN
+  # release was affected, without us having to be the ones who say so.
+  #
+  # Its own job rather than a step inside publish-npm: that job is deliberately
+  # contents: read, and it should stay that way.
+  sbom:
+    needs: [publish]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the SBOM to the release
+      id-token: write # Sigstore OIDC, for the attestation below
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # --ignore-scripts matches .npmrc and the shape we tell users to install with;
+      # `npm sbom` reads the resolved tree, and no install hook can change that tree.
+      - name: Install (no scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          set -euo pipefail
+          out="privateer-agent-${GITHUB_REF_NAME}.cdx.json"
+          npm sbom --sbom-format cyclonedx --sbom-type application > "$out"
+          # A near-empty SBOM means the tree didn't resolve. Publishing that is worse
+          # than publishing none: it reads as "this package has no dependencies".
+          # The real tree is ~450 components, so 100 is a floor, not a target.
+          n="$(node -p "(require('./' + process.argv[1]).components || []).length" "$out")"
+          echo "SBOM lists ${n} components"
+          test "${n}" -gt 100 || { echo "SBOM looks truncated (${n} components)"; exit 1; }
+
+      - name: Attest the SBOM
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: privateer-agent-${{ github.ref_name }}.cdx.json
+
+      - name: Attach the SBOM to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${GITHUB_REF_NAME}" "privateer-agent-${GITHUB_REF_NAME}.cdx.json" --clobber
 
   # Publish to npm WITH PROVENANCE. This is the load-bearing trust signal: npm
   # records a signed Sigstore attestation binding the published tarball to this

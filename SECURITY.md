@@ -12,11 +12,27 @@ Privateer is a terminal coding agent: it reads and writes files, runs shell comm
 talks to model providers on your behalf. That is the point of it, and it is also the
 threat model. Two things are worth verifying rather than taking on faith.
 
-**The package runs no install scripts.** There is no `preinstall`, `install`,
-`postinstall` or `prepare` hook. `npm install -g privateer-agent` writes files and
-executes nothing; installing with `--ignore-scripts` produces an identical result. Code
-runs only when you run `privateer`. (Dependency patching happens at first launch — see
-`bin/apply-patches.mjs` and `docs/shipping.md`.)
+**This package runs no install scripts.** There is no `preinstall`, `install`,
+`postinstall` or `prepare` hook in `privateer-agent`: nothing we publish executes at
+install time, and installing with `--ignore-scripts` produces an identical result. Our
+code runs only when you run `privateer`. (Dependency patching happens at first launch —
+see `bin/apply-patches.mjs` and `docs/shipping.md`.)
+
+That is a claim about *our* tarball, not about your whole install, and the difference
+matters. `npm install -g privateer-agent` resolves a tree of roughly 500 packages, and
+seven of them do declare install scripts — `esbuild`, `koffi`, `fsevents`, `protobufjs`
+(×2) and `@google/genai` (×2). On a default npm config those execute on your machine, as
+they would for anything else that depends on them. Every one is a build-from-source or
+compatibility-warning fallback we don't need, so install with scripts off:
+
+```bash
+npm install -g privateer-agent --ignore-scripts
+```
+
+That is the install we test and the shape CI publishes from, and it produces a working
+`privateer`. To skip the dependency graph altogether, use a release bundle
+(`curl -fsSL https://privateer.pro/install.sh | sh`): a fixed set of files with a pinned
+Node, no resolution step on your machine at all.
 
 **Releases carry npm provenance.** Published from `.github/workflows/release.yml` with
 `npm publish --provenance`, so npm holds a signed Sigstore attestation binding the
@@ -27,6 +43,26 @@ the build. To check it yourself:
 ```bash
 npm view privateer-agent dist.attestations   # attestation metadata exists
 npm audit signatures                          # verifies registry signatures + provenance
+```
+
+**You can re-check the install later.** Everything above is an install-time signal, which
+is not much use to someone asking the question weeks afterwards. `privateer verify` reads
+the install actually on disk and reports the shape it took, whether this version is
+published with provenance, whether any dependency has drifted from its pinned version,
+and which launch-time patches are applied. It distinguishes "verified" from "couldn't
+check" and never reports the second as the first. It is not a security boundary — anything
+that can rewrite `node_modules` can rewrite the checker — but it catches the accidental
+and opportunistic cases, which is nearly all of them.
+
+**Bundle downloads are verified before they unpack.** `install.sh` / `install.ps1` fetch
+the release's published SHA-256 and refuse to install on a mismatch, a missing digest, or
+a machine with no way to compute one (`PRIVATEER_SKIP_CHECKSUM=1` overrides, loudly). A
+checksum served from the same origin as the file proves integrity but not provenance, so
+from the release following this change the bundles also carry a GitHub build attestation,
+which the installers verify automatically when `gh` is available:
+
+```bash
+gh attestation verify privateer-darwin-arm64.tar.gz --repo privateer-agent/privateer-agent
 ```
 
 If a version lacks provenance, it did not come from this workflow. Treat that as

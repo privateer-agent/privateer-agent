@@ -12,9 +12,6 @@
   <a href="https://www.npmjs.com/package/privateer-agent">
     <img src="https://img.shields.io/npm/v/privateer-agent" alt="npm" />
   </a>
-  <a href="https://www.npmjs.com/package/privateer-agent">
-    <img src="https://img.shields.io/npm/dm/privateer-agent" alt="npm downloads" />
-  </a>
   <a href="https://github.com/privateer-agent/privateer-agent/releases">
     <img src="https://img.shields.io/badge/changelog-what's%20new-5b8def" alt="Changelog" />
   </a>
@@ -187,9 +184,31 @@ npm view privateer-agent dist.attestations   # published from CI with npm proven
 npm audit signatures                         # verify registry signatures + provenance
 ```
 
-The package also declares **no install scripts** — no `postinstall`, nothing. Installing
-it writes files and executes nothing; `npm install -g privateer-agent --ignore-scripts`
-gives an identical result. Code runs only when you run `privateer`.
+And **after** installing — the check nobody else offers, because every signal above is
+an install-time one:
+
+```bash
+privateer verify        # is the install on THIS disk still the one we published?
+```
+
+It reports the install shape, whether this exact version is published and carries a
+provenance attestation, whether any dependency has drifted from its pinned version,
+and which launch-time patches are applied. Inconclusive checks say so rather than
+counting as a pass; `--offline` skips the ones that need the registry.
+
+The package also declares **no install scripts** — no `postinstall`, nothing — so
+nothing we publish executes at install time, and `--ignore-scripts` gives an identical
+result. That is a claim about *our* tarball, not your whole install: a handful of
+packages in the ~500-package dependency tree do declare install hooks, and none of them
+are needed here, so the install we recommend and test is
+
+```bash
+npm install -g privateer-agent --ignore-scripts
+```
+
+Or skip the dependency graph entirely with a bundle (the `curl | sh` one-liner above),
+which verifies a published SHA-256 and, from the next release on, a signed build
+attestation before it unpacks anything.
 
 See [SECURITY.md](SECURITY.md) for the threat model, the permission gate, and how to
 report a vulnerability.
