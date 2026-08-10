@@ -48,6 +48,8 @@ import "../boot.ts"; // env + attestation dispatcher, before any Pi import
 import { AsyncLocalStorage } from "node:async_hooks";
 // Names only — the factory itself is imported lazily in main() like every other
 // module here. Safe statically: this evaluates after boot.ts and pulls in no Pi.
+// Pi-free static graph by design — see the header of piAuthStore.ts.
+import { modelRegistryOf } from "../providers/piAuthStore.ts";
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
 import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
 
@@ -219,7 +221,7 @@ async function main() {
     let m = modelCache.get(spec);
     if (m === undefined) {
       const { provider, modelId } = parseSpec(spec);
-      m = (services.modelRegistry as any).find(provider, modelId) ?? null;
+      m = (modelRegistryOf(services) as any).find(provider, modelId) ?? null;
       modelCache.set(spec, m);
     }
     return m;

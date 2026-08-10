@@ -404,8 +404,14 @@ export default function privateerBrand(pi: any): void {
   //     entry is dead for every terminal;
   //   - the default ownership-checked drop for THIS process's exit, which must not
   //     delete the credential another running terminal is using.
-  const dropPersistedAccount = (ctx: any, opts: { force?: boolean } = {}): void => {
-    dropPersistedAccountCredential(ctx, opts);
+  // `ctx` is no longer passed through: pi 0.84 removed ctx.modelRegistry.authStorage, so
+  // the store is resolved from piAuthStore() inside. Kept in the signature because every
+  // caller here is a Pi command handler that has one, and dropping the parameter would
+  // churn call sites for no gain. Fire-and-forget as before — the drop is best-effort and
+  // the server-side TTL is the fallback — but the promise is now caught explicitly rather
+  // than left to become an unhandled rejection.
+  const dropPersistedAccount = (_ctx: any, opts: { force?: boolean } = {}): void => {
+    void dropPersistedAccountCredential(opts).catch(() => { /* best effort — server TTL covers it */ });
   };
 
   // /update — run the global npm install in a child process and report the outcome via

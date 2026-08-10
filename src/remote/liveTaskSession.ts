@@ -20,7 +20,9 @@ import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { isRemoteUnsafeTool, type GateController } from "../ext/permissionGate.ts";
 import { moatResourceOptions } from "../config/moat.ts";
-import { rememberAccountCredential, dropPersistedAccountCredential } from "../providers/account.ts";
+import { rememberAccountCredential, persistAccountCredential, dropPersistedAccountCredential } from "../providers/account.ts";
+// Pi-free static graph by design — see the header of piAuthStore.ts.
+import { modelRegistryOf } from "../providers/piAuthStore.ts";
 import { RelayClient, type TaskSpec } from "./relayClient.ts";
 import { RemoteBridge } from "./remoteBridge.ts";
 import { AttachmentStore, type StoredAttachment } from "../util/attachmentStore.ts";
@@ -70,7 +72,6 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   let initialPromptSent = false;
   let stopped = false;
   let spawnedAccount = false;
-  let servicesRef: { authStorage?: { remove?: (p: string) => void; get?: (p: string) => unknown } } | null = null;
 
   let attachTimer: ReturnType<typeof setTimeout> | undefined;
   let lifeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -117,7 +118,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
       try { await revokeAccountSession(); } catch { /* server TTL is the fallback */ }
       // Ownership-checked: auth.json is shared machine-wide, so a live task's teardown
       // must not delete an interactive terminal's entry (see providers/account.ts).
-      try { dropPersistedAccountCredential({ modelRegistry: { authStorage: servicesRef?.authStorage } }); } catch { /* nothing persisted */ }
+      try { await dropPersistedAccountCredential(); } catch { /* nothing persisted */ }
     }
     deps.onClosed(termId);
     deps.log(`live task ${termId} closed`);
@@ -218,13 +219,12 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
       })) as any),
     },
   });
-  servicesRef = services as any;
 
   const { provider, modelId } = deps.parseSpec(modelSpec);
   if (provider === "privateer") {
     try {
       const creds = await spawnAccountCredentials();
-      (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+      await persistAccountCredential(creds);
       rememberAccountCredential(creds); // claim it, so stop() drops OUR entry only
       spawnedAccount = true;
     } catch (e) {
@@ -236,7 +236,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   // just spawned + closes the relay), or a throw would leak an orphaned account "device"
   // until its token TTL. Everything post-account-spawn runs under one guard.
   try {
-  const model = (services.modelRegistry as any).find(provider, modelId);
+  const model = (modelRegistryOf(services) as any).find(provider, modelId);
   if (!model) {
     throw new Error(`model ${provider}/${modelId} not found`);
   }

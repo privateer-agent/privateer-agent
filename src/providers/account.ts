@@ -28,6 +28,7 @@ import { globalDir } from "../config/paths.ts";
 import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
+import { piAuthStore } from "./piAuthStore.ts";
 import {
   sealedEnabled,
   sealedProviderFor,
@@ -780,16 +781,11 @@ async function accountCredential(): Promise<AccountCredential> {
   return slot.inFlight;
 }
 
-// `ctx` is Pi's ExtensionContext; the auth store hangs off its model registry (the same
-// path privateer-brand uses to DROP the credential on sign-out).
+// `ctx` is Pi's ExtensionContext. It used to carry the auth store too
+// (ctx.modelRegistry.authStorage) — pi 0.84 removed it, and the surviving
+// ModelRegistry facade has no credential surface at all, so the store is resolved
+// from piAuthStore() instead and `ctx` is now only ever consulted for UI.
 type SeedContext = {
-  modelRegistry?: {
-    authStorage?: {
-      set?: (provider: string, cred: unknown) => void;
-      get?: (provider: string) => unknown;
-      remove?: (provider: string) => void;
-    };
-  };
   model?: { provider?: string; id?: string };
   hasUI?: boolean;
   ui?: { notify?: (message: string, level: string) => void };
@@ -809,10 +805,12 @@ export async function armAccountCredential(
   opts: { notify?: boolean } = {},
 ): Promise<boolean> {
   if (!hasCredentials()) return false;
-  const store = (ctx as SeedContext)?.modelRegistry?.authStorage;
-  if (typeof store?.set !== "function") return false;
   try {
-    store.set("privateer", { type: "oauth", ...(await accountCredential()) });
+    // `modify` is the store's only write path: it hands us the current entry and
+    // takes the replacement back. We ignore the current one — a freshly minted
+    // child credential always supersedes whatever is on disk.
+    const cred = await accountCredential();
+    await (await piAuthStore()).modify("privateer", async () => ({ type: "oauth", ...cred }));
     return true;
   } catch (e) {
     // The account channel is NOT armed: a dead machine login (401 → credentials cleared
@@ -829,6 +827,17 @@ export async function armAccountCredential(
     }
     return false;
   }
+}
+
+// Write an already-acquired account credential into Pi's auth store.
+//
+// The entrypoints that mint their own child credential (chat, acp, harbor, the live
+// task session) used to poke `services.authStorage.set(...)` directly. pi 0.84 removed
+// that property and made the store's only write path an async `modify`, so the poke
+// lives here now — one place that knows the shape, next to the ownership rules that
+// govern the same entry.
+export async function persistAccountCredential(creds: AccountCredential): Promise<void> {
+  await (await piAuthStore()).modify("privateer", async () => ({ type: "oauth", ...creds }));
 }
 
 // Drop Pi's PERSISTED account credential (the `privateer` entry in auth.json) — but
@@ -849,31 +858,32 @@ export async function armAccountCredential(
 // machine's whole token family — every terminal's session included. Those callers have
 // also already wiped the local credentials, so the ownership memo is gone by then and an
 // ownership-checked drop would refuse and strand a dead entry on disk.
-export function dropPersistedAccountCredential(ctx: unknown, opts: { force?: boolean } = {}): boolean {
-  const store = (ctx as SeedContext)?.modelRegistry?.authStorage;
+export async function dropPersistedAccountCredential(
+  opts: { force?: boolean } = {},
+): Promise<boolean> {
+  const store = await piAuthStore();
   const mine = ownedAccountCredential()?.access;
   // Every caller revokes this process's session immediately before calling us, so drop
   // the memo whatever happens to the entry on disk — otherwise a later arm() in this
   // process (a harbor run's session_start, say) could re-persist the revoked token.
   armSlot().cred = undefined;
-  if (typeof store?.remove !== "function") return false;
   try {
-    if (opts.force) {
-      /* whole family revoked — the entry is dead for every terminal, drop it */
-    } else if (typeof store.get === "function") {
-      const persisted = store.get("privateer") as { access?: unknown } | undefined;
+    if (!opts.force) {
+      // Not force: read the entry back and only drop it if it is ours. This read is
+      // the whole safety property — it is what sees the entry a CONCURRENT terminal
+      // wrote, and auth.json is re-read from disk when its revision changes, so this
+      // observes other processes rather than a stale in-process copy.
+      const persisted = (await store.read("privateer")) as { access?: unknown } | undefined;
       if (!persisted) return false; // nothing persisted — nothing to drop
       // Some other terminal's session. Leave it: it's the key that terminal is using.
       if (typeof persisted.access === "string" && persisted.access !== mine) return false;
-    } else if (!mine) {
-      // Older Pi with no readable auth store AND we never minted anything — we have no
-      // basis to claim the entry, so leave it alone rather than break another terminal.
-      return false;
     }
-    store.remove("privateer");
+    // force: the whole token family is revoked, so the entry is dead for every
+    // terminal and ownership is irrelevant.
+    await store.delete("privateer");
     return true;
   } catch {
-    return false; // older Pi shape / unwritable store — the server TTL is the fallback
+    return false; // unwritable store — the server TTL is the fallback
   }
 }
 
@@ -889,12 +899,10 @@ export function dropPersistedAccountCredential(ctx: unknown, opts: { force?: boo
 // refresh path (refreshToken), and pre-empting it would mint a second session row.
 export async function ensureAccountArmed(ctx: unknown): Promise<void> {
   if (!hasCredentials()) return;
-  const store = (ctx as SeedContext)?.modelRegistry?.authStorage;
-  if (typeof store?.get !== "function") return; // can't tell — leave it to session_start
   try {
-    if (store.get("privateer")) return;
+    if (await (await piAuthStore()).read("privateer")) return;
   } catch {
-    return;
+    return; // can't tell — leave it to the next session_start
   }
   await armAccountCredential(ctx, { notify: false });
 }

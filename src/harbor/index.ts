@@ -17,8 +17,11 @@ import { type GateController } from "../ext/permissionGate.ts";
 import { moatResourceOptions } from "../config/moat.ts";
 import {
   rememberAccountCredential,
+  persistAccountCredential,
   dropPersistedAccountCredential,
 } from "../providers/account.ts";
+// Pi-free static graph by design — see the header of piAuthStore.ts.
+import { modelRegistryOf } from "../providers/piAuthStore.ts";
 import { resolveDefaultModel } from "../providers/defaultModel.ts";
 import { RelayClient, type TaskSpec } from "../remote/relayClient.ts";
 import { createLiveTaskSession, type LiveTaskHandle } from "../remote/liveTaskSession.ts";
@@ -849,7 +852,7 @@ export class Harbor {
       rmSync(join(agentDir(), "mcp-cache.json"), { force: true });
       const services = await this.buildSessionServices(cwd, []);
       const { provider, modelId } = parseSpec(modelSpec);
-      const model = (services.modelRegistry as any).find(provider, modelId);
+      const model = (modelRegistryOf(services) as any).find(provider, modelId);
       if (!model) return;
       const { session } = await createAgentSessionFromServices({
         services,
@@ -882,18 +885,16 @@ export class Harbor {
     let out = "";
     let status: "ok" | "error" = "ok";
     let error: string | undefined;
-    let servicesRef: { authStorage?: { remove?: (p: string) => void; get?: (p: string) => unknown } } | null = null;
     let spawnedAccount = false;
     const { tools: allowedTools, directToolsEnv, notes } = await this.resolveRunTools(spec.tools, spec.cwd, spec.model);
     try {
       const services = await this.buildSessionServices(spec.cwd, directToolsEnv);
-      servicesRef = services as any;
 
       const { provider, modelId } = parseSpec(spec.model);
       if (provider === "privateer") {
         try {
           const creds = await acquireAccountCredential();
-          (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+          await persistAccountCredential(creds);
           rememberAccountCredential(creds); // claim it, so the teardown drops OUR entry only
           spawnedAccount = true;
         } catch (e) {
@@ -901,7 +902,7 @@ export class Harbor {
         }
       }
 
-      const model = (services.modelRegistry as any).find(provider, modelId);
+      const model = (modelRegistryOf(services) as any).find(provider, modelId);
       if (!model) {
         status = "error";
         error = `model ${provider}/${modelId} not found`;
@@ -935,7 +936,7 @@ export class Harbor {
         try { await revokeAccountSession(); } catch { /* best effort — server TTL is the fallback */ }
         // Ownership-checked: an interactive terminal on this machine shares auth.json,
         // and its entry must survive a harbor run's teardown (see providers/account.ts).
-        try { dropPersistedAccountCredential({ modelRegistry: { authStorage: servicesRef?.authStorage } }); } catch { /* nothing persisted */ }
+        try { await dropPersistedAccountCredential(); } catch { /* nothing persisted */ }
       }
     }
     return { out, status, error, notes };

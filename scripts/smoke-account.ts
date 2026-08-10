@@ -12,8 +12,9 @@ async function main() {
     "@earendil-works/pi-coding-agent"
   );
   const { createEngineEventAdapter } = await import("../src/bridge/engineAdapter.ts");
-  const { makeAccountProvider, fetchAccountModels, rememberAccountCredential, dropPersistedAccountCredential } =
+  const { makeAccountProvider, fetchAccountModels, rememberAccountCredential, persistAccountCredential, dropPersistedAccountCredential } =
     await import("../src/providers/account.ts");
+  const { modelRegistryOf } = await import("../src/providers/piAuthStore.ts");
   const priv = await import("../src/auth/privateer.ts");
   const { agentDir } = await import("../src/config/paths.ts");
   const { ACCOUNT_DEFAULT_MODEL_ID } = await import("../src/providers/defaultModel.ts");
@@ -36,7 +37,7 @@ async function main() {
   // acquire, not spawn: reclaim the row a previously killed run left behind instead of
   // stacking another one (and a step closer to 429 CHILD_SESSION_CAP).
   const creds = await priv.acquireAccountCredential();
-  (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+  await persistAccountCredential(creds);
   rememberAccountCredential(creds); // claim it, so the cleanup below drops OUR entry only
   console.log(`  seeded account credential (expires in ${Math.round((creds.expires - Date.now()) / 1000)}s)`);
 
@@ -53,7 +54,7 @@ async function main() {
   const catalog = await fetchAccountModels();
   const modelId = ACCOUNT_DEFAULT_MODEL_ID;
   console.log(`  live catalog: ${catalog.length} models · driving privateer/${modelId}`);
-  const model = (services.modelRegistry as any).find("privateer", modelId);
+  const model = (modelRegistryOf(services) as any).find("privateer", modelId);
   if (!model) {
     console.log("  model not found in registry");
     process.exit(1);
@@ -90,7 +91,7 @@ async function main() {
   // LIFECYCLE HAZARD note in src/auth/privateer.ts). Without it each smoke run left a
   // row alive for its full ~24h TTL.
   await priv.revokeLocalSessions();
-  dropPersistedAccountCredential({ modelRegistry: { authStorage: services.authStorage } });
+  await dropPersistedAccountCredential();
   console.log("  cleaned up: session revoked, persisted credential dropped");
   process.exit(gotText && gotFinish && !err ? 0 : 1);
 }

@@ -16,6 +16,7 @@ import {
   SessionManager,
   SettingsManager,
   ModelRegistry,
+  ModelRuntime,
   AuthStorage,
 } from "@earendil-works/pi-coding-agent";
 
@@ -46,15 +47,23 @@ export interface PrivateerSession {
 export async function createSession(opts: CreateSessionOptions): Promise<PrivateerSession> {
   const AGENT_DIR = opts.agentDir ?? process.env.PI_CODING_AGENT_DIR ?? defaultAgentDir();
 
+  // pi 0.84: ModelRegistry.create(authStorage, modelsPath) is gone. The registry is now
+  // a synchronous facade over a ModelRuntime, and the runtime is what owns credentials —
+  // so the store this session used to hand to the registry is injected into the runtime
+  // instead. Still in-memory: a headless session must not touch the machine's auth.json.
   const authStorage = AuthStorage.inMemory();
-  const modelRegistry = ModelRegistry.create(authStorage, `${AGENT_DIR}/models.json`);
-  if (typeof (modelRegistry as any).refresh === "function") await (modelRegistry as any).refresh();
-  else if (typeof (modelRegistry as any).loadModels === "function")
-    await (modelRegistry as any).loadModels();
+  const modelRuntime = await ModelRuntime.create({
+    credentials: authStorage,
+    modelsPath: `${AGENT_DIR}/models.json`,
+  });
+  const modelRegistry = new ModelRegistry(modelRuntime);
+  // Explicit, and awaited: find() below is synchronous, so models.json has to be loaded
+  // before it runs or the lookup fails on a cold cache.
+  await modelRegistry.refresh();
 
   const model = modelRegistry.find(opts.provider, opts.modelId);
   if (!model) {
-    const ids = ((modelRegistry as any).getAll?.() ?? []).map(
+    const ids = (modelRegistry.getAll() ?? []).map(
       (m: any) => `${m.provider}/${m.id}`,
     );
     throw new Error(
@@ -75,8 +84,7 @@ export async function createSession(opts: CreateSessionOptions): Promise<Private
     cwd: opts.cwd,
     agentDir: AGENT_DIR,
     model,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     settingsManager,
     sessionManager: SessionManager.inMemory(opts.cwd),
     resourceLoader: loader,

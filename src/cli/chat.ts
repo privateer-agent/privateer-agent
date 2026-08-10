@@ -44,8 +44,10 @@ async function main() {
   const {
     accountPosture,
     rememberAccountCredential,
+    persistAccountCredential,
     dropPersistedAccountCredential,
   } = await import("../providers/account.ts");
+  const { modelRegistryOf } = await import("../providers/piAuthStore.ts");
   const { agentVersion } = await import("../config/version.ts");
   const { pickerCatalog, hiddenAccountNotice, hiddenAccountTitleSuffix } = await import("../providers/modelCatalog.ts");
   const { resolveDefaultModel, resolveSignedInModel, savedPiDefaultSpec } = await import("../providers/defaultModel.ts");
@@ -448,7 +450,7 @@ async function main() {
     try { await priv.revokeLocalSessions(); } catch { /* best effort — server TTL is the fallback */ }
     // Ownership-checked: auth.json is machine-global, so removing an entry another
     // running terminal minted would strand it (see providers/account.ts).
-    try { dropPersistedAccountCredential({ modelRegistry: { authStorage: services.authStorage } }); } catch { /* nothing persisted */ }
+    try { await dropPersistedAccountCredential(); } catch { /* nothing persisted */ }
   }
   const onSignal = (): void => { void cleanup().finally(() => process.exit(0)); };
   process.once("SIGINT", onSignal);
@@ -459,14 +461,14 @@ async function main() {
   if (provider === "privateer") {
     try {
       const creds = await priv.acquireAccountCredential();
-      (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+      await persistAccountCredential(creds);
       rememberAccountCredential(creds); // claim it, so cleanup drops OUR entry and only ours
     } catch (e) {
       console.log(`${RED}Account channel unavailable: ${(e as Error).message}${RESET}`);
     }
   }
 
-  const model = (services.modelRegistry as any).find(provider, modelId);
+  const model = (modelRegistryOf(services) as any).find(provider, modelId);
   if (!model) {
     console.log(`${RED}Model ${provider}/${modelId} not found.${RESET} Set PRIVATEER_MODEL=provider/id and check the key is in .env.`);
     rl.close();
@@ -633,7 +635,7 @@ async function main() {
   // is filtered out until the credential is armed).
   const SIGN_IN_HINT = "Run /login.";
   async function modelCatalog() {
-    return pickerCatalog(services.modelRegistry as any);
+    return pickerCatalog(modelRegistryOf(services) as any);
   }
 
   // Switch the live session's model in place (history preserved — see
@@ -644,7 +646,7 @@ async function main() {
     const at = sp.indexOf("/");
     if (at < 0) { const m = "Usage: /model provider/id"; console.log(`${RED}${m}${RESET}`); if (remote) relay?.sendNotice(m); return; }
     const p = sp.slice(0, at), id = sp.slice(at + 1);
-    const model = (session.modelRegistry as any).find?.(p, id) ?? (services.modelRegistry as any).find?.(p, id);
+    const model = (session.modelRegistry as any).find?.(p, id) ?? (modelRegistryOf(services) as any).find?.(p, id);
     if (!model) { const m = `Model ${sp} not found — try /models.`; console.log(`${RED}${m}${RESET}`); if (remote) relay?.sendNotice(m); return; }
     try {
       await session.setModel(model);

@@ -343,3 +343,75 @@ Build foundation → transcript+input → orchestrator → pickers/dialogs → p
 - **Rounded borders** — none; `DynamicBorder` (top/bottom rules) is idiomatic, or hand-draw box chars.
 - **TEE/ZDR badges** — no toolkit flow; keep the promise caches, render colored `Text` (dim while loading, `POSTURE_COLOR` when resolved).
 - **Verify Phase 6:** manual drive of a real interactive session (`/run`-style) covering stream, tool approval, model/session pickers, login, resize. Live token ticking is Anthropic-only (§Phase 6 note) — render per-turn for other providers.
+
+---
+
+# Appendix C — pi 0.84 upgrade (2026-08-10)
+
+Upgraded `@earendil-works/pi-{coding-agent,ai,tui}` 0.80.3 → **0.84.1**, driven by
+five `undici` advisories (two high) that only a pi bump could clear — see
+`docs/supply-chain.md`. Two things in 0.84 are breaking for us.
+
+## C.1 The patch rebase
+
+`patches/@earendil-works+pi-coding-agent+0.80.3.patch` → `+0.84.1.patch`. 52 of 58
+hunks applied unchanged; ten needed hand-resolution, and three of those could not be
+replayed at all because upstream had restructured the code around them:
+
+- **`/login`** was refactored into `handleLoginCommand(providerRef)`, which already
+  parses `/login <provider>`. Our redirect is now expressed as "no providerRef and
+  the extension is loaded → `/privateer login`", falling through to pi otherwise.
+- **The OAuth "credentials may have expired" throw** split into two call sites
+  (`_modelRegistry.isUsingOAuth(model)` became `_modelRuntime.isUsingOAuth(model.provider)`).
+  Both carry the account-channel branch now; a not-yet-signed-in user must never be
+  told their credentials expired.
+- **The tool-pack update check** gained a `.finally()` restoring the Windows console
+  title after npm scribbles on it. That repair exists only because of the check, so
+  it was removed along with it.
+
+Also new: 0.84 added project-scope config hints that still named `.pi/`
+(`config-selector.js`, `package-manager-cli.js`). They now use
+`PROJECT_CONFIG_DIR_NAMES[0]`, matching where project settings are actually written.
+
+## C.2 Credentials: `AuthStorage` → `ModelRuntime`
+
+0.84 folded credential storage and the model registry into `ModelRuntime` and removed
+both from `AgentSessionServices`:
+
+    services.authStorage    -> gone (the runtime owns a private CredentialStore)
+    services.modelRegistry  -> gone (superseded by services.modelRuntime)
+    AuthStorage             -> no longer exported
+    ModelRegistry.create()  -> gone (it is now `new ModelRegistry(runtime)`)
+
+The account channel is what makes this non-mechanical. It has to **write** the
+`privateer` entry into the machine-global `auth.json` — pi persists an OAuth
+credential only for a login *it* drove, never for our device-code flow — and
+`ModelRuntime` exposes no credential-write method, while pi-ai exports only
+`InMemoryCredentialStore`.
+
+The resolution is in `src/providers/piAuthStore.ts`:
+
+- **`piAuthStore()`** returns pi's own `AuthStorage` over `auth.json`. It is still the
+  store `ModelRuntime` builds by default (`DefaultAuthStorage.create(authPath)` *is*
+  this class) and it already implements the public `CredentialStore` interface, so the
+  patch simply re-exports it. We stay on pi's store and file format rather than
+  reimplementing either. Holding a second instance is safe: the store is built for
+  concurrent access because `auth.json` is shared by every terminal on the machine.
+- **`modelRegistryOf(services)`** duck-types three methods off the live runtime instead
+  of constructing `ModelRegistry`. Importing that class would drag pi into a static
+  graph that must stay pi-free — `account.ts` is statically imported by extensions and
+  the harbor, and pi must not load before `boot.ts` (the contract `session.ts` states).
+  **Nothing in `piAuthStore.ts` may statically import pi**; the one place a pi class is
+  needed loads it dynamically.
+- The store's write path is async and callback-shaped (`modify(id, fn)`), so
+  `armAccountCredential`, `persistAccountCredential`, `ensureAccountArmed` and
+  `dropPersistedAccountCredential` are all async; the last one dropped its `ctx`
+  parameter, since `ctx` no longer carries a store. Every call site already sat in an
+  async teardown, so they just gained an `await`.
+
+**The property to preserve if you touch this again:** `dropPersistedAccountCredential`
+decides whether to delete the `privateer` entry by reading it back and comparing it to
+what this process minted. That read must observe writes made by *other processes* — it
+is what stops one terminal's exit from deleting a live terminal's credential. Serving it
+from an in-process cache would silently reintroduce that bug. `tests/piAuthStore.test.ts`
+pins it against the real store and a real file.

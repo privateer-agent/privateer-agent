@@ -87,8 +87,9 @@ export async function runAcp(): Promise<void> {
   const { createEngineEventAdapter } = await import("../bridge/engineAdapter.ts");
   type GateController = import("../ext/permissionGate.ts").GateController;
   const { moatResourceOptions } = await import("../config/moat.ts");
-  const { privateerChannel, rememberAccountCredential, dropPersistedAccountCredential } =
+  const { privateerChannel, rememberAccountCredential, persistAccountCredential, dropPersistedAccountCredential } =
     await import("../providers/account.ts");
+  const { modelRegistryOf } = await import("../providers/piAuthStore.ts");
   const { hasCredentials, acquireAccountCredential, revokeAccountSession } = await import("../auth/privateer.ts");
   const { webEnabled, mediaEnabled } = await import("../config/hosted.ts");
   const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
@@ -160,7 +161,7 @@ export async function runAcp(): Promise<void> {
     },
   });
 
-  const registry = services.modelRegistry as any;
+  const registry = modelRegistryOf(services) as any;
   const resolve = (spec: string) => {
     const { provider, modelId } = parseSpec(spec);
     return registry.find(provider, modelId) ?? null;
@@ -236,7 +237,7 @@ export async function runAcp(): Promise<void> {
     }
     try {
       const creds = await acquireAccountCredential();
-      (services.authStorage as any).set("privateer", { type: "oauth", ...creds });
+      await persistAccountCredential(creds);
       rememberAccountCredential(creds); // claim it, so teardown drops OUR entry only
       armedAccount = true;
       log("account channel armed");
@@ -356,7 +357,7 @@ export async function runAcp(): Promise<void> {
         /* best effort — the server-side TTL is the fallback */
       }
       try {
-        dropPersistedAccountCredential({ modelRegistry: { authStorage: services.authStorage } } as any);
+        await dropPersistedAccountCredential();
       } catch {
         /* nothing persisted */
       }

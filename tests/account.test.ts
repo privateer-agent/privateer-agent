@@ -24,28 +24,27 @@ import {
 import { ensureSealedShim, sealedShimBase, stopSealedShim } from "../src/providers/sealedShim.ts";
 import { ACCOUNT_DEFAULT_MODEL_ID } from "../src/providers/defaultModel.ts";
 import { clearCredentials, currentUser, saveCredentials } from "../src/auth/privateer.ts";
+import { setPiAuthStoreForTests } from "../src/providers/piAuthStore.ts";
 
 // A stand-in for Pi's ExtensionContext + auth store (auth.json), so the tests can see
 // exactly which provider entries a teardown or an arm touched.
+// pi 0.84 removed ctx.modelRegistry.authStorage and made the credential store async
+// (read/modify/delete). The store is resolved internally now, so the fake is INSTALLED
+// rather than passed in — same data, same assertions, one seam instead of a ctx shape.
 function fakeStore(initial?: Record<string, unknown>) {
   const data: Record<string, any> = { ...(initial ?? {}) };
-  return {
-    data,
-    ctx: {
-      hasUI: false,
-      modelRegistry: {
-        authStorage: {
-          get: (p: string) => data[p],
-          set: (p: string, cred: unknown) => {
-            data[p] = cred;
-          },
-          remove: (p: string) => {
-            delete data[p];
-          },
-        },
-      },
+  setPiAuthStoreForTests({
+    read: async (p: string) => data[p],
+    modify: async (p: string, fn: (cur: unknown) => Promise<unknown>) => {
+      const next = await fn(data[p]);
+      if (next !== undefined) data[p] = next;
+      return data[p];
     },
-  };
+    delete: async (p: string) => {
+      delete data[p];
+    },
+  });
+  return { data, ctx: { hasUI: false } };
 }
 
 const PARENT = {
@@ -179,7 +178,19 @@ test("session_start seeds Pi's auth storage with a spawned account credential", 
 
   const handlers: Record<string, (e: unknown, ctx: unknown) => void> = {};
   const stored: { provider: string; cred: any }[] = [];
-  const ctx = { modelRegistry: { authStorage: { set: (p: string, c: any) => stored.push({ provider: p, cred: c }) } } };
+  // pi 0.84: the arm writes through the store's async `modify` rather than a ctx-borne
+  // authStorage.set, so record every write there instead. The assertions below — one
+  // write per arm, same credential each time — are unchanged.
+  setPiAuthStoreForTests({
+    read: async () => undefined,
+    modify: async (provider: string, fn: (cur: unknown) => Promise<unknown>) => {
+      const cred = await fn(undefined);
+      stored.push({ provider, cred });
+      return cred;
+    },
+    delete: async () => {},
+  });
+  const ctx = { hasUI: false };
 
   try {
     makeAccountProvider()({
@@ -217,28 +228,28 @@ test("session_start seeds Pi's auth storage with a spawned account credential", 
 // deleted a live terminal's credential, which then worked from Pi's in-memory copy
 // until `expires` and afterwards failed every prompt on "No API key found for
 // privateer" with nothing to re-arm it. The drop must be ownership-checked.
-test("exit teardown drops only the credential THIS process minted", () => {
+test("exit teardown drops only the credential THIS process minted", async () => {
   const live = { type: "oauth", access: "other-terminal", refresh: "other-r", expires: Date.now() + 3_600_000 };
   const s = fakeStore({ privateer: live });
 
   rememberAccountCredential({ access: "ours", refresh: "our-r", expires: Date.now() + 3_600_000 });
-  assert.equal(dropPersistedAccountCredential(s.ctx), false, "another terminal's entry must not be removed");
+  assert.equal(await dropPersistedAccountCredential(), false, "another terminal's entry must not be removed");
   assert.deepEqual(s.data.privateer, live, "a live terminal's credential must survive our exit");
 
   // Same call, but now the persisted entry IS the one we minted.
   rememberAccountCredential({ access: "other-terminal", refresh: "other-r", expires: Date.now() + 3_600_000 });
-  assert.equal(dropPersistedAccountCredential(s.ctx), true);
+  assert.equal(await dropPersistedAccountCredential(), true);
   assert.equal(s.data.privateer, undefined, "our own entry must be dropped, so the next launch spawns fresh");
 });
 
 // Sign-out and expiry revoke the machine's WHOLE token family, so the persisted entry
 // is dead for every terminal — and clearCredentials() has already dropped the ownership
 // memo by then, which an ownership-checked drop would read as "not ours".
-test("forced teardown (sign-out / expiry) drops the entry with no ownership memo", () => {
+test("forced teardown (sign-out / expiry) drops the entry with no ownership memo", async () => {
   const s = fakeStore({ privateer: { type: "oauth", access: "whoever", refresh: "r", expires: 1 } });
   clearCredentials();
   assert.equal(ownedAccountCredential(), undefined, "clearCredentials must forget the armed credential");
-  assert.equal(dropPersistedAccountCredential(s.ctx, { force: true }), true);
+  assert.equal(await dropPersistedAccountCredential({ force: true }), true);
   assert.equal(s.data.privateer, undefined);
 });
 
