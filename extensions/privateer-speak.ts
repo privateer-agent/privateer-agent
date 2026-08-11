@@ -26,7 +26,7 @@
 // TTS, exactly the resolveSignedInModel pattern, with the model-persistence lesson
 // applied (a user who picked "local" stays on "local").
 //
-// HONEST FRAMING. "Confidential", never "private end-to-end": the utterance text leaves
+// HONEST FRAMING. "Confidential", never "fully private": the utterance text leaves
 // the machine for the attested TTS enclave. That is the claim the label makes and the
 // only one it may make. And this only ever speaks in interactive UI sessions — pi-speak
 // gates on hasUI, so harbor/daemon/ACP surfaces stay silent by design (this extension is

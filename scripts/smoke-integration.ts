@@ -1,4 +1,4 @@
-// Phase 3 integration — the whole moat, end-to-end through privateer-agent.
+// Phase 3 integration — the whole moat, start to finish through privateer-agent.
 //
 // Drives a REAL Tinfoil turn with BOTH the permission gate AND the pi-privacy
 // extension loaded, then proves the SPKI captured from Pi's ACTUAL inference

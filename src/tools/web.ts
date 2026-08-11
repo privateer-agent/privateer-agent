@@ -16,7 +16,7 @@
 // not, but the derived query does. That is the same residual metadata leak already
 // documented for Sealed mode in the server's routes/rag.js header, and it is why web
 // access is a switch on the agent rather than an unconditional capability. Never
-// describe a routine that searches as private end-to-end.
+// describe a routine that searches as fully private.
 //
 // SCOPE. These are the UNATTENDED paths' web tools: the harbor (routines, tasks,
 // workflow agent steps) and channels, both of which build a session from an explicit

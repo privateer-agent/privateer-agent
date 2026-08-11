@@ -255,7 +255,7 @@ async function opProbe(cwd: string, p: Params, signal?: AbortSignal): Promise<st
     .join("\n");
 }
 
-// Stitch clips end to end, optionally with a crossfade between them.
+// Stitch clips back-to-back, optionally with a crossfade between them.
 async function opConcat(cwd: string, p: Params, signal?: AbortSignal): Promise<string> {
   const list = p.inputs ?? [];
   if (list.length < 2) throw new ToolError("`concat` needs at least two paths in `inputs`.");

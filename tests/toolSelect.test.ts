@@ -155,7 +155,7 @@ test("a cold server is reported as cold, not as an unknown tool", () => {
 
 // ── disk shapes ──────────────────────────────────────────────────────────────
 
-test("reads the adapter's on-disk cache and pinned prefix, end to end", () => {
+test("reads the adapter's on-disk cache and pinned prefix, start to finish", () => {
   const dir = mkdtempSync(join(tmpdir(), "privateer-mcp-"));
   try {
     writeFileSync(

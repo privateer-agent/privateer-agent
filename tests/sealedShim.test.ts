@@ -20,7 +20,7 @@ test("sealedProviderFor classifies the sealed providers, not the others", () => 
 // ── feature flag ──────────────────────────────────────────────────────────────
 
 test("sealedEnabled defaults ON, and only an explicit 0/false opts out", () => {
-  // Flipped 2026-07-31 once the live checklist passed end to end. Sealing is now the
+  // Flipped 2026-07-31 once the live checklist passed in full. Sealing is now the
   // default posture: unset means seal. Opting out is deliberate and explicit, because
   // it downgrades the badge to unconfirmed and drops `phala/*` entirely.
   const prev = process.env.PRIVATEER_SEALED;

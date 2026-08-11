@@ -186,7 +186,7 @@ headless (no TUI) so the whole agent + relay is provable before the UI rewrite.
 
 | Risk | Status | Mitigation |
 |---|---|---|
-| Relay survives the loop swap | **RESOLVED** (spike B) | adapter + gate proven end-to-end |
+| Relay survives the loop swap | **RESOLVED** (spike B) | adapter + gate proven in full |
 | TEE attestation survives | **RESOLVED** (spike A) | out-of-band undici dispatcher; SPKI extracted |
 | Live token counter fidelity | Known limit | Anthropic live; others per-turn. Acceptable. |
 | Headless auto-trust footgun | Design item | Gate is the real safety; never `-a` in harbor; set `defaultProjectTrust`. |

@@ -9,12 +9,12 @@
 // user has explicitly opted into non-ZDR media (`ZDR_MEDIA_BLOCKED`), and these tools
 // surface that refusal verbatim rather than papering over it.
 //
-// WHAT THIS COSTS, HONESTLY. Generation is NOT end-to-end encrypted and cannot be. The
+// WHAT THIS COSTS, HONESTLY. Generation is NOT encrypted and cannot be. The
 // prompt, any input image, and the finished bytes pass through Privateer's servers in
 // plaintext on the way to and from the model provider — that is what generation IS.
 // What we do control: nothing is persisted server-side. The bytes come back inline and
 // land only in the file you name. Never describe a routine that generates media as
-// private end-to-end; do say the output isn't stored in our cloud.
+// fully private; do say the output isn't stored in our cloud.
 //
 // MUSIC IS THE LOOSEST OF THESE. Neither Lyria SKU has a zero-retention endpoint and no
 // confidential music model exists, so music is deliberately exempt from the ZDR gate

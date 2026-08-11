@@ -41,7 +41,7 @@ import { iterateSSE } from "./phala/sse.ts";
 export type SealedProvider = "tinfoil" | "phala";
 
 // Sealed mode is ON by default as of 2026-07-31, when the live checklist in
-// docs/tee-verified-tinfoil-ehbp.md passed end to end against the deployed relay:
+// docs/tee-verified-tinfoil-ehbp.md passed in full against the deployed relay:
 // both enclaves attest client-side (Tinfoil HPKE-key match; Phala report binding +
 // TDX quote), a sealed turn round-trips and streams incrementally, a bogus enclave is
 // refused rather than silently greened, and the server bills the turn.

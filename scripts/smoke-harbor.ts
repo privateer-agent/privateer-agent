@@ -1,4 +1,4 @@
-// Run a routine end-to-end through the rewired harbor: headless Pi session →
+// Run a routine all the way through the rewired harbor: headless Pi session →
 // text result → file delivery. Exercises runRoutine (the one rewired seam) plus
 // the KEEP delivery path.
 //

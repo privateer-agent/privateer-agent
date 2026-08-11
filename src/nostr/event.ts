@@ -63,7 +63,7 @@ export function signEvent(u: UnsignedEvent, secretKeyHex: string, auxRand?: Uint
 }
 
 /**
- * Verify an event end to end, fail-closed on anything malformed.
+ * Verify an event in full, fail-closed on anything malformed.
  *
  * BOTH checks matter and the order is deliberate: recompute the id first, so a
  * tampered `content` or `tags` is caught even when the signature over the ORIGINAL

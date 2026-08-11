@@ -1,7 +1,7 @@
-# Green shield for proxied Tinfoil — EHBP end-to-end encryption
+# Green shield for proxied Tinfoil — EHBP encryption
 
 > **Status (2026-07-31): LIVE and ON BY DEFAULT for both sealed providers (Tinfoil EHBP +
-> Phala ACI E2EE).** The checklist at the bottom passed end to end against the deployed
+> Phala ACI E2EE).** The checklist at the bottom passed in full against the deployed
 > relay: both enclaves attest client-side, sealed turns round-trip and stream
 > incrementally, a bogus enclave is refused rather than silently greened, and the server
 > bills the turn. `PRIVATEER_SEALED=0` drops back to the cleartext path.
@@ -104,7 +104,7 @@ Follow the Tinfoil backend-proxy contract verbatim for `tinfoil/*` (and `phala/*
 - **Streaming:** preserve chunked `Transfer-Encoding`, flush for SSE.
 - **Billing survives the seal:** usage comes back in the `X-Tinfoil-Usage-Metrics`
   trailer, which the proxy CAN read (it's a header, not the sealed body). No metering
-  regression — this was the main objection to any end-to-end scheme and it's already
+  regression — this was the main objection to any such scheme and it's already
   handled.
 
 ### 2. Client EHBP shim — in-process localhost (THIS repo)
@@ -178,7 +178,7 @@ invariant, enforced in code, not just displayed.
 
 ## Staging — never a dishonest green
 
-Land it so the badge can only go green when tokens are genuinely sealed end-to-end. Each
+Land it so the badge can only go green when tokens are genuinely sealed. Each
 stage is independently shippable and honest.
 
 1. **Server proxy** implements the EHBP contract behind a flag. No client change. Verify
@@ -264,7 +264,7 @@ summarised in the status block at the top.
 1. **Attestation reachable:** `curl -s ${server}/api/sealed/tinfoil/attestation` returns a
    bundle (hardware predicate present). Proves the relay's `/attestation` proxy + a live enclave.
 2. **SDK attests:** in a Node REPL, `new SecureClient({baseURL, attestationBundleURL: baseURL,
-   transport:'ehbp'}).ready()` resolves (~2s). Proves the HPKE-key-match end to end.
+   transport:'ehbp'}).ready()` resolves (~2s). Proves the HPKE-key-match in full.
 3. **Sealed round-trip:** `PRIVATEER_SEALED=1`, sign in, select `tinfoil/glm-5-2`, send a prompt.
    Confirm a normal answer **and** that the server logs a sealed turn billed off
    `X-Tinfoil-Usage-Metrics` (not UNBILLED).

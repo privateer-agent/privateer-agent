@@ -129,7 +129,7 @@ Trigger flow:
   `relay.sendPushWake(...)`. And implement **`onAttachment`** (currently `() => {}`) to re-emit
   every open `pendingGates` entry as a fresh `select_request`, so a pushed-then-opened app that
   attaches after the gate opened actually sees it. **This reconnect re-emit is required for the
-  feature to work end-to-end** and is independently useful (fixes silent gate loss on any
+  feature to work in full** and is independently useful (fixes silent gate loss on any
   reconnect).
 
 ## 6. Provider choice

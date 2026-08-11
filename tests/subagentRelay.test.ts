@@ -17,7 +17,7 @@ import {
 } from "../src/remote/subagentRelay.ts";
 
 // The child↔parent approval adapters: a child gate ask maps to an AskOutcome; the
-// parent relay maps a channel ask to bridge calls; and end-to-end a child's forward
+// parent relay maps a channel ask to bridge calls; and, in full, a child's forward
 // reaches a fake bridge and the answer comes back.
 
 function freshDir(): string {

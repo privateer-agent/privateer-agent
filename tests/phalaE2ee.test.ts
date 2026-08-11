@@ -11,7 +11,7 @@ import {
 } from "../src/providers/phala/aci-verifier/index.ts";
 
 // Proves the vendored @dstack/aci-verifier E2EE channel runs correctly on Node's
-// native Web Crypto (no polyfills) by simulating the enclave side end-to-end:
+// native Web Crypto (no polyfills) by simulating the enclave side in full:
 //   client(seal) → [service private key decrypts]  — the request path
 //   [enclave encrypts to client pub] → client(open) — the response path
 // Both directions reconstruct the exact AAD + HKDF/AES-GCM the channel uses, so a

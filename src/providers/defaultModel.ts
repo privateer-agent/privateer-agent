@@ -71,7 +71,7 @@ export const ACCOUNT_DEFAULT_MODEL_ID = TINFOIL_MODEL_ID;
 export const ACCOUNT_DEFAULT_SPEC = `privateer/${ACCOUNT_DEFAULT_MODEL_ID}`;
 
 // The account channel's NEAR confidential-compute model — no longer the default, but
-// still the one account model we can attest end-to-end through the server proxy, so
+// still the one account model we can attest in full through the server proxy, so
 // it stays first in the seed catalog after the default. See providers/account.ts.
 export const ACCOUNT_NEAR_MODEL_ID = "near/zai-org/GLM-5.1-FP8";
 

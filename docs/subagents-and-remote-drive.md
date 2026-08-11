@@ -158,7 +158,7 @@ Result: background → foreground retains the feed, auto-reconnects, and resumes
 | `treeview/client/contexts/RemoteDriveContext.tsx` | app drive session: reconnect + feed retention |
 | `tests/subagentChannel.test.ts`, `subagentRelay.test.ts`, `subagentWrapper.test.ts` | unit coverage |
 
-## 8. Verifying end-to-end
+## 8. Verifying the full path
 
 1. Launch `bin/privateer-tui` (installs shims, sets the child binary), `/remote-access on`, and drive from the app.
 2. Optional ground-truth watcher on the host:

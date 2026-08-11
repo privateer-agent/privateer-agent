@@ -188,7 +188,7 @@ agent, a `*_*` frame family, and a screen in the app:
 The **Channels** and **Routines** actions live on the "Privateer Local Harbor" terminal
 card in `LiveTerminalsList`; Skills/Extensions/Drive live on interactive terminals.
 
-### 5.3 The channels flow, end to end
+### 5.3 The channels flow, start to finish
 1. App opens `ChannelsScreen` → `channels_list` → harbor replies with a `channels`
    frame (all four platforms; **never a token value**, only `secretsSet` names +
    counts + posture + `running`).

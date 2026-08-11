@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 
 // Where a routine's result is delivered after it runs. `file`/`relay`/`notice` stay
-// inside the user's trust boundary. `cloud` stores an END-TO-END-ENCRYPTED copy in
+// inside the user's trust boundary. `cloud` stores an ENCRYPTED copy in
 // the account's server outbox for the app to catch up on when it next opens (the
 // server only ever sees ciphertext — it can't read results — but does learn that a
 // result exists, plus its time and rough size). `email` and `webhook:<name>` cross

@@ -485,7 +485,7 @@ export const privateerOAuthProvider = {
 };
 
 // Confidential-compute prefixes in the account catalog: every model the server serves
-// out of a TEE. `near/` is the one we can attest end to end from here (the server
+// out of a TEE. `near/` is the one we can attest in full from here (the server
 // proxies a nonce'd quote); `tinfoil/` and `phala/` are equally real enclaves whose
 // attestation we cannot bind to THIS connection through the proxy — see accountPosture.
 const TEE_PREFIXES = ["near/", "tinfoil/", "phala/"];

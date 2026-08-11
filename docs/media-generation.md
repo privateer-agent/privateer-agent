@@ -77,7 +77,7 @@ Other patterns the same pieces cover:
 
 ## Privacy — what to say and what not to
 
-Generation is **not** end-to-end encrypted and cannot be. The prompt, any input image,
+Generation is **not** encrypted and cannot be. The prompt, any input image,
 and the finished bytes pass through Privateer's servers in plaintext on their way to and
 from the model provider. That is what generation *is*.
 
@@ -99,7 +99,7 @@ What we do control, and can say honestly:
   request is sent unattributed. `generate_music`'s description says so, and its result
   reminds the model to pass that on. Never call a music prompt private.
 
-Never describe a routine that generates media as private end-to-end. Do say the output
+Never describe a routine that generates media as fully private. Do say the output
 isn't stored in our cloud.
 
 ---

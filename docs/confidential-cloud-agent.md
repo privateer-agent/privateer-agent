@@ -64,7 +64,7 @@ The operator (Privateer / Render / the cloud host) sits **outside** the encrypti
 boundary. It can schedule, start, stop, and route the VM — but the guest memory (prompts,
 files, keys, model I/O) is encrypted by the CPU and is opaque to it.
 
-**End-to-end chain, unbroken:** verified agent runtime → *and* the agent's own inference
+**Unbroken chain:** verified agent runtime → *and* the agent's own inference
 calls go to a TEE-attested endpoint that the enclave verifies with the same `pi-privacy`
 code it runs today. Both links are cryptographic. That's the whole pitch in one sentence.
 

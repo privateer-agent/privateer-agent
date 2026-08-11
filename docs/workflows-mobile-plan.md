@@ -62,7 +62,7 @@ once-per-workflow, lean-back, desktop-shaped task.
 ```
 
 Why this is mostly already built:
-- The `human_gate` → `requestSelect` → app picker path exists end-to-end (harbor
+- The `human_gate` → `requestSelect` → app picker path exists in full (harbor
   `askGate`, `resolveGate`, `GATE_TIMEOUT_MS`; the app's existing select UI renders it).
 - The runner emits `step_start` events; the harbor forwards them as feed notices.
 - The runner **fail-closes** unattended script steps to `deferred`. The mobile answer to
@@ -196,7 +196,7 @@ actually reusable.
 yet** (pako isn't a dep); large graphs should share as a *file*, not a link (§5.2). The import
 target terminal is the caller's `familyId` (from WorkflowsScreen) or the active drive session's
 `termId`; a cold deep link with neither shows a "open your Routines terminal first" notice rather
-than guessing. `services/workflowShare.ts` is pure logic and was exercised end-to-end (export→link→
+than guessing. `services/workflowShare.ts` is pure logic and was exercised in full (export→link→
 decode→manifest→strip→draft + all error codes). Not yet driven on a device/simulator.
 
 Phase 1 is small (crypto + harbor already exist and are tested) and delivers the hero UX.

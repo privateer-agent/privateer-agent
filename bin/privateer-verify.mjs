@@ -134,7 +134,7 @@ export async function verify({ repo, offline = false } = {}) {
       const att = data.dist?.attestations;
       if (att?.provenance?.predicateType) {
         pass("carries an npm provenance attestation", att.provenance.predicateType);
-        note("verify the signature chain end-to-end with:  npm audit signatures");
+        note("verify the signature chain with:  npm audit signatures");
       } else {
         fail("no provenance attestation on this version");
         note("every release from 0.6.7 on is published from CI with --provenance;");

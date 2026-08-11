@@ -152,7 +152,7 @@ test("catalog: an explicit hosted flag overrides the derived answer", () => {
   assert.equal(hostedCapable({ ...stdioEntry, hosted: true }), true);
 });
 
-// The end-to-end shape the /connect panel actually produces: catalog → draft →
+// The full shape the /connect panel actually produces: catalog → draft →
 // mcpControl.save → the projection pi-mcp-adapter reads. If these two modules ever
 // disagree about a field name, this is where it shows up.
 test("catalog: every entry saves cleanly through mcpControl", () => {

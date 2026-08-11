@@ -100,7 +100,7 @@ What actually happens when a host drives the agent:
 
 Covered by the ACP test suite (31 tests: protocol negotiation, streaming, cancel,
 model picker, both approval outcomes, allow-always scoping, dangerous-command re-prompt),
-and verified live end-to-end against a real host and a real model.
+and verified live against a real host and a real model.
 
 ## What's on the wire
 

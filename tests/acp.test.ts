@@ -92,7 +92,7 @@ test("askOverAcp denies when there is no turn context", async () => {
   assert.equal(await askOverAcp(req()), "deny");
 });
 
-// ── end-to-end over the real ndjson framing ─────────────────────────────────────
+// ── full path over the real ndjson framing ──────────────────────────────────────
 
 // Wire a real ClientSideConnection to a real PrivateerAcpAgent through two byte
 // pipes, so every assertion below travels the actual JSON-RPC + newline-delimited
