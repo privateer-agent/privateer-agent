@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { globalDir } from "../config/paths.ts";
 import { Routine, RoutineFile } from "./schema.ts";
+import type { StagedMedia } from "./resultMedia.ts";
 
 // routines.json lives alongside config.json in the global dir. It can carry the
 // prompt text and (for email delivery) recipient hints, so it is written owner-only
@@ -223,6 +224,12 @@ export interface PendingCloud {
   // workflow run. Preserved so the flush re-seals with the right `kind` and the app
   // labels it correctly in the inbox.
   kind?: OutboxKind;
+  // Attachments the run staged for the Inbox (resultMedia.ts) — RECORDS, not bytes.
+  // The files are still on this machine, so a flush hours later re-reads them from
+  // these paths; one that has since been deleted is named in the delivered body
+  // instead. Copying megabytes into this queue would be the same content twice on
+  // the one box that already has it.
+  media?: StagedMedia[];
 }
 
 function pendingCloudPath(): string {

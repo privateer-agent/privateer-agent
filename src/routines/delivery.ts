@@ -1,6 +1,7 @@
 import type { Routine } from "./schema.ts";
 import { webhookName } from "./schema.ts";
 import { writeRoutineOutput, addNotice } from "./store.ts";
+import type { StagedMedia } from "./resultMedia.ts";
 
 // A relay pusher, injected by the harbor. Given the finished result it either
 // forwards it to an attached controller immediately ("live") or persists it to the
@@ -14,7 +15,14 @@ export type RelayPusher = (routine: Routine, content: string) => "live" | "queue
 // "queued" when it was persisted for a later flush — either way the result is
 // durably accounted for. `status` is carried so the sealed envelope can render
 // ok/error without re-parsing the markdown body.
-export type CloudPusher = (routine: Routine, content: string, status: "ok" | "error") => Promise<"sent" | "queued">;
+// `media` is what the run staged for the Inbox (resultMedia.ts) — sealed and stored
+// alongside the message by the pusher, or named in the body when it can't travel.
+export type CloudPusher = (
+  routine: Routine,
+  content: string,
+  status: "ok" | "error",
+  media: StagedMedia[],
+) => Promise<"sent" | "queued">;
 
 // A named webhook endpoint from config `webhooks`.
 export interface WebhookTarget {
@@ -28,6 +36,11 @@ export interface DeliveryContext {
   // (e.g. not signed in) → the `cloud` channel falls back to a notice so the result
   // isn't silently lost.
   pushCloud?: CloudPusher;
+  // Files the run staged for the app's Inbox. Only the `cloud` channel carries them:
+  // a webhook receiver has no key to open a sealed blob, and the file channel already
+  // has the originals on disk — so for every other channel the body's own prose is
+  // what tells the reader an attachment exists.
+  media?: StagedMedia[];
   // Named endpoints for "webhook:<name>" delivery entries; results POST here.
   webhooks?: Record<string, WebhookTarget>;
   // Scrubs secrets from anything leaving the machine. Webhook bodies always pass
@@ -144,7 +157,7 @@ export async function deliver(
   // yet) and flushes later — both are durable. Only when no pusher is wired at all,
   // and nothing else keeps a durable record, do we fall back to a notice.
   if (wants.has("cloud")) {
-    const sent = ctx.pushCloud ? await ctx.pushCloud(routine, content, status) : undefined;
+    const sent = ctx.pushCloud ? await ctx.pushCloud(routine, content, status, ctx.media ?? []) : undefined;
     if (sent === "sent") delivered.push("cloud");
     else if (sent === "queued") delivered.push("cloud(queued)");
     else if (!wants.has("file") && !wants.has("notice") && !wants.has("relay")) {

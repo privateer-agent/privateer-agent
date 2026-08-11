@@ -244,3 +244,32 @@ test("moat profiles: each kind builds a gate, and web stays off the interactive 
     );
   }
 });
+
+// attach_to_result is the one tool whose existence is decided by DELIVERY, not by a
+// capability switch: a run that answers into the app's Inbox can hand over files, and a
+// run whose result goes to a file or a webhook has nothing to hand them to. That is
+// expressed by passing (or not passing) the run's staging area, so pin both directions —
+// the tempting future edit is to register it unconditionally "for consistency", which
+// would give every session a tool that stages attachments nobody will ever collect.
+test("moat: attach_to_result exists only for a run with an Inbox to attach to", async () => {
+  const { ResultMedia } = await import("../src/routines/resultMedia.ts");
+
+  // A stub `pi` that records tool names and shrugs at everything else an extension does.
+  const toolsFrom = (factories: ((pi: any) => void)[]): string[] => {
+    const names: string[] = [];
+    const pi: any = new Proxy(
+      { registerTool: (t: any) => { if (t?.name) names.push(t.name); } },
+      { get: (target, prop) => (prop in target ? (target as any)[prop] : () => undefined) },
+    );
+    for (const f of factories) {
+      try { f(pi); } catch { /* an extension that needs a real host is not what we're asking about */ }
+    }
+    return names;
+  };
+
+  const without = await buildMoat({ kind: "harbor-session", gate: stubGate(REPO) });
+  assert.ok(!toolsFrom(without).includes("attach_to_result"), "no staging area ⇒ no tool");
+
+  const withMedia = await buildMoat({ kind: "harbor-session", gate: stubGate(REPO), resultMedia: new ResultMedia() });
+  assert.ok(toolsFrom(withMedia).includes("attach_to_result"), "a staged run must be able to attach");
+});

@@ -15,14 +15,23 @@
 // pin, no signature, or a bad signature ⇒ we don't seal at all, and the caller falls
 // back to its own durable channel (a queue, a file, a notice).
 //
+// ATTACHMENTS. A result may also carry media (routines/resultMedia.ts). The message
+// envelope stays small — it is capped by the server at 128KB of base64 — so only a
+// thumbnail-sized file rides inside it; anything larger is sealed on its own and
+// PUT to /api/outbox/blob, with the envelope carrying just its id and metadata. Both
+// halves are sealed to the same account key, so the server holds ciphertext either
+// way, and the app collects the blobs on the same sync that opens the message.
+//
 // Module-level caches (pubkey, machine origin) — one per process, exactly like the
 // per-instance caches this replaced.
 
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { apiRequest, defaultDeviceLabel } from "../auth/privateer.ts";
 import { loadAccountSignKey } from "../crypto/accountTrust.ts";
 import { verifyOutboxKey } from "../crypto/accountVerify.ts";
-import { sealJson, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
+import { sealJson, seal, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { routineRelayId, type OutboxKind } from "../routines/store.ts";
+import { MAX_ATTACHMENT_BYTES, type MediaClass, type StagedMedia } from "../routines/resultMedia.ts";
 
 export type { OutboxKind };
 
@@ -30,6 +39,34 @@ export type { OutboxKind };
 // base64; this keeps us well inside that with room for the envelope, and matches
 // the mailbox's purpose — summaries and answers, not transcripts.
 export const MAX_CLOUD_PLAINTEXT = 45_000;
+
+// Total plaintext an envelope may reach once attachment metadata (and any inline
+// bytes) are folded in. 128KB of base64 is 98,304 bytes of plaintext; this leaves
+// headroom for the sealed-box overhead and JSON escaping.
+const MAX_ENVELOPE_PLAINTEXT = 90_000;
+
+/** Largest file carried INSIDE the envelope rather than as its own blob. */
+export const MAX_INLINE_MEDIA_BYTES = 24 * 1024;
+/** Total base64 an envelope will spend on inline media, whatever the file count. */
+const INLINE_TOTAL_B64_BUDGET = 32 * 1024;
+
+/**
+ * One attachment as the app sees it: metadata always, then EITHER `b64` (small
+ * enough to inline) or `blobId` (fetch + open separately). Never both, never
+ * neither — an attachment we couldn't deliver is dropped from the list and named
+ * in the body instead, because a card that can never load is worse than a sentence
+ * saying the file stayed on the machine.
+ */
+export interface OutboxMedia {
+  id: string;
+  name: string;
+  mediaType: string;
+  cls: MediaClass;
+  size: number;
+  caption?: string;
+  b64?: string;
+  blobId?: string;
+}
 
 let outboxPub: Uint8Array | undefined;
 let originCache: { id: string; label: string } | undefined;
@@ -66,10 +103,119 @@ export function machineOrigin(): { id: string; label: string } {
   return originCache;
 }
 
+/** Seal one attachment's bytes and store them. Returns the blob id, or undefined. */
+async function uploadBlob(pub: Uint8Array, bytes: Uint8Array): Promise<string | undefined> {
+  try {
+    const res = await apiRequest("/api/outbox/blob", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sealed: seal(pub, bytes) }),
+    });
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { id?: string };
+    return typeof data.id === "string" ? data.id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Delete blobs we uploaded for a message that then failed to post. Best-effort: the
+ * server's TTL would collect them anyway, but a queued result re-uploads on its next
+ * attempt, and leaving the first copy behind spends the account's blob quota on bytes
+ * nothing will ever reference.
+ */
+async function dropBlobs(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    await apiRequest("/api/outbox/blob/ack", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+  } catch {
+    /* TTL is the backstop */
+  }
+}
+
+/**
+ * Turn staged files into envelope entries, uploading what doesn't fit inline.
+ *
+ * `budget` is the base64 room left in the envelope after the body. Files are taken
+ * in order — the model attached them in the order it wanted them shown — so a small
+ * still after a large one still gets its inline slot.
+ */
+async function packMedia(
+  pub: Uint8Array,
+  staged: StagedMedia[],
+  budget: number,
+): Promise<{ media: OutboxMedia[]; blobIds: string[]; undelivered: string[] }> {
+  const media: OutboxMedia[] = [];
+  const blobIds: string[] = [];
+  const undelivered: string[] = [];
+  let inlineLeft = Math.max(0, Math.min(budget, INLINE_TOTAL_B64_BUDGET));
+
+  for (const item of staged) {
+    // Re-check at delivery: the file was measured when the model attached it, and a
+    // run can be long. A file that has since been deleted, replaced with a directory
+    // or grown past the cap is named in the body rather than silently dropped.
+    let bytes: Uint8Array;
+    try {
+      if (!existsSync(item.path)) throw new Error("missing");
+      const stat = statSync(item.path);
+      if (!stat.isFile() || stat.size === 0 || stat.size > MAX_ATTACHMENT_BYTES) throw new Error("unusable");
+      bytes = new Uint8Array(readFileSync(item.path));
+    } catch {
+      undelivered.push(item.name);
+      continue;
+    }
+
+    const meta: OutboxMedia = {
+      id: item.id,
+      name: item.name,
+      mediaType: item.mediaType,
+      cls: item.cls,
+      size: bytes.length,
+      ...(item.caption ? { caption: item.caption } : {}),
+    };
+
+    if (bytes.length <= MAX_INLINE_MEDIA_BYTES) {
+      const b64 = Buffer.from(bytes).toString("base64");
+      if (b64.length <= inlineLeft) {
+        inlineLeft -= b64.length;
+        media.push({ ...meta, b64 });
+        continue;
+      }
+    }
+
+    const blobId = await uploadBlob(pub, bytes);
+    if (!blobId) {
+      undelivered.push(item.name);
+      continue;
+    }
+    blobIds.push(blobId);
+    media.push({ ...meta, blobId });
+  }
+
+  return { media, blobIds, undelivered };
+}
+
+/** A line in the result body for each file that couldn't travel. */
+function undeliveredNote(names: string[]): string {
+  if (names.length === 0) return "";
+  const label = machineOrigin().label;
+  return `\n\n---\n\n> ⚠︎ Couldn't deliver ${names.length === 1 ? "one attachment" : `${names.length} attachments`} (${names.join(", ")}) — ${names.length === 1 ? "it is" : "they are"} still on ${label}.\n`;
+}
+
 /**
  * Seal one result to the account outbox and POST the ciphertext. Returns whether the
  * server accepted it; false covers every failure (no verified key, offline, rejected)
  * and means the caller must fall back to its own durable channel.
+ *
+ * `staged` is this run's attachments (routines/resultMedia.ts). They are uploaded
+ * BEFORE the message, so a message that lands always references bytes that exist;
+ * if the message then fails, the blobs are dropped again and the caller's queued
+ * retry re-uploads from the same paths on disk.
  */
 export async function postOutbox(
   name: string,
@@ -77,19 +223,49 @@ export async function postOutbox(
   status: "ok" | "error",
   content: string,
   kind: OutboxKind = "routine",
+  staged: StagedMedia[] = [],
 ): Promise<boolean> {
   const pub = await ensureOutboxPub();
   if (!pub) return false;
-  const body = content.length > MAX_CLOUD_PLAINTEXT ? content.slice(0, MAX_CLOUD_PLAINTEXT) + "\n…truncated" : content;
-  const sealed = sealJson(pub, { v: 1, kind, name, status, at, content: body, origin: machineOrigin() });
+  let body = content.length > MAX_CLOUD_PLAINTEXT ? content.slice(0, MAX_CLOUD_PLAINTEXT) + "\n…truncated" : content;
+
+  const { media, blobIds, undelivered } = staged.length
+    ? await packMedia(pub, staged, MAX_ENVELOPE_PLAINTEXT - body.length - 2_000)
+    : { media: [] as OutboxMedia[], blobIds: [] as string[], undelivered: [] as string[] };
+  body += undeliveredNote(undelivered);
+
+  // v2 adds `media`. Older apps ignore the field and still render the body, which is
+  // why the note above names undelivered files in prose rather than only in metadata.
+  const envelope: Record<string, unknown> = {
+    v: media.length > 0 ? 2 : 1,
+    kind,
+    name,
+    status,
+    at,
+    content: body,
+    origin: machineOrigin(),
+    ...(media.length > 0 ? { media } : {}),
+  };
+
+  let sealed = sealJson(pub, envelope);
+  if (sealed.length > 128 * 1024) {
+    // The budget arithmetic above should make this unreachable; if it is ever wrong,
+    // the ANSWER is what gets clipped, never the attachments — those are the part the
+    // user cannot reconstruct from anywhere else.
+    envelope.content = body.slice(0, Math.max(0, MAX_CLOUD_PLAINTEXT / 2)) + "\n…truncated";
+    sealed = sealJson(pub, envelope);
+  }
+
   try {
     const res = await apiRequest("/api/outbox", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ sealed }),
     });
+    if (!res.ok) await dropBlobs(blobIds);
     return res.ok;
   } catch {
+    await dropBlobs(blobIds);
     return false;
   }
 }

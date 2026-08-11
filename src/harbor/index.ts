@@ -57,6 +57,9 @@ import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigg
 import { splitRoutineTools } from "../routines/toolSelect.ts";
 import { resolveMcpSelection, readMcpInventory, type ResolvedMcpTools } from "../mcp/toolNames.ts";
 import { deliver, type RelayPusher, type CloudPusher } from "../routines/delivery.ts";
+import { ResultMedia, type StagedMedia } from "../routines/resultMedia.ts";
+import { withBrief } from "../routines/resultBrief.ts";
+import { ATTACH_RESULT_TOOL } from "../tools/attachResult.ts";
 import { postOutbox as sealToOutbox } from "../outbox/cloudOutbox.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
@@ -287,10 +290,14 @@ export class Harbor {
     return "queued";
   };
 
-  private readonly pushCloud: CloudPusher = async (routine, content, status) => {
+  private readonly pushCloud: CloudPusher = async (routine, content, status, media = []) => {
     const at = new Date().toISOString();
-    if (await this.postOutbox(routine.name, at, status, content)) return "sent";
-    addPendingCloud({ routine: routine.name, at, status, content });
+    if (await this.postOutbox(routine.name, at, status, content, "routine", media)) return "sent";
+    // The queued copy keeps the attachment RECORDS, not the bytes: the files are
+    // still on this disk, so a flush hours later re-reads them (and says so in the
+    // body for any that have since gone). Buffering megabytes into a JSON queue
+    // would be the same content twice, on a box that already has it.
+    addPendingCloud({ routine: routine.name, at, status, content, ...(media.length ? { media } : {}) });
     return "queued";
   };
 
@@ -580,8 +587,15 @@ export class Harbor {
   // finished turn, and two copies of an E2EE wire format is one too many. Same
   // caches, same fail-closed key verification; this is just the harbor's caller.
 
-  private async postOutbox(name: string, at: string, status: "ok" | "error", content: string, kind: OutboxKind = "routine"): Promise<boolean> {
-    return sealToOutbox(name, at, status, content, kind);
+  private async postOutbox(
+    name: string,
+    at: string,
+    status: "ok" | "error",
+    content: string,
+    kind: OutboxKind = "routine",
+    media: StagedMedia[] = [],
+  ): Promise<boolean> {
+    return sealToOutbox(name, at, status, content, kind, media);
   }
 
   private async flushPendingCloud(): Promise<void> {
@@ -590,7 +604,10 @@ export class Harbor {
     if (queue.length === 0) return;
     const remaining: PendingCloud[] = [];
     for (const p of queue) {
-      if (remaining.length === 0 && (await this.postOutbox(p.routine, p.at, p.status, p.content, p.kind ?? "routine"))) continue;
+      if (
+        remaining.length === 0 &&
+        (await this.postOutbox(p.routine, p.at, p.status, p.content, p.kind ?? "routine", p.media ?? []))
+      ) continue;
       remaining.push(p);
     }
     if (remaining.length !== queue.length) {
@@ -708,15 +725,25 @@ export class Harbor {
       log("  note: email delivery is not wired yet (Phase 5) — skipping it");
     }
 
+    // A routine delivering to the app's Inbox can answer with more than prose: an
+    // artifact fence the app turns into a Cargo card, and files staged through
+    // attach_to_result. Both are wired here rather than in the session builder,
+    // because both only make sense when there is an Inbox at the other end — a
+    // file- or webhook-only routine gets neither the tool nor the brief.
+    const toInbox = routine.delivery.includes("cloud");
+    const media = toInbox ? new ResultMedia() : undefined;
+
     const { out, status, error, notes } = await this.runSession({
-      prompt: routine.prompt,
+      prompt: withBrief(routine.prompt, { inbox: toInbox, canAttach: !!media }),
       cwd: routine.cwd,
       model: modelSpec,
       tools: routine.tools ?? [],
+      media,
     });
 
     const content = formatResult(routine, out, status, error, notes);
     const report = await deliver(routine, content, status, {
+      media: media?.list() ?? [],
       pushRelay: this.pushRelay,
       pushCloud: this.pushCloud,
       webhooks: config.webhooks,
@@ -744,7 +771,7 @@ export class Harbor {
   // activation, so the build is serialized (serializeBuild) and the previous value is
   // restored. "__none__" is its sentinel for "register none": an unattended run with
   // no connector selectors gets no direct tools, whatever a shared mcp.json says.
-  private buildSessionServices(cwd: string, directTools: string[]): Promise<any> {
+  private buildSessionServices(cwd: string, directTools: string[], media?: ResultMedia): Promise<any> {
     return serializeBuild(async () => {
       const gate: GateController = {
         getMode: () => "bypass",
@@ -762,7 +789,7 @@ export class Harbor {
       // any moat shim an older release left in the shared agent dir (releases up to 0.11
       // installed one per extension; the launcher sweeps them, but a daemon can outlive
       // the launch that would have). See config/moat.ts.
-      const moat = await moatResourceOptions({ kind: "harbor-session", gate });
+      const moat = await moatResourceOptions({ kind: "harbor-session", gate, resultMedia: media });
       // MCP_DIRECT_TOOLS is read by the adapter when its factory RUNS, inside
       // createAgentSessionServices — so it has to wrap the session creation, not the
       // moatResourceOptions() call that imported it.
@@ -881,14 +908,27 @@ export class Harbor {
   // shell command still fail-closes headlessly (localAsk denies) — plus per-run account
   // credentials that are revoked in the finally so they never linger as an orphaned
   // "device" in the app's Linked Devices.
-  private async runSession(spec: { prompt: string; cwd: string; model: string; tools: string[] }): Promise<{ out: string; status: "ok" | "error"; error?: string; notes: string[] }> {
+  private async runSession(spec: {
+    prompt: string;
+    cwd: string;
+    model: string;
+    tools: string[];
+    media?: ResultMedia;
+  }): Promise<{ out: string; status: "ok" | "error"; error?: string; notes: string[] }> {
     let out = "";
     let status: "ok" | "error" = "ok";
     let error: string | undefined;
     let spawnedAccount = false;
-    const { tools: allowedTools, directToolsEnv, notes } = await this.resolveRunTools(spec.tools, spec.cwd, spec.model);
+    const resolved = await this.resolveRunTools(spec.tools, spec.cwd, spec.model);
+    // attach_to_result rides with the staging area rather than the allow-list: it is
+    // how the answer is DELIVERED, not a capability the run gains. A routine that
+    // named an explicit tool list still gets it, because the alternative is a run
+    // that can generate a still and then has no way to hand it over — and the file
+    // is going to the user's own mailbox, which `delivery: cloud` already chose.
+    const allowedTools = spec.media ? [...resolved.tools, ATTACH_RESULT_TOOL] : resolved.tools;
+    const { directToolsEnv, notes } = resolved;
     try {
-      const services = await this.buildSessionServices(spec.cwd, directToolsEnv);
+      const services = await this.buildSessionServices(spec.cwd, directToolsEnv, spec.media);
 
       const { provider, modelId } = parseSpec(spec.model);
       if (provider === "privateer") {
@@ -960,14 +1000,24 @@ export class Harbor {
     }
     this.running.add(key);
     log(`running task "${title}"`);
+    // A submitted task ALWAYS answers into the Inbox, so it always gets the brief and
+    // the attachment tool — the app is the only place its result is ever read.
+    const media = new ResultMedia();
     try {
-      const { out, status, error, notes } = await this.runSession({ prompt: spec.prompt, cwd, model: modelSpec, tools: spec.tools ?? [] });
+      const { out, status, error, notes } = await this.runSession({
+        prompt: withBrief(spec.prompt, { inbox: true, canAttach: true }),
+        cwd,
+        model: modelSpec,
+        tools: spec.tools ?? [],
+        media,
+      });
       const content = redactText(formatTaskResult(title, out, status, error, modelSpec, notes), collectSecrets(config.providers));
       const at = new Date().toISOString();
+      const staged = media.list();
       // Durable delivery: seal to the outbox. If we can't seal yet (no verified pubkey /
       // offline), queue it with kind:"task" so the flush re-seals it correctly later.
-      const sealed = await this.postOutbox(title, at, status, content, "task");
-      if (!sealed) addPendingCloud({ routine: title, at, status, content, kind: "task" });
+      const sealed = await this.postOutbox(title, at, status, content, "task", staged);
+      if (!sealed) addPendingCloud({ routine: title, at, status, content, kind: "task", ...(staged.length ? { media: staged } : {}) });
       // Live mirror if a controller is attached (the outbox copy is the source of truth).
       if (this.controllerAttached) this.relay?.sendTaskResult(title, content);
       log(`  task "${title}" ${status}; ${sealed ? "sealed to outbox" : "queued for outbox"}`);

@@ -62,6 +62,14 @@ export interface MoatOptions {
    * pair is what the model gets (see tools/relayFileTools.ts).
    */
   relayFiles?: { bridge: SendFileBridge; attachments: AttachmentStore };
+  /**
+   * THIS run's inbox-attachment staging area (routines/resultMedia.ts). Passed only by
+   * a path whose result reaches the app's Inbox — a scheduled routine, a submitted
+   * task — and never shared between runs, so yesterday's staged file can't ride along
+   * with today's. Absent ⇒ attach_to_result doesn't exist for the session, which is
+   * the point: a run whose result goes to a webhook or a file has nothing to attach to.
+   */
+  resultMedia?: import("../routines/resultMedia.ts").ResultMedia;
 }
 
 /**
@@ -204,6 +212,11 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   if (opts.relayFiles) {
     const { makeRelayFileTools } = await import("../tools/relayFileTools.ts");
     factories.push(makeRelayFileTools(opts.relayFiles.bridge, opts.relayFiles.attachments));
+  }
+
+  if (opts.resultMedia) {
+    const { makeAttachResultTools } = await import("../tools/attachResult.ts");
+    factories.push(makeAttachResultTools(opts.resultMedia));
   }
 
   if (caps.web && webEnabled()) {

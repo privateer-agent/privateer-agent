@@ -16,7 +16,10 @@ const MEDIA: Record<string, string> = {
   json: "application/json", csv: "text/csv", html: "text/html", mp4: "video/mp4",
   mov: "video/quicktime", mp3: "audio/mpeg", wav: "audio/wav", zip: "application/zip",
 };
-function mediaTypeForPath(p: string): string {
+// Exported because the inbox-attachment path (routines/resultMedia.ts) types files
+// by the same table: two tables would drift, and the type decides how the app
+// presents an attachment (image inline, video in a player, everything else a chip).
+export function mediaTypeForPath(p: string): string {
   const ext = p.split(".").pop()?.toLowerCase() ?? "";
   return MEDIA[ext] ?? "application/octet-stream";
 }
