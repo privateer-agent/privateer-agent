@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { globalDir } from "../config/paths.ts";
 import { harborIsRunning, sendToHarbor, describeRelay, formatDuration, type IpcResponse } from "./ipc.ts";
@@ -43,12 +43,37 @@ function harborLogPath(): string {
   return join(globalDir(), "harbor.log");
 }
 
+// Whether the interpreter we're baking in is an Electron binary rather than a plain
+// `node`. It is when the desktop app installs the service: harborManager calls
+// installService() in the Electron MAIN process, so nodeBinaryPath() resolves to
+// …/Privateer.app/Contents/MacOS/Privateer. Same story one step removed for the
+// desktop CLI shim, which is that binary under another name.
+//
+// This matters because an Electron binary is a GUI app by default and only behaves as
+// Node when ELECTRON_RUN_AS_NODE is set — a fact the shim and harborManager both know
+// (they set it on every spawn) and this module used not to. A unit written without it
+// doesn't run the harbor: at every login launchd starts the whole desktop app with a
+// script path in argv.
+function interpreterIsElectron(binary: string): boolean {
+  // The current process is the honest answer when we're the one being baked in.
+  if (binary === process.execPath) return Boolean((process.versions as Record<string, string>).electron);
+  // An already-installed unit, read back: judge it by the name. Every Node we ship or
+  // expect — the standalone bundle's, an npm global's, a system one — is called `node`.
+  return !/^node(\.exe)?$/i.test(basename(binary));
+}
+
 // Env we forward into the service so a non-default home / server URL survives. Kept
 // tiny and explicit — the harbor reads the rest from ~/.privateer.
+//
+// ELECTRON_RUN_AS_NODE is NOT forwarded from the environment, it is derived: the
+// desktop app's main process doesn't have it set (it's a GUI process) and still needs
+// it in the unit. Keying off the binary instead of the ambient env is what makes the
+// answer the same however installService() was reached.
 function forwardedEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   if (process.env.PRIVATEER_HOME) env.PRIVATEER_HOME = process.env.PRIVATEER_HOME;
   if (process.env.PRIVATEER_SERVER_URL) env.PRIVATEER_SERVER_URL = process.env.PRIVATEER_SERVER_URL;
+  if (interpreterIsElectron(nodeBinaryPath())) env.ELECTRON_RUN_AS_NODE = "1";
   return env;
 }
 
@@ -86,7 +111,7 @@ export function launchdPlist(): string {
   <array>
 ${argXml}
   </array>
-${envVars.PRIVATEER_HOME || envVars.PRIVATEER_SERVER_URL ? `  <key>EnvironmentVariables</key>\n  <dict>\n${envXml}\n  </dict>\n` : ""}  <key>RunAtLoad</key>
+${Object.keys(envVars).length ? `  <key>EnvironmentVariables</key>\n  <dict>\n${envXml}\n  </dict>\n` : ""}  <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <dict>
@@ -208,24 +233,102 @@ export interface ServiceInfo {
   installed: boolean;
   unitPath: string;
   logPath: string;
-  /** Installed unit predates a fix and should be rewritten — see needsRefresh(). */
+  /** Installed unit predates a fix and should be rewritten — see unitNeedsRefresh(). */
   needsRefresh: boolean;
+  /**
+   * The installed unit points at a binary that no longer exists, so it can never
+   * start again. Rewriting won't help — it has to be REMOVED. See unitIsStale().
+   */
+  stale: boolean;
 }
 
-// Does the INSTALLED unit need rewriting? Deliberately narrow: a full text compare
-// against what we'd generate today would flag every service installed by a different
-// copy of the CLI (a dev checkout resolves a different launcher path), which is not a
-// problem and not something the user should be nagged about. The one thing worth
-// flagging is the pre-fix launchd `KeepAlive: true`, which restarts the harbor even
-// after a clean exit — the log-spam loop described above launchdPlist().
-export function unitNeedsRefresh(platform: NodeJS.Platform, unitPath: string): boolean {
-  if (platform !== "darwin" || !existsSync(unitPath)) return false;
+function xmlUnescape(s: string): string {
+  return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+}
+
+/**
+ * The command baked into an INSTALLED unit — [interpreter, launcher, "run"] — read
+ * back off disk. Null when there's nothing to read or the file doesn't parse, so
+ * every caller's fallback is "can't tell", never "assume the worst".
+ *
+ * We parse rather than regenerate-and-compare on purpose: what we'd generate today
+ * legitimately differs from a unit written by another copy of the agent (a dev
+ * checkout, an npm global, the desktop app), and the questions below are about the
+ * unit that is actually loaded.
+ */
+export function unitProgramPaths(platform: NodeJS.Platform, unitPath: string): string[] | null {
+  if (!unitPath || !existsSync(unitPath)) return null;
+  let body: string;
   try {
-    const plist = readFileSync(unitPath, "utf8");
-    return /<key>KeepAlive<\/key>\s*<true\s*\/>/.test(plist);
+    body = readFileSync(unitPath, "utf8");
+  } catch {
+    return null;
+  }
+  if (platform === "darwin") {
+    const array = body.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
+    if (!array) return null;
+    const args = [...array[1].matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => xmlUnescape(m[1]));
+    return args.length ? args : null;
+  }
+  if (platform === "linux") {
+    const line = body.match(/^ExecStart=(.*)$/m);
+    if (!line) return null;
+    // Written as single-quoted words with '\'' for an embedded quote (systemdUnit()).
+    const args = [...line[1].matchAll(/'((?:[^']|'\\'')*)'|(\S+)/g)].map((m) =>
+      m[1] !== undefined ? m[1].replace(/'\\''/g, "'") : m[2],
+    );
+    return args.length ? args : null;
+  }
+  return null;
+}
+
+/**
+ * Is the installed unit pointing at software that's gone?
+ *
+ * The unit bakes ABSOLUTE paths — the interpreter (process.execPath) and the harbor
+ * launcher, resolved from wherever the installing copy of the agent lived. When the
+ * desktop app is what installed it, both of those are inside Privateer.app, and
+ * dragging the app to the Trash leaves a launchd job that fires at every login,
+ * forever, running a binary that no longer exists. Nothing else notices: launchd has
+ * no opinion about a missing program beyond failing to start it.
+ *
+ * So this is the check that makes "uninstall the app" finishable — see the desktop's
+ * reapStaleService(), which tears the unit down the moment it sees one.
+ */
+export function unitIsStale(platform: NodeJS.Platform, unitPath: string): boolean {
+  const args = unitProgramPaths(platform, unitPath);
+  if (!args || args.length < 2) return false; // unreadable / unrecognised — say nothing
+  return !existsSync(args[0]) || !existsSync(args[1]);
+}
+
+/**
+ * Does the INSTALLED unit need rewriting? Deliberately narrow: a full text compare
+ * against what we'd generate today would flag every service installed by a different
+ * copy of the CLI (a dev checkout resolves a different launcher path), which is not a
+ * problem and not something the user should be nagged about. Two things are worth
+ * flagging, both of which mean the unit does not do what it says:
+ *
+ *   • the pre-fix launchd `KeepAlive: true`, which restarts the harbor even after a
+ *     clean exit — the log-spam loop described above launchdPlist();
+ *   • an Electron interpreter with no ELECTRON_RUN_AS_NODE — see forwardedEnv(). Such
+ *     a unit starts the desktop APP at login instead of a harbor. Every unit the
+ *     desktop app wrote before that fix has this shape.
+ *
+ * A stale unit is NOT reported here: rewriting one only re-bakes the same dead path.
+ */
+export function unitNeedsRefresh(platform: NodeJS.Platform, unitPath: string): boolean {
+  if (!existsSync(unitPath)) return false;
+  if (unitIsStale(platform, unitPath)) return false;
+  let body: string;
+  try {
+    body = readFileSync(unitPath, "utf8");
   } catch {
     return false;
   }
+  if (platform === "darwin" && /<key>KeepAlive<\/key>\s*<true\s*\/>/.test(body)) return true;
+  const args = unitProgramPaths(platform, unitPath);
+  if (args?.[0] && interpreterIsElectron(args[0]) && !/ELECTRON_RUN_AS_NODE/.test(body)) return true;
+  return false;
 }
 
 function unitPathFor(platform: NodeJS.Platform): string {
@@ -244,6 +347,7 @@ export function serviceInfo(): ServiceInfo {
     unitPath,
     logPath: harborLogPath(),
     needsRefresh: unitNeedsRefresh(platform, unitPath),
+    stale: !!unitPath && unitIsStale(platform, unitPath),
   };
 }
 
@@ -284,7 +388,7 @@ export async function statusReport(): Promise<string> {
   const pid = status?.pid ? `pid ${status.pid}${up}` : "answering IPC";
   const lines = [
     `platform:  ${info.platform}${info.supported ? "" : " (auto-start unsupported — run `privateer harbor` manually)"}`,
-    `service:   ${info.installed ? `installed (${info.unitPath})` : "not installed"}`,
+    `service:   ${info.installed ? `installed (${info.unitPath})${info.stale ? " — STALE: it points at software that's been removed; run `privateer harbor uninstall`" : info.needsRefresh ? " — needs rewriting; run `privateer harbor install`" : ""}` : "not installed"}`,
     `harbor:    ${live ? `running (${pid})` : "not reachable"}`,
   ];
   if (live) lines.push(`relay:     ${describeRelay(status?.relay)}`);

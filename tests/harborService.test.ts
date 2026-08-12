@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchdPlist, unitNeedsRefresh } from "../src/harbor/service.ts";
+import { launchdPlist, unitNeedsRefresh, unitIsStale, unitProgramPaths } from "../src/harbor/service.ts";
 
 const DIR = mkdtempSync(join(tmpdir(), "priv-service-"));
 test.after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* best effort */ } });
@@ -49,4 +49,90 @@ test("unitNeedsRefresh flags a pre-fix plist and clears once rewritten", () => {
   // already carries the right policy (Restart=on-failure), so it is never flagged.
   assert.equal(unitNeedsRefresh("darwin", join(DIR, "nope.plist")), false);
   assert.equal(unitNeedsRefresh("linux", old), false);
+});
+
+// ── The unit that outlives the software it points at ────────────────────────────
+//
+// The unit bakes ABSOLUTE paths for the interpreter and the launcher. When the
+// desktop app is what installed it, both live inside Privateer.app — so dragging the
+// app to the Trash leaves a launchd job firing at every login against a binary that
+// isn't there. Detecting that is what lets the desktop reap it (reapStaleService) and
+// what lets `privateer harbor status` say so out loud.
+
+function plistWith(args: string[], extra = ""): string {
+  return `<?xml version="1.0"?>
+<plist version="1.0"><dict>
+  <key>Label</key><string>pro.privateer.harbor</string>
+  <key>ProgramArguments</key>
+  <array>
+${args.map((a) => `    <string>${a}</string>`).join("\n")}
+  </array>
+${extra}  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+</dict></plist>
+`;
+}
+
+test("unitProgramPaths reads the command back off both unit formats", () => {
+  const mac = join(DIR, "args.plist");
+  writeFileSync(mac, plistWith(["/Apps/P.app/Contents/MacOS/P", "/Apps/P.app/bin/harbor.mjs", "run"]));
+  assert.deepEqual(unitProgramPaths("darwin", mac), [
+    "/Apps/P.app/Contents/MacOS/P",
+    "/Apps/P.app/bin/harbor.mjs",
+    "run",
+  ]);
+
+  const linux = join(DIR, "harbor.service");
+  writeFileSync(linux, "[Service]\nExecStart='/opt/it'\\''s/node' '/opt/harbor.mjs' 'run'\n");
+  assert.deepEqual(unitProgramPaths("linux", linux), ["/opt/it's/node", "/opt/harbor.mjs", "run"]);
+
+  // Unreadable or unrecognised is "can't tell", never a guess.
+  assert.equal(unitProgramPaths("darwin", join(DIR, "nope.plist")), null);
+  assert.equal(unitProgramPaths("win32", mac), null);
+});
+
+test("unitIsStale spots a unit left behind by a deleted app, and only that", () => {
+  const gone = join(DIR, "gone.plist");
+  writeFileSync(gone, plistWith(["/Applications/Privateer.app/Contents/MacOS/Privateer", "/Applications/Privateer.app/bin/harbor.mjs", "run"]));
+  assert.equal(unitIsStale("darwin", gone), true, "both paths are missing — this unit can never start");
+
+  const live = join(DIR, "live.plist");
+  writeFileSync(live, launchdPlist());
+  assert.equal(unitIsStale("darwin", live), false, "what we generate today points at things that exist");
+
+  // A unit we can't parse must not be reported as stale — the sweep DELETES what this
+  // flags, so the failure mode of a guess here is removing someone's working service.
+  const opaque = join(DIR, "opaque.plist");
+  writeFileSync(opaque, "<plist><dict><key>Label</key><string>x</string></dict></plist>");
+  assert.equal(unitIsStale("darwin", opaque), false);
+  assert.equal(unitIsStale("darwin", join(DIR, "missing.plist")), false);
+});
+
+test("unitNeedsRefresh flags an Electron unit with no ELECTRON_RUN_AS_NODE", () => {
+  // The interpreter has to EXIST or the unit reads as stale instead — which is the
+  // real-world shape of this bug: the app is still installed, the unit is just wrong.
+  const app = join(DIR, "Privateer");
+  const launcher = join(DIR, "harbor.mjs");
+  writeFileSync(app, "");
+  writeFileSync(launcher, "");
+
+  const broken = join(DIR, "no-run-as-node.plist");
+  writeFileSync(broken, plistWith([app, launcher, "run"]));
+  assert.equal(unitNeedsRefresh("darwin", broken), true, "this unit starts the desktop APP at login, not a harbor");
+
+  const fixed = join(DIR, "run-as-node.plist");
+  writeFileSync(
+    fixed,
+    plistWith([app, launcher, "run"], "  <key>EnvironmentVariables</key>\n  <dict><key>ELECTRON_RUN_AS_NODE</key><string>1</string></dict>\n"),
+  );
+  assert.equal(unitNeedsRefresh("darwin", fixed), false);
+
+  // A plain `node` interpreter is never an Electron binary, whatever else is in there.
+  const plain = join(DIR, "plain.plist");
+  writeFileSync(plain, plistWith([process.execPath, launcher, "run"]));
+  assert.equal(unitNeedsRefresh("darwin", plain), false);
+
+  // Stale beats needs-refresh: rewriting only re-bakes the same dead path.
+  const stale = join(DIR, "stale.plist");
+  writeFileSync(stale, plistWith([join(DIR, "vanished"), launcher, "run"]));
+  assert.equal(unitNeedsRefresh("darwin", stale), false);
 });
