@@ -185,6 +185,16 @@ Mitigation today is the exact pin plus the cooldown: a new release is adopted
 deliberately, not automatically. If these ever need to move faster than we can
 review them, vendoring is the answer, not a caret.
 
+One point of exposure narrowed since that audit: `rpiv-web-tools` no longer
+loads unconditionally. `extensions/privateer-web.ts` loads it only for a
+terminal whose user configured a search provider of their own; otherwise the
+session's `web_search`/`web_fetch` are ours (`src/tools/web.ts`, the account
+API), and the package is imported for its `/web-tools` command and provider
+metadata alone. Unattended runs never load it at all. That is a consequence of
+where web access comes from now rather than a security measure — the package is
+still in the dependency tree and still a trusted load — but it does mean the
+default terminal no longer runs a third-party fetch path.
+
 ## Checklist: adding a dependency
 
 1. Is it worth a dependency at all? Check the transitive weight

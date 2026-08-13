@@ -72,7 +72,7 @@ What Privateer adds is a *moat* of Pi extensions layered on top:
 | `privateer-privacy` | `pi-privacy` — TEE attestation, ZDR routing, on-device PII gate — bound to the account tier resolver |
 | `privateer-account` | `/signin` billed inference against a Privateer account (device flow) |
 | `privateer-posture`, `privateer-tools` | live attestation shield + Privateer tool pack |
-| `rpiv-web-tools` | private-by-default web search (self-hosted SearXNG, no WebView) |
+| `privateer-web` | `web_search`/`web_fetch` — your account's search once signed in, or your own provider (`rpiv-web-tools`: self-hosted SearXNG, Brave, Tavily…) |
 | `rpiv-ask-user-question` | `ask_user_question` — a structured questionnaire the agent puts to you instead of guessing |
 | `pi-mcp-adapter`, `pi-subagents` | MCP servers · bounded parallel sub-agents |
 
@@ -612,8 +612,15 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
   approve it once.
 - **Workflows** — declarative multi-step pipelines the harbor executes; see
   [Workflows](#workflows).
-- **Web tools** (`rpiv-web-tools`) — private-by-default web search/fetch with pluggable backends
-  (self-hosted SearXNG for fully private search).
+- **Web tools** (`privateer-web`) — `web_search` and `web_fetch`, by one of two routes. Sign in
+  and they run on your Privateer account: no API key to obtain or keep on the machine, metered
+  against the account's daily web allowance, with the search itself made server-side (the derived
+  query is visible to Privateer — the page you fetch and the conversation around it are not).
+  Configure a provider of your own with `/web-tools` and that wins instead — `rpiv-web-tools` with
+  pluggable backends, including self-hosted SearXNG for fully private search, which is why a
+  provider you chose is never overridden. `PRIVATEER_WEB_SEARCH=privateer` picks the account route
+  even when you hold a key. Unattended runs (harbor, channels, ACP) always take the account route:
+  a routine must not hold a provider key it could be prompt-injected into leaking.
 - **Ask user question** (`rpiv-ask-user-question`) — when a request is underspecified the agent
   raises a structured questionnaire (typed options, multi-select, markdown previews, or type your
   own answer) instead of guessing. Ungated by design — it only asks you something.
@@ -631,6 +638,7 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/connect` · `/mcp` | add, enable, or remove MCP connectors / see what actually connected |
 | `/speak` · `/talk` | read answers aloud / voice input (**alt+t** is push-to-talk) |
 | `/extensions` | list loaded Pi extensions |
+| `/web-tools` | point `web_search`/`web_fetch` at a search provider of your own (signed in, they already work on your account) |
 | `/init` | scaffold a starter `PRIVATEER.md` in this directory |
 | `/update` · `/privateer` | update to the latest release / Privateer status and posture |
 

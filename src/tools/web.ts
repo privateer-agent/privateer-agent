@@ -18,20 +18,29 @@
 // access is a switch on the agent rather than an unconditional capability. Never
 // describe a routine that searches as fully private.
 //
-// SCOPE. These are the UNATTENDED paths' web tools: the harbor (routines, tasks,
-// workflow agent steps) and channels, both of which build a session from an explicit
-// extensionFactories list. The interactive TUI is deliberately untouched — the launcher
-// loads @juicesharp/rpiv-web-tools for it instead, which registers tools by these same
-// two names against a provider key the user configures themselves. A person at a terminal
-// choosing their own search provider is fine; an unattended run holding that key is not.
+// SCOPE. Two kinds of session reach these tools, by two different routes.
 //
-// The two must never meet: Pi resolves duplicate tool names first-registration-wins, so a
-// session that loaded both would silently get whichever came first. That is why the moat's
-// packs reach the TUI as `-e` args and the unattended paths as factories — one route each,
-// chosen per process, and config/moat.ts's per-kind table is where the choice is recorded.
+//   Unattended — the harbor (routines, tasks, workflow agent steps), channels and ACP
+//   build their session from an explicit extensionFactories list, and makeWebTools() is
+//   in it whenever webEnabled(). These paths get the account API and nothing else, for
+//   the reason above: an unattended run must not hold a provider key.
+//
+//   Interactive — the TUI takes ONE of these tools and @juicesharp/rpiv-web-tools, which
+//   registers the same two names against a provider the user configured themselves.
+//   extensions/privateer-web.ts makes that choice once per process: a configured provider
+//   wins (it is the user's own decision, and a self-hosted SearXNG is more private than
+//   this path), otherwise these tools serve a signed-in account. See tools/webMode.ts for
+//   the precedence and the escape hatches. Signing in mid-session is enough to start
+//   searching — guardedWebToolDefinitions() checks credentials per call, not at load.
+//
+// The two implementations must never meet: Pi resolves duplicate tool names
+// first-registration-wins, so a session that loaded both would silently get whichever came
+// first. That is why the moat's packs reach the TUI as `-e` args and the unattended paths
+// as factories — one route each, chosen per process, and config/moat.ts's per-kind table
+// (plus privateer-web.ts, for the TUI) is where the choice is recorded.
 
 import { Type } from "typebox";
-import { apiRequest } from "../auth/privateer.ts";
+import { apiRequest, hasCredentials } from "../auth/privateer.ts";
 
 /** Tool names these definitions register, for allow-list construction. */
 export const WEB_TOOL_NAMES = ["web_search", "web_fetch"] as const;
@@ -229,12 +238,42 @@ export const webFetchToolDefinition = {
 
 /**
  * Extension factory registering both tools. Used by the unattended paths, which build
- * their session from an explicit `extensionFactories` list (see config/moat.ts); the
- * interactive TUI gets rpiv-web-tools instead, per the SCOPE note above.
+ * their session from an explicit `extensionFactories` list (see config/moat.ts) only once
+ * webEnabled() has confirmed there are credentials to search with.
  */
 export function makeWebTools() {
   return (pi: { registerTool?: (def: unknown) => void }): void => {
     pi.registerTool?.(webSearchToolDefinition);
     pi.registerTool?.(webFetchToolDefinition);
   };
+}
+
+interface WebToolDefinition {
+  name: string;
+  execute(toolCallId: string, params: any): Promise<unknown>;
+}
+
+/**
+ * The same two tools, with a sign-in check in front of each call — the INTERACTIVE form.
+ *
+ * The unattended paths decide once, at session build, whether web access exists at all
+ * (webEnabled() is credentials-gated, and a run with no account simply has no such tool).
+ * A terminal can't work that way: the session outlives the decision, `/signin` happens in
+ * the middle of it, and each extension gets its own module instance under jiti — so the
+ * question has to be asked when the tool RUNS. loadCredentials() deliberately doesn't
+ * memoize a negative result, which is what makes that cheap and correct.
+ *
+ * `hint` is what a signed-out session hears. It belongs to the caller because only the
+ * caller knows what the user can do about it — the terminal can offer `/signin` and
+ * `/web-tools`, a headless host has neither.
+ */
+export function guardedWebToolDefinitions(hint: string): unknown[] {
+  const guard = <T extends WebToolDefinition>(def: T): T => ({
+    ...def,
+    async execute(toolCallId: string, params: any) {
+      if (!hasCredentials()) return text(hint);
+      return def.execute(toolCallId, params);
+    },
+  });
+  return [guard(webSearchToolDefinition), guard(webFetchToolDefinition)];
 }

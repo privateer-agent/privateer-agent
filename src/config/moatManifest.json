@@ -14,12 +14,12 @@
     { "name": "privateer-hints", "entry": "extensions/privateer-hints.ts", "note": "rotating tips in the working line + /hints" },
     { "name": "privateer-update", "entry": "extensions/privateer-update.ts", "note": "tool pack updates in place — banner flag + /update" },
     { "name": "privateer-speak", "entry": "extensions/privateer-speak.ts", "note": "spoken responses (/speak) + voice input (/talk) — pi-speak + confidential account TTS/STT" },
-    { "name": "rpiv-web-tools", "dep": ["@juicesharp/rpiv-web-tools", "index.ts"], "note": "private web tools (user's own provider key)" },
+    { "name": "privateer-web", "entry": "extensions/privateer-web.ts", "note": "web_search/web_fetch — account search when signed in, else the user's own provider (rpiv-web-tools)" },
     { "name": "rpiv-ask-user-question", "dep": ["@juicesharp/rpiv-ask-user-question", "index.ts"], "note": "ask_user_question" },
     { "name": "pi-mcp-adapter", "dep": ["pi-mcp-adapter", "index.ts"], "note": "MCP servers as first-class tools" },
     { "name": "pi-subagents", "dep": ["pi-subagents", "src", "extension", "index.ts"], "note": "bounded parallel sub-agents" }
   ],
-  "retired": ["pi-privacy", "pi-web-access", "pi-hypa"],
+  "retired": ["pi-privacy", "pi-web-access", "pi-hypa", "rpiv-web-tools"],
   "reservedAliases": [
     "@juicesharp/rpiv-web-tools",
     "@juicesharp/rpiv-ask-user-question"
