@@ -235,6 +235,10 @@ When there's no audience, the result goes durable instead (`src/outbox/cloudOutb
 
 The terminal holds **no account key material** — it seals *to* the account and can never open what it (or any other terminal) wrote. **Fail closed:** no pin, no signature, or a bad signature ⇒ don't seal at all, and let the caller fall back to its own durable channel (queue, file, notice). The sealed item surfaces in the app's Inbox, tagged with a machine `origin` so multi-harbor accounts can tell which box produced it.
 
+**Envelope versions.** `v:1` is the original body; `v:2` adds `media` (attachments, inline or blob-referenced); `v:3` adds `source` — what the run was *asked* to do: the routine's own prompt, its cron/one-off trigger, the cwd it ran in, its model, and the routine id. Every version is additive and every field optional, so an older app ignores what it doesn't know and still renders the body.
+
+`source` is what makes a delivered result **actionable**. The app's Inbox offers "Follow up" on a finished result: it builds a task prompt from the result *and* its `source` (`treeview/client/utils/followUp.ts`) and submits it — as an ordinary account-signed `task_submit`/`task_spawn` — to the harbor named by `origin.id`, which is that machine's relay termId (`routineRelayId()`). So the follow-up runs on the same box, in the same directory, knowing the standing instruction that produced what it is following up on. When that machine is offline the app asks the user which harbor to use instead rather than picking one. The result body is quoted to the model as **data**, never as instructions — an unattended run's output can contain text an attacker wrote.
+
 ---
 
 ## 9. File map

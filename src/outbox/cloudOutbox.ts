@@ -68,6 +68,62 @@ export interface OutboxMedia {
   blobId?: string;
 }
 
+/**
+ * What the run was ASKED to do, carried beside what it answered.
+ *
+ * A result on its own is a dead end: the app can show it, read it aloud and file
+ * it, but "now book the top one" needs the standing instruction the run was given,
+ * and the directory it ran in, or the follow-up starts from a summary with no idea
+ * what produced it. That context is the routine — it lives on this machine and the
+ * app has never seen it — so it rides inside the SEALED envelope (the server holds
+ * ciphertext either way, exactly like `origin`).
+ *
+ * Every field is optional and clipped: this travels on every result, and a routine
+ * prompt can be arbitrarily long. Absent → the app falls back to the result body
+ * alone, which is what results from older CLIs carry.
+ */
+export interface OutboxSource {
+  /** The saved routine's id, when one produced this. Absent for ad-hoc tasks. */
+  routineId?: string;
+  /** The instruction the run was given (a routine's `prompt`, a task's spec). */
+  prompt?: string;
+  /** Where the run executed — a follow-up belongs in the same directory. */
+  cwd?: string;
+  /** The "provider:model" the run resolved to. */
+  model?: string;
+  /** The trigger verbatim: a cron expression, or a one-off ISO datetime. */
+  schedule?: string;
+}
+
+/** Clip bounds for `source`. The prompt is the only field that can be long. */
+export const MAX_SOURCE_PROMPT = 2_000;
+const SOURCE_FIELD_CAPS: Record<keyof OutboxSource, number> = {
+  routineId: 200,
+  prompt: MAX_SOURCE_PROMPT,
+  cwd: 500,
+  model: 200,
+  schedule: 100,
+};
+
+/**
+ * Normalize a source for the envelope: trim, clip, drop empties — and return
+ * undefined when nothing survives, so a workflow (or an empty-prompt live spawn)
+ * doesn't ship an empty object and bump the envelope version for nothing.
+ * Exported for the round-trip test.
+ */
+export function packSource(source?: OutboxSource): OutboxSource | undefined {
+  if (!source) return undefined;
+  const out: OutboxSource = {};
+  for (const [key, cap] of Object.entries(SOURCE_FIELD_CAPS) as [keyof OutboxSource, number][]) {
+    const raw = source[key];
+    if (typeof raw !== "string") continue;
+    const value = raw.trim();
+    if (!value) continue;
+    out[key] = value.length > cap ? value.slice(0, cap) + "…" : value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 let outboxPub: Uint8Array | undefined;
 let originCache: { id: string; label: string } | undefined;
 
@@ -216,6 +272,9 @@ function undeliveredNote(names: string[]): string {
  * BEFORE the message, so a message that lands always references bytes that exist;
  * if the message then fails, the blobs are dropped again and the caller's queued
  * retry re-uploads from the same paths on disk.
+ *
+ * `source` is what the run was asked to do (see OutboxSource) — the context a
+ * follow-up needs, sealed alongside the answer.
  */
 export async function postOutbox(
   name: string,
@@ -224,20 +283,28 @@ export async function postOutbox(
   content: string,
   kind: OutboxKind = "routine",
   staged: StagedMedia[] = [],
+  source?: OutboxSource,
 ): Promise<boolean> {
   const pub = await ensureOutboxPub();
   if (!pub) return false;
   let body = content.length > MAX_CLOUD_PLAINTEXT ? content.slice(0, MAX_CLOUD_PLAINTEXT) + "\n…truncated" : content;
 
+  // Packed before the media budget is struck, because it spends the same envelope:
+  // attachments must not be sized against room the source has already taken.
+  const packedSource = packSource(source);
+  const sourceCost = packedSource ? JSON.stringify(packedSource).length : 0;
+
   const { media, blobIds, undelivered } = staged.length
-    ? await packMedia(pub, staged, MAX_ENVELOPE_PLAINTEXT - body.length - 2_000)
+    ? await packMedia(pub, staged, MAX_ENVELOPE_PLAINTEXT - body.length - sourceCost - 2_000)
     : { media: [] as OutboxMedia[], blobIds: [] as string[], undelivered: [] as string[] };
   body += undeliveredNote(undelivered);
 
-  // v2 adds `media`. Older apps ignore the field and still render the body, which is
-  // why the note above names undelivered files in prose rather than only in metadata.
+  // v2 adds `media`, v3 `source`. Both are additive: an older app ignores the field
+  // and still renders the body, which is why the note above names undelivered files
+  // in prose rather than only in metadata, and why a follow-up degrades to "the
+  // result text alone" rather than failing when `source` is missing.
   const envelope: Record<string, unknown> = {
-    v: media.length > 0 ? 2 : 1,
+    v: packedSource ? 3 : media.length > 0 ? 2 : 1,
     kind,
     name,
     status,
@@ -245,6 +312,7 @@ export async function postOutbox(
     content: body,
     origin: machineOrigin(),
     ...(media.length > 0 ? { media } : {}),
+    ...(packedSource ? { source: packedSource } : {}),
   };
 
   let sealed = sealJson(pub, envelope);

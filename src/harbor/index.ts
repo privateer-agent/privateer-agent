@@ -60,7 +60,7 @@ import { deliver, type RelayPusher, type CloudPusher } from "../routines/deliver
 import { ResultMedia, type StagedMedia } from "../routines/resultMedia.ts";
 import { withBrief } from "../routines/resultBrief.ts";
 import { ATTACH_RESULT_TOOL } from "../tools/attachResult.ts";
-import { postOutbox as sealToOutbox } from "../outbox/cloudOutbox.ts";
+import { postOutbox as sealToOutbox, type OutboxSource } from "../outbox/cloudOutbox.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
 import { serializeBuild } from "./buildLock.ts";
@@ -212,6 +212,22 @@ function formatWorkflowResult(name: string, result: { status: string; output: Re
   return `${head}${body}${reason}`.trimEnd() + "\n";
 }
 
+// What a routine ASKED for, sealed into the outbox envelope beside what it answered.
+//
+// The app can then act on a finished run — "now do X with this" — with the routine's
+// own standing instruction and working directory in hand, instead of guessing from a
+// summary. The routine never leaves this machine except inside the sealed blob (the
+// server holds ciphertext), and cloudOutbox clips every field.
+function routineSource(routine: Routine): OutboxSource {
+  return {
+    routineId: routine.id,
+    prompt: routine.prompt,
+    cwd: routine.cwd,
+    model: routine.model,
+    schedule: routine.cron ?? routine.at,
+  };
+}
+
 // Canonical control-envelope args for a task_submit / task_spawn signature. MUST match
 // the app's signer (client/services/accountSign.ts) byte-for-byte: the SAME key set with
 // undefined → null, so the recursive-key-sorted JSON both sides sign is identical. A
@@ -292,12 +308,13 @@ export class Harbor {
 
   private readonly pushCloud: CloudPusher = async (routine, content, status, media = []) => {
     const at = new Date().toISOString();
-    if (await this.postOutbox(routine.name, at, status, content, "routine", media)) return "sent";
+    const source = routineSource(routine);
+    if (await this.postOutbox(routine.name, at, status, content, "routine", media, source)) return "sent";
     // The queued copy keeps the attachment RECORDS, not the bytes: the files are
     // still on this disk, so a flush hours later re-reads them (and says so in the
     // body for any that have since gone). Buffering megabytes into a JSON queue
     // would be the same content twice, on a box that already has it.
-    addPendingCloud({ routine: routine.name, at, status, content, ...(media.length ? { media } : {}) });
+    addPendingCloud({ routine: routine.name, at, status, content, source, ...(media.length ? { media } : {}) });
     return "queued";
   };
 
@@ -594,8 +611,9 @@ export class Harbor {
     content: string,
     kind: OutboxKind = "routine",
     media: StagedMedia[] = [],
+    source?: OutboxSource,
   ): Promise<boolean> {
-    return sealToOutbox(name, at, status, content, kind, media);
+    return sealToOutbox(name, at, status, content, kind, media, source);
   }
 
   private async flushPendingCloud(): Promise<void> {
@@ -606,7 +624,7 @@ export class Harbor {
     for (const p of queue) {
       if (
         remaining.length === 0 &&
-        (await this.postOutbox(p.routine, p.at, p.status, p.content, p.kind ?? "routine", p.media ?? []))
+        (await this.postOutbox(p.routine, p.at, p.status, p.content, p.kind ?? "routine", p.media ?? [], p.source))
       ) continue;
       remaining.push(p);
     }
@@ -1014,10 +1032,13 @@ export class Harbor {
       const content = redactText(formatTaskResult(title, out, status, error, modelSpec, notes), collectSecrets(config.providers));
       const at = new Date().toISOString();
       const staged = media.list();
+      // What was asked, carried with what came back — a submitted task is followed up
+      // on exactly like a routine run (the app's Inbox is the only place either is read).
+      const source: OutboxSource = { prompt: spec.prompt, cwd, model: modelSpec };
       // Durable delivery: seal to the outbox. If we can't seal yet (no verified pubkey /
       // offline), queue it with kind:"task" so the flush re-seals it correctly later.
-      const sealed = await this.postOutbox(title, at, status, content, "task", staged);
-      if (!sealed) addPendingCloud({ routine: title, at, status, content, kind: "task", ...(staged.length ? { media: staged } : {}) });
+      const sealed = await this.postOutbox(title, at, status, content, "task", staged, source);
+      if (!sealed) addPendingCloud({ routine: title, at, status, content, kind: "task", source, ...(staged.length ? { media: staged } : {}) });
       // Live mirror if a controller is attached (the outbox copy is the source of truth).
       if (this.controllerAttached) this.relay?.sendTaskResult(title, content);
       log(`  task "${title}" ${status}; ${sealed ? "sealed to outbox" : "queued for outbox"}`);
@@ -1046,8 +1067,11 @@ export class Harbor {
             void (async () => {
               const at = new Date().toISOString();
               const body = redactText(content, collectSecrets(loadHarborConfig().providers));
-              if (!(await this.postOutbox(title, at, status, body, "task"))) {
-                addPendingCloud({ routine: title, at, status, content: body, kind: "task" });
+              // An empty-prompt spawn (a bare agent to drive) packs to no source at all
+              // — cloudOutbox drops it rather than shipping an empty object.
+              const source: OutboxSource = { prompt: spec.prompt, cwd: spec.cwd, model: spec.model };
+              if (!(await this.postOutbox(title, at, status, body, "task", [], source))) {
+                addPendingCloud({ routine: title, at, status, content: body, kind: "task", source });
               }
             })();
           },

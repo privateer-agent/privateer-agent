@@ -230,6 +230,17 @@ export interface PendingCloud {
   // instead. Copying megabytes into this queue would be the same content twice on
   // the one box that already has it.
   media?: StagedMedia[];
+  // What the run was asked to do (outbox/cloudOutbox.ts OutboxSource), so a flush
+  // hours later still seals the context a follow-up needs. Structurally typed rather
+  // than imported: this module is the queue's shape, and cloudOutbox already imports
+  // from here (importing back would make the cycle).
+  source?: {
+    routineId?: string;
+    prompt?: string;
+    cwd?: string;
+    model?: string;
+    schedule?: string;
+  };
 }
 
 function pendingCloudPath(): string {
