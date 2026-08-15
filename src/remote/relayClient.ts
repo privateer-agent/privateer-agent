@@ -19,6 +19,7 @@ import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { apiRequest, serverBaseUrl } from "../auth/privateer.ts";
+import { MOAT_SHIMS, reservedNames } from "../config/moatManifest.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 
@@ -1089,6 +1090,21 @@ export class RelayClient {
   // each add/remove. `busy` drives a progress indicator; `needsRestart` tells the app
   // the change only takes effect on the next terminal launch. NON-PII: package
   // sources + scope only. Installed list bounded like sendCommands.
+  //
+  // `builtIn` + `managed` describe the MOAT, which is deliberately absent from
+  // `installed` (it never enters settings "packages"). Without them the app's Browse
+  // tab — an unfiltered npm `keywords:pi-package` search — offers Add on packages we
+  // already ship: pi-mcp-adapter, pi-subagents and the rpiv packs are on its first
+  // page. Every one of those round-trips to extensionsControl.add() only to come back
+  // refused ("managed by Privateer"), and until it does the row reads as *not*
+  // installed, which is the opposite of the truth. So:
+  //   • `builtIn` — what we ship, in load order, for a read-only section.
+  //   • `managed` — every name add()/remove() will refuse (builtIn + retired + the
+  //     scoped aliases), so the app can drop the Add affordance instead of offering
+  //     a button that always fails.
+  // Stamped here rather than passed by the caller: it is a constant of the build, and
+  // six call sites that each had to remember it is the drift moatManifest.json exists
+  // to make unrepresentable. An older app ignores both fields.
   sendExtensions(payload: {
     installed: { source: string; scope: string; filtered?: boolean; installed?: boolean }[];
     busy?: boolean;
@@ -1103,6 +1119,11 @@ export class RelayClient {
         filtered: !!e.filtered,
         installed: !!e.installed,
       })),
+      builtIn: MOAT_SHIMS.slice(0, 100).map((s) => ({
+        name: safe(s.name, 120),
+        note: s.note ? safe(s.note, 200) : undefined,
+      })),
+      managed: reservedNames().slice(0, 200).map((n) => safe(n, 120)),
       busy: !!payload.busy,
       message: payload.message ? safe(payload.message, 500) : undefined,
       needsRestart: !!payload.needsRestart,

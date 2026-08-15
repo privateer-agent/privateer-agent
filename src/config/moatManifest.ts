@@ -27,6 +27,11 @@ import { readFileSync } from "node:fs";
  * `dep` is a node_modules specifier as [packageName, ...pathSegments], resolved through
  * the node_modules chain at launch (npm hoists, so a fixed path would miss). Exactly one
  * of the two is set.
+ *
+ * `note` is USER-VISIBLE: relayClient.sendExtensions ships it to the app, which lists it
+ * under each built-in in the Extensions manager. Write it as a one-line description of
+ * what the extension gives the user (English only — the app renders it verbatim, as it
+ * already does for the agent's status messages), not as a code comment.
  */
 export interface MoatShim {
   name: string;

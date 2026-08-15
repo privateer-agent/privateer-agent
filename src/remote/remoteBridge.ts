@@ -42,8 +42,17 @@ export interface RelayLike {
 }
 
 // The installed-extensions snapshot relayed to the app's extensions manager.
+//
+// `managed`/`builtIn` describe the moat, which `installed` never contains (it is loaded
+// as launch shims, not settings "packages"). Callers do NOT set them: each transport
+// stamps them on the way out — RelayClient.sendExtensions from the shipping manifest,
+// IpcRelay from reservedNames() — because a constant of the build passed by hand at six
+// call sites is the drift moatManifest.json exists to make unrepresentable. Declared
+// here only so a transport can type what it adds.
 export interface ExtensionsPayload {
   installed: { source: string; scope: string; filtered?: boolean; installed?: boolean }[];
+  builtIn?: { name: string; note?: string }[];
+  managed?: string[];
   busy?: boolean;
   message?: string;
   needsRestart?: boolean;
