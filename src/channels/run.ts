@@ -129,6 +129,7 @@ async function main() {
   const { moatResourceOptions } = await import("../config/moat.ts");
   const { webEnabled, mediaEnabled } = await import("../config/hosted.ts");
   const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
+  const { ensureAccountArmed } = await import("../providers/account.ts");
   const { agentDir, configPath, globalDir } = await import("../config/paths.ts");
   const { redactText, collectSecrets } = await import("../util/redact.ts");
   const { MessagingBridge } = await import("./bridge.ts");
@@ -321,6 +322,14 @@ async function main() {
       // A member's turn is always read-only, whatever the channel posture.
       const effectivePosture: Posture = meta.isAdmin ? chPosture : "readonly";
       try {
+        // Re-arm the account channel ahead of the turn. This daemon runs for weeks, and
+        // Pi's auth.json holds ONE machine-global `privateer` entry: any other terminal
+        // on the box that arms over ours and then exits takes the entry with it, and
+        // from that moment every channel message answers "This terminal isn't signed in
+        // to Privateer" on a session that is still perfectly valid. The equivalent net
+        // in providers/account.ts hangs off `before_agent_start`, which pi's prompt()
+        // never reaches — it throws on its own `hasConfiguredAuth` precheck first.
+        if (model?.provider === "privateer") await ensureAccountArmed(undefined);
         await approvalCtx.run({ bridge, chatId, posture: effectivePosture }, () => session.prompt(text));
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };

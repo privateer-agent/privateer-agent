@@ -20,7 +20,7 @@ import { agentVersion } from "../config/version.ts";
 import { createEngineEventAdapter } from "../bridge/engineAdapter.ts";
 import { isRemoteUnsafeTool, type GateController } from "../ext/permissionGate.ts";
 import { moatResourceOptions } from "../config/moat.ts";
-import { rememberAccountCredential, persistAccountCredential, dropPersistedAccountCredential } from "../providers/account.ts";
+import { rememberAccountCredential, persistAccountCredential, dropPersistedAccountCredential, ensureAccountArmed } from "../providers/account.ts";
 // Pi-free static graph by design — see the header of piAuthStore.ts.
 import { modelRegistryOf } from "../providers/piAuthStore.ts";
 import { RelayClient, type TaskSpec } from "./relayClient.ts";
@@ -130,6 +130,13 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     lastAnswer = "";   // keep the CLOSING answer, not the whole session
     turnErrored = false;
     try {
+      // auth.json's `privateer` entry is machine-global and single-slot, so another
+      // terminal arming over ours and then exiting deletes the credential this session
+      // is running on — every later turn would fail with "This terminal isn't signed in
+      // to Privateer" while the session we hold stays valid. Re-arm here rather than in
+      // providers/account.ts's `before_agent_start` net, which pi's prompt() throws
+      // past on its own `hasConfiguredAuth` precheck.
+      if (modelSpec.startsWith("privateer/")) await ensureAccountArmed(undefined);
       // Fold any files the app sent since the last prompt into a reference note, so the
       // model knows they exist and can save_attachment them to disk.
       const atts = sinceLastPrompt;

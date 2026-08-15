@@ -46,6 +46,7 @@ async function main() {
     rememberAccountCredential,
     persistAccountCredential,
     dropPersistedAccountCredential,
+    ensureAccountArmed,
   } = await import("../providers/account.ts");
   const { modelRegistryOf } = await import("../providers/piAuthStore.ts");
   const { agentVersion } = await import("../config/version.ts");
@@ -330,6 +331,17 @@ async function main() {
     turnActive = true;
     if (remote && echo) console.log(`\n${DIM}⟿ [app] ${text.slice(0, 80)}${RESET}`);
     try {
+      // Re-arm the account channel BEFORE the prompt, because nothing downstream can.
+      // auth.json holds ONE machine-global `privateer` entry, so the terminal that
+      // armed LAST deletes it on exit and strands every other terminal still running —
+      // this one keeps a good credential in memory while Pi sees no entry, and every
+      // prompt dies on "This terminal isn't signed in to Privateer".
+      //
+      // The `before_agent_start` net in providers/account.ts cannot cover this: pi's
+      // prompt() throws on its own `hasConfiguredAuth` precheck before that event is
+      // ever emitted. Here is the last point ahead of it. One store read on the healthy
+      // path, and a no-op when the machine isn't signed in.
+      if (currentSpec.startsWith("privateer/")) await ensureAccountArmed(undefined);
       // Expand any `@path` mentions into appended <file> blocks + image attachments,
       // resolved against this terminal's cwd (constrained to the cwd subtree). Both a
       // locally-typed prompt and an app-driven one land here, so both get it. A prompt

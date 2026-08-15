@@ -89,7 +89,7 @@ export async function runAcp(): Promise<void> {
   const { moatResourceOptions } = await import("../config/moat.ts");
   const { privateerChannel, rememberAccountCredential, persistAccountCredential, dropPersistedAccountCredential } =
     await import("../providers/account.ts");
-  const { modelRegistryOf } = await import("../providers/piAuthStore.ts");
+  const { modelRegistryOf, piAuthStore } = await import("../providers/piAuthStore.ts");
   const { hasCredentials, acquireAccountCredential, revokeAccountSession } = await import("../auth/privateer.ts");
   const { webEnabled, mediaEnabled } = await import("../config/hosted.ts");
   const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
@@ -230,7 +230,23 @@ export async function runAcp(): Promise<void> {
   // there. The moment anything revoked it, every ACP turn started failing.
   let armedAccount = false;
   async function ensureAccountArmed(providerName: string): Promise<void> {
-    if (armedAccount || providerName !== "privateer") return;
+    if (providerName !== "privateer") return;
+    // Re-read the PERSISTED entry instead of latching on `armedAccount`. auth.json holds
+    // one machine-global `privateer` entry, so whichever terminal armed LAST removes it
+    // on exit — including one that armed over ours — and a latch would never notice. The
+    // session we hold stays perfectly valid while Pi sees no entry at all, so every turn
+    // from then on fails with the misleading "This terminal isn't signed in to
+    // Privateer". Re-arming reuses our own session (accountCredential's memo) rather
+    // than minting a second one, so the recovery costs a store write, not a Linked
+    // Devices row.
+    if (armedAccount) {
+      try {
+        if (await (await piAuthStore()).read("privateer")) return;
+      } catch {
+        return; // can't read the store — leave it to the turn's own error path
+      }
+      log("account entry was removed by another terminal — re-arming");
+    }
     if (!hasCredentials()) {
       log("not signed in to Privateer — run `privateer` and /login, or pick a BYO-key model");
       return;
@@ -246,6 +262,10 @@ export async function runAcp(): Promise<void> {
     }
   }
   await ensureAccountArmed(model.provider);
+  // The provider actually selected right now — `model` is the launch model and never
+  // moves, but session/set_model can switch channels mid-run, and the per-turn re-arm
+  // below has to follow that rather than the model this process booted on.
+  let currentProvider = model.provider;
 
   const modelCount = listModels()?.available.length ?? 0;
   log(
@@ -312,11 +332,18 @@ export async function runAcp(): Promise<void> {
         // with the same misleading "not signed in".
         await ensureAccountArmed(next.provider);
         await session.setModel(next);
+        currentProvider = next.provider;
       },
       async prompt(text, events, signal) {
         holder.events = events;
         holder.error = undefined;
         try {
+          // Ahead of every turn, not just at startup: the entry we armed can be removed
+          // by another terminal's exit at any point in a long-lived host session (see
+          // ensureAccountArmed). It has to happen HERE because pi's prompt() throws on
+          // its own `hasConfiguredAuth` precheck before it emits `before_agent_start`,
+          // where providers/account.ts installs the equivalent net.
+          await ensureAccountArmed(currentProvider);
           await session.prompt(text);
         } catch (e) {
           return { ok: false, error: e instanceof Error ? e.message : String(e) };
