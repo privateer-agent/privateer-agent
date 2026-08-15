@@ -225,6 +225,28 @@ export function classifyToolCall(
     };
   }
 
+  // Reading a routine back (src/tools/routineResult.ts): its stored instruction and
+  // its latest result. A READ, and it must be classified as one — the unknown-tool
+  // branch at the bottom would call it bash-kind, which prompts with a JSON blob and
+  // denies outright in plan/readonly, the very posture where "what did last night's
+  // run find?" is the most reasonable question there is.
+  //
+  // It still asks in default mode rather than returning null: the files live in
+  // ~/.privateer (outside any cwd) and can hold whatever the run collected, so
+  // pulling one into a session is the user's call, exactly as reading the file by
+  // hand would be. It takes a NAME, not a path, so there is no target to resolve —
+  // `outside` is therefore left unset (setting it would force a prompt even under
+  // acceptEdits for a read the user just asked for).
+  if (name === "read_routine_result") {
+    const label = str(obj.name);
+    return {
+      tool: toolName,
+      kind: "read",
+      title: "Read a routine's saved result",
+      detail: label ? `routine "${label}" (instruction + latest result)` : "list saved routines",
+    };
+  }
+
   // Media generation (src/tools/media.ts) and local composition (videoCompose.ts).
   //
   // Left to the unknown-tool branch at the bottom these classify as bash-kind, which
