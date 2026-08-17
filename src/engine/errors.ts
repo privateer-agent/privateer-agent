@@ -117,6 +117,99 @@ export function isAccountCapCode(code: string | null | undefined): boolean {
   return typeof code === "string" && CAP_CODE.test(code);
 }
 
+// ── Oversized / non-API error bodies ─────────────────────────────────────────
+//
+// An inference endpoint does not always answer as an API. Put a WAF, a proxy or a
+// captive portal in front of one and a rejected request comes back as an HTML page,
+// which the provider SDK folds whole into `error.message` — status first, body after.
+//
+// The incident this exists for: the account channel's edge WAF answered a turn with a
+// 403 block page carrying three inline base64 web fonts, so `errorMessage` was 221 KB.
+// Pi printed it into the terminal in full, appended it to the session file on every
+// attempt (a 1.8 MB session), and ran its transient-error regex over it — and a
+// megabyte of base64 reliably contains "429", "500", "502", so a permanent 403 looked
+// retryable and burned the whole retry budget before the user saw anything.
+//
+// Both halves are fixed where Pi reads the message (see the patch in
+// patches/@earendil-works+pi-coding-agent+*.patch, which mirrors these two helpers):
+// squeeze the page down to the line a person can act on, and let the STATUS decide
+// retryability rather than a substring of the body.
+
+/** Hard cap on an error message we display, persist, or classify. */
+export const MAX_ERROR_CHARS = 2_000;
+
+/** How much of an HTML page's visible text is worth keeping. */
+const MAX_PAGE_TEXT_CHARS = 600;
+
+const HTML_DOC = /<!doctype html|<html[\s>]/i;
+
+/** Tags whose contents are never prose: markup, styling, or a logo. */
+const NON_PROSE = /<(script|style|svg|head|noscript)\b[\s\S]*?<\/\1\s*>/gi;
+
+const ENTITIES: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'", "#x27": "'",
+};
+
+function plainText(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, code: string) => {
+      const key = code.toLowerCase();
+      if (ENTITIES[key] !== undefined) return ENTITIES[key];
+      if (key.startsWith("#x")) return String.fromCodePoint(parseInt(key.slice(2), 16) || 0) || m;
+      if (key.startsWith("#")) return String.fromCodePoint(parseInt(key.slice(1), 10) || 0) || m;
+      return m;
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Reduce a provider error message to something worth showing, storing and classifying.
+ *
+ * An HTML page collapses to its status, its <title> and its visible text — which is
+ * where a WAF puts the one detail the user needs to report ("Request ID: …"). Anything
+ * else over the cap is truncated. Text already short and non-HTML is returned unchanged,
+ * so ordinary provider errors pass through untouched.
+ */
+export function compactProviderError(raw: string): string {
+  const text = typeof raw === "string" ? raw : String(raw ?? "");
+  if (!HTML_DOC.test(text)) {
+    if (text.length <= MAX_ERROR_CHARS) return text;
+    return `${text.slice(0, MAX_ERROR_CHARS)}… [dropped ${text.length - MAX_ERROR_CHARS} chars]`;
+  }
+
+  const status = /^\s*(\d{3})\b/.exec(text)?.[1];
+  const title = plainText(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(text)?.[1] ?? "");
+  const body = plainText(text.replace(NON_PROSE, " "));
+  const visible = [title, body].filter(Boolean).join(" — ").slice(0, MAX_PAGE_TEXT_CHARS);
+
+  return (
+    `${status ?? "HTTP error"} — an HTML page, not an API response (something in front of ` +
+    `the provider answered: a WAF, a proxy, or a captive portal): ` +
+    `${visible || "(no readable text)"} [dropped ${text.length} chars of HTML]`
+  );
+}
+
+// Client-error statuses that CAN clear on their own: a timeout, a lock conflict, an
+// early-data replay, a throttle. Every other 4xx is the request itself being wrong.
+const TRANSIENT_CLIENT_STATUS = new Set([408, 409, 425, 429]);
+
+/**
+ * True when the message opens with an HTTP status that retrying cannot clear.
+ *
+ * Both provider paths put the status first — the OpenAI-shaped SDK builds
+ * `"403 <body>"`, pi-messages builds `"403 Forbidden: <body>"` — so the status is a
+ * fact we can read, where a substring of the body is only a guess. 5xx and messages
+ * with no leading status are left to the caller's own classifier.
+ */
+export function isHardHttpFailure(text: string | null | undefined): boolean {
+  const m = /^\s*(\d{3})\b/.exec(typeof text === "string" ? text : "");
+  if (!m) return false;
+  const status = Number(m[1]);
+  return status >= 400 && status < 500 && !TRANSIENT_CLIENT_STATUS.has(status);
+}
+
 function rawMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
@@ -243,5 +336,8 @@ export function describeError(err: unknown): DescribedError {
     });
   }
 
-  return out({ message: text });
+  // Unrecognized: show the provider's own words rather than swallow them — but an
+  // unrecognized error is exactly where a WAF block page or a megabyte of markup
+  // arrives, so it goes through the compactor first.
+  return out({ message: compactProviderError(text) });
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { describeError, isAccountCapCode } from "../src/engine/errors.ts";
+import { compactProviderError, describeError, isAccountCapCode, isHardHttpFailure } from "../src/engine/errors.ts";
 
 // errors.ts is provider-agnostic status/network mapping (the AI-SDK error nesting
 // in `extract` is read defensively, so it survives Pi's shapes). Verifies the
@@ -56,4 +56,63 @@ test("localhost refused → 'nothing is listening', not retryable", () => {
 test("data-policy / no-endpoints text → actionable OpenRouter message", () => {
   const d = describeError({ statusCode: 404, responseBody: JSON.stringify({ error: { message: "No endpoints found matching your data policy" } }) });
   assert.match(d.message, /data-policy settings/i);
+});
+
+// ── Error bodies that aren't API responses ───────────────────────────────────
+//
+// The incident: the account channel's edge WAF answered a turn with a 403 block page
+// whose inline base64 web fonts made a 221 KB `errorMessage`. It was printed whole,
+// written to the session file on every attempt, and — because that much base64 always
+// contains "429"/"500"/"502" — matched Pi's transient-error regex, so a permanent 403
+// was retried three times. The patched agent-session runs both helpers below; these
+// tests are where their behaviour is pinned.
+
+/** The shape of the page that caused this, minus 220 KB of font. */
+const BLOCK_PAGE =
+  `403 <!DOCTYPE html>\n<html lang="en">\n  <head>\n    <title>Blocked</title>\n` +
+  `    <style>@font-face { src: url("data:font/woff2;base64,${"QUJDNTAwNTAyNDI5".repeat(400)}"); }</style>\n` +
+  `  </head>\n  <body>\n    <script>var t = 1;</script>\n` +
+  `    <h1>403 - Forbidden</h1>\n` +
+  `    <p>Your request was blocked by this site&#x27;s web application firewall (WAF).</p>\n` +
+  `    <p>Request ID: a2c64e100ae6d331</p>\n` +
+  `    <svg viewBox="0 0 64 12"><path d="M11.4 1.0C9.6 0.9 8.1 2.2 7.8 3.9Z" /></svg>\n` +
+  `  </body>\n</html>\n`;
+
+test("an HTML block page collapses to its status and readable text", () => {
+  const out = compactProviderError(BLOCK_PAGE);
+  assert.ok(out.length < 800, `expected a short message, got ${out.length} chars`);
+  assert.match(out, /^403 /);
+  assert.match(out, /Blocked/);
+  assert.match(out, /web application firewall/);
+  assert.match(out, /Request ID: a2c64e100ae6d331/); // the one detail worth reporting
+  assert.match(out, /dropped \d+ chars of HTML/);
+  assert.doesNotMatch(out, /base64|woff2|<path|var t = 1/); // fonts, markup, script
+  assert.equal(out.includes("&#x27;"), false, "entities are decoded, not shown raw");
+});
+
+test("an ordinary provider error passes through untouched", () => {
+  const plain = `429 {"error":{"message":"Rate limit reached","code":"rate_limit"}}`;
+  assert.equal(compactProviderError(plain), plain);
+});
+
+test("a huge non-HTML body is truncated, not dropped", () => {
+  const out = compactProviderError(`500 ${"x".repeat(50_000)}`);
+  assert.ok(out.length < 2_200, `expected a capped message, got ${out.length} chars`);
+  assert.match(out, /^500 x+… \[dropped \d+ chars\]$/);
+});
+
+test("hard 4xx statuses are never retryable, whatever the body says", () => {
+  // The exact shape that retried three times: a 403 whose body contains "500".
+  assert.equal(isHardHttpFailure(BLOCK_PAGE), true);
+  assert.equal(isHardHttpFailure("403 Forbidden: blocked"), true); // pi-messages shape
+  assert.equal(isHardHttpFailure("400 bad request"), true);
+  assert.equal(isHardHttpFailure("404 no such model"), true);
+});
+
+test("statuses that can clear on their own are left to Pi's classifier", () => {
+  for (const s of [408, 409, 425, 429, 500, 502, 503, 529]) {
+    assert.equal(isHardHttpFailure(`${s} something`), false, `${s} must stay retryable`);
+  }
+  assert.equal(isHardHttpFailure("fetch failed"), false); // no status → not our call
+  assert.equal(isHardHttpFailure(undefined), false);
 });

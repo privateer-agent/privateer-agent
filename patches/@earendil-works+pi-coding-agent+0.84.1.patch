@@ -68,10 +68,81 @@ index 4600b23..075ecae 100644
  export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
  export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index ce8a9a2..1ae7b25 100644
+index ce8a9a2..c52ea80 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -186,6 +186,14 @@ export class AgentSession {
+@@ -38,6 +38,70 @@ import { createLocalBashOperations } from "./tools/bash.js";
+ import { createAllToolDefinitions } from "./tools/index.js";
+ import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+ import { addUsageToTotals, createUsageTotals } from "./usage-totals.js";
++// ============================================================================
++// Privateer patch: provider errors that aren't API responses
++//
++// An inference endpoint does not always answer as an API. Put a WAF, a proxy or a
++// captive portal in front of one and a rejected request comes back as an HTML page,
++// which the provider SDK folds whole into `error.message` — status first, body after.
++//
++// Measured incident: the account channel's edge WAF answered a turn with a 403 block
++// page carrying three inline base64 web fonts, so `errorMessage` was 221 KB. Pi
++// printed it into the terminal in full, appended it to the session file on every
++// attempt (a 1.8 MB session), and ran isRetryableAssistantError over it — and a
++// megabyte of base64 reliably contains "429", "500" and "502", so a permanent 403
++// looked transient and burned the whole retry budget before the user saw anything.
++//
++// compactProviderError squeezes such a page down to the line a person can act on
++// (status, title, visible text — which is where a WAF puts its request id), and
++// isHardHttpFailure lets the STATUS decide retryability instead of a substring of the
++// body. Mirrors src/engine/errors.ts, which is where these are tested.
++const PV_MAX_ERROR_CHARS = 2000;
++const PV_MAX_PAGE_TEXT_CHARS = 600;
++const PV_HTML_DOC = /<!doctype html|<html[\s>]/i;
++const PV_NON_PROSE = /<(script|style|svg|head|noscript)\b[\s\S]*?<\/\1\s*>/gi;
++const PV_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'", "#x27": "'" };
++function pvPlainText(html) {
++    return html
++        .replace(/<[^>]*>/g, " ")
++        .replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, code) => {
++        const key = code.toLowerCase();
++        if (PV_ENTITIES[key] !== undefined)
++            return PV_ENTITIES[key];
++        if (key.startsWith("#x"))
++            return String.fromCodePoint(parseInt(key.slice(2), 16) || 0) || m;
++        if (key.startsWith("#"))
++            return String.fromCodePoint(parseInt(key.slice(1), 10) || 0) || m;
++        return m;
++    })
++        .replace(/\s+/g, " ")
++        .trim();
++}
++export function compactProviderError(raw) {
++    const text = typeof raw === "string" ? raw : String(raw ?? "");
++    if (!PV_HTML_DOC.test(text)) {
++        if (text.length <= PV_MAX_ERROR_CHARS)
++            return text;
++        return `${text.slice(0, PV_MAX_ERROR_CHARS)}… [dropped ${text.length - PV_MAX_ERROR_CHARS} chars]`;
++    }
++    const status = /^\s*(\d{3})\b/.exec(text)?.[1];
++    const title = pvPlainText(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(text)?.[1] ?? "");
++    const body = pvPlainText(text.replace(PV_NON_PROSE, " "));
++    const visible = [title, body].filter(Boolean).join(" — ").slice(0, PV_MAX_PAGE_TEXT_CHARS);
++    return (`${status ?? "HTTP error"} — an HTML page, not an API response (something in front of ` +
++        `the provider answered: a WAF, a proxy, or a captive portal): ` +
++        `${visible || "(no readable text)"} [dropped ${text.length} chars of HTML]`);
++}
++// Client-error statuses that CAN clear on their own: a timeout, a lock conflict, an
++// early-data replay, a throttle. Every other 4xx is the request itself being wrong.
++const PV_TRANSIENT_CLIENT_STATUS = new Set([408, 409, 425, 429]);
++export function isHardHttpFailure(text) {
++    const m = /^\s*(\d{3})\b/.exec(typeof text === "string" ? text : "");
++    if (!m)
++        return false;
++    const status = Number(m[1]);
++    return status >= 400 && status < 500 && !PV_TRANSIENT_CLIENT_STATUS.has(status);
++}
+ /**
+  * Parse a skill block from message text.
+  * Returns null if the text doesn't contain a skill block.
+@@ -186,6 +250,14 @@ export class AgentSession {
          }
          const isOAuth = this._modelRuntime.isUsingOAuth(model.provider);
          if (isOAuth) {
@@ -86,7 +157,24 @@ index ce8a9a2..1ae7b25 100644
              throw new Error(`Authentication failed for "${model.provider}". ` +
                  `Credentials may have expired or network is unavailable. ` +
                  `Run '/login ${model.provider}' to re-authenticate.`);
-@@ -772,6 +780,15 @@ export class AgentSession {
+@@ -360,6 +432,16 @@ export class AgentSession {
+                 }
+             }
+         }
++        // Privateer patch: squeeze a non-API error body BEFORE anything reads it. This is
++        // the one point upstream of all four consumers — extension handlers, UI listeners,
++        // session persistence, and the _lastAssistantMessage the retry classifier reads —
++        // so an HTML block page is shortened once, in place, rather than printed, stored
++        // and pattern-matched at full size. See compactProviderError above.
++        if (event.type === "message_end" &&
++            event.message?.role === "assistant" &&
++            typeof event.message.errorMessage === "string") {
++            event.message.errorMessage = compactProviderError(event.message.errorMessage);
++        }
+         // Emit to extensions first
+         await this._emitExtensionEvent(event);
+         // Notify all listeners
+@@ -772,6 +854,15 @@ export class AgentSession {
                  finalError: msg.errorMessage,
              });
              this._retryAttempt = 0;
@@ -102,7 +190,7 @@ index ce8a9a2..1ae7b25 100644
          }
          if (await this._checkCompaction(msg)) {
              return true;
-@@ -852,6 +869,14 @@ export class AgentSession {
+@@ -852,6 +943,14 @@ export class AgentSession {
              if (!hasConfiguredAuth) {
                  const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
                  if (isOAuth) {
@@ -117,10 +205,19 @@ index ce8a9a2..1ae7b25 100644
                      throw new Error(`Authentication failed for "${this.model.provider}". ` +
                          `Credentials may have expired or network is unavailable. ` +
                          `Run '/login ${this.model.provider}' to re-authenticate.`);
-@@ -2084,6 +2109,18 @@ export class AgentSession {
+@@ -2084,6 +2183,27 @@ export class AgentSession {
          // Context overflow is handled by compaction, not retry.
          if (isContextOverflow(message, this.model?.contextWindow ?? 0))
              return false;
++        // Privateer patch: an HTTP status is a fact; a substring of the body is a guess.
++        // pi classifies by regex over the whole error text, so a 403 whose body merely
++        // CONTAINS "500" — a WAF block page, any proxy interstitial, anything with base64
++        // in it — spent the full retry budget on a failure retrying could never clear.
++        // A 4xx other than 408/409/425/429 is the request being wrong, whatever its body
++        // says. Provider-agnostic on purpose: an intercepting proxy is not ours to detect.
++        // Mirrors isHardHttpFailure in src/engine/errors.ts.
++        if (isHardHttpFailure(message.errorMessage))
++            return false;
 +        // Privateer patch: a Privateer ACCOUNT CAP is not a throttle. Daily/monthly
 +        // message or token limits (and an exhausted balance) come back from the account
 +        // channel as a 429 carrying the backend's machine `code` and a ready-to-show
