@@ -177,36 +177,16 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
 
   const { makePermissionGate } = await import("../ext/permissionGate.ts");
   const { makePiPrivacyExtension } = await import("pi-privacy");
-  const { makeAccountProvider, privateerChannel } = await import("../providers/account.ts");
-  const { hasCredentials } = await import("../auth/privateer.ts");
+  const { makeAccountProvider } = await import("../providers/account.ts");
   const { webEnabled, mediaEnabled } = await import("./hosted.ts");
-  const { noQuarterActive } = await import("../permissions/noQuarter.ts");
-  const { cliPalette, detectScheme } = await import("../ui/palette.ts");
+  const { sharedPrivacyOptions } = await import("./privacyPolicy.ts");
 
   const factories: ExtensionFactory[] = [makePermissionGate(opts.gate)];
 
-  // Per-model verified-TEE capability for pi-privacy's /models picker: show Privateer's
-  // TEE-channel models (near/tinfoil/phala) as "◆ Verifiable TEE" when logged in, while
-  // ZDR-channel models stay at their honest floor. The live verdict still comes from
-  // accountPosture on select — this only lifts the label.
-  factories.push(
-    makePiPrivacyExtension({
-      privateerVerifiedTee: (m: any) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
-      // No quarter = unattended: the PII send-or-redact question would block a session
-      // the operator explicitly stepped away from, so it's swallowed the safe way —
-      // auto-redact + send — and what was masked surfaces as output instead. A live
-      // function, not a boolean: shift+tab / /no-quarter flips this mid-session.
-      piiUnattended: noQuarterActive,
-      // Color-coat that notice as the moat acting on your behalf: the red no-quarter
-      // flag (same glyph/color as the no-quarter banner in chat.ts), body in the
-      // accent color — distinct from yellow warnings and red errors.
-      renderPiiAutoRedact: (notice: string) => {
-        const p = cliPalette(detectScheme());
-        const body = notice.startsWith("⚑ ") ? notice.slice(2) : notice;
-        return `${p.RED}⚑${p.RESET} ${p.CYAN}${body}${p.RESET}`;
-      },
-    }),
-  );
+  // pi-privacy is configured in exactly ONE place, shared with the DISCOVERED copy of this
+  // extension (the TUI's, and every subagent child's) — see ./privacyPolicy.ts for the two
+  // bugs that came of configuring it in two.
+  factories.push(makePiPrivacyExtension(sharedPrivacyOptions()));
   factories.push(makeAccountProvider()); // must follow pi-privacy — see header
 
   if (opts.relayFiles) {

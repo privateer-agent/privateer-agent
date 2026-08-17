@@ -1,9 +1,10 @@
 // pi-privacy for privateer-agent: the standard pi-privacy extension (providers +
-// attestation + posture badge feed + PII gate) PLUS a tier resolver that teaches it
-// about the private ACCOUNT channel it doesn't ship — so a privateer/near… model
-// (actually confidential-compute TEE) is treated as verified-private (no PII
-// over-warning), and a zdr account model as zdr-policy. Replaces loading pi-privacy's
-// default entry directly.
+// attestation + posture badge feed + PII gate) configured the way every Privateer session
+// configures it — src/config/privacyPolicy.ts, which src/config/moat.ts hands to the
+// factory-built sessions verbatim. Chiefly that means a tier resolver teaching pi-privacy
+// about the private ACCOUNT channel it doesn't ship, so a privateer/near… model (actually
+// confidential-compute TEE) is treated as verified-private (no PII over-warning) and a zdr
+// account model as zdr-policy. Replaces loading pi-privacy's default entry directly.
 //
 // It also REPAIRS two provider registrations pi-privacy makes from its own catalog, each
 // of which replaces (not merges) whatever model list that provider already had:
@@ -23,7 +24,8 @@
 // display/resolution + routing list — posture and attestation are dispatcher-bound and
 // unaffected by the model set.
 import { makePiPrivacyExtension } from "pi-privacy";
-import { accountPosture, registerAccountModels } from "../src/providers/account.ts";
+import { registerAccountModels } from "../src/providers/account.ts";
+import { sharedPrivacyOptions } from "../src/config/privacyPolicy.ts";
 
 // Tinfoil's live chat models (inference.tinfoil.sh/v1/models), kimi-k2-6 first — the
 // launcher's default. Non-chat endpoints (embeddings, tts, whisper, websearch,
@@ -51,33 +53,11 @@ function tinfoilModel(id: string) {
   };
 }
 
-const privacy = makePiPrivacyExtension({
-  resolveTier: async (provider, modelId) => {
-    if (provider !== "privateer") return undefined; // pi-privacy handles its own providers
-    return (await accountPosture(modelId)).tier;
-  },
-  // pi-privacy 0.8 added an INGEST gate: credentials arriving in a tool result are
-  // redacted before they enter context (they'd otherwise be re-sent every turn and
-  // written to the session file on disk). We already redact tool output in
-  // src/ext/permissionGate.ts, so its default "warn" would put an interactive prompt
-  // in front of something this app has always handled silently — "redact" keeps our
-  // UX and still takes the added coverage.
-  //
-  // The two redactors are COMPLEMENTARY, not duplicative, which is why we run both:
-  // ours masks the configured provider keys by exact value (from env/config) plus the
-  // provider-specific shapes (sk-/AIza/xai-/gsk_/csk-/vapi_/fw_/Z.ai, auth headers);
-  // pi-privacy's catches what shows up in USER code and shell output — AWS AKIA/ASIA,
-  // GitHub gh[pousr]_, JWTs, PEM private-key blocks, Slack, Stripe — none of which
-  // our patterns match.
-  //
-  // Order between the two is NOT guaranteed: pi discovers extensions with a bare
-  // readdirSync and never sorts, so it's filesystem-dependent (alphabetical on this
-  // box today, not by contract). "redact" makes that moot — both handlers run
-  // unconditionally and each masks its own patterns, so the surviving content is the
-  // same either way. Under "warn" the order WOULD matter, since it decides whether
-  // the prompt is raised on a raw key or one we already masked.
-  toolResultPolicy: "redact",
-});
+// One configuration, shared with the factory-built copy in src/config/moat.ts — the tier
+// resolver for the private ACCOUNT channel, the unattended/no-quarter handling, the ingest
+// policy. Adding an option HERE rather than there is how this file and the moat drifted
+// twice; src/config/privacyPolicy.ts records what that cost.
+const privacy = makePiPrivacyExtension(sharedPrivacyOptions());
 
 export default function privateerPrivacy(pi: any): void {
   privacy(pi);
