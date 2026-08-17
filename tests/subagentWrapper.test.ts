@@ -21,6 +21,7 @@ const FALLBACK = [
   "/repo/extensions/privateer-gate.ts",
   "/repo/extensions/privateer-privacy.ts",
   "/repo/extensions/privateer-account.ts",
+  "/repo/extensions/privateer-media.ts",
 ];
 
 test("injects --no-extensions and one -e per moat extension, before the originals", () => {
@@ -28,14 +29,14 @@ test("injects --no-extensions and one -e per moat extension, before the original
   const out = buildChildArgs(original, REPO, NO_ENV);
   // --no-extensions leads.
   assert.equal(out[0], "--no-extensions");
-  // three -e pairs follow (gate, privacy, account).
+  // one -e pair per fallback extension (gate, privacy, account, media).
   const es = out.filter((a: string) => a === "-e");
-  assert.equal(es.length, 3);
+  assert.equal(es.length, FALLBACK.length);
   // originals are preserved contiguously at the tail (order intact).
   assert.deepEqual(out.slice(out.length - original.length), original);
 });
 
-test("moat paths fall back to the three privateer entry extensions under the given repo", () => {
+test("moat paths fall back to the privateer entry extensions under the given repo", () => {
   const paths = moatExtensionPaths(REPO, NO_ENV);
   assert.deepEqual(paths, FALLBACK);
   // every injected -e path is one of the moat paths.
@@ -86,5 +87,5 @@ test("piCliPath resolves the bundled pi under the repo", () => {
 test("empty original args still yields a valid injection", () => {
   const out = buildChildArgs([], REPO, NO_ENV);
   assert.equal(out[0], "--no-extensions");
-  assert.equal(out.filter((a: string) => a === "-e").length, 3);
+  assert.equal(out.filter((a: string) => a === "-e").length, FALLBACK.length);
 });

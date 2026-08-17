@@ -54,6 +54,16 @@ export interface ModeGateDeps {
   // the remote branch, even the dangerous-command denylist): the operator has
   // explicitly opted the whole session out of the moat. Off unless the flag is set.
   getSkipAllPermissions?: () => boolean;
+  // Spend the operator authorized IN ADVANCE, by tool name, at a moment when there WAS
+  // a human to ask: the media tools a routine names when it is saved (naming them is
+  // itself the decision — they are deliberately absent from the default allow-list, and
+  // saving a routine that grants egress is an alwaysAsk prompt of its own), handed to
+  // the run that fires hours later with nobody watching.
+  //
+  // Consulted ONLY to lift `alwaysAsk`, and only under the guards in ModeGate.request.
+  // Absent ⇒ nothing is pre-authorized, which is the posture every interactive session
+  // keeps: a terminal always asks its human, however cheap the call.
+  isSpendPreauthorized?: (req: PermissionRequest) => boolean;
 }
 
 // The permission gate used by the live TUI. It first applies the mode/allowlist
@@ -95,6 +105,35 @@ export class ModeGate implements PermissionGate {
     }
 
     if (auto !== "ask") return auto;
+
+    // Pre-authorized spend. An unattended run reaches here with no one to ask, so an
+    // `alwaysAsk` tool — every billing media tool — was denied outright: the harbor
+    // let a routine NAME generate_video and then blocked every call it made, which is
+    // not a safe default so much as a capability that silently didn't exist.
+    //
+    // This lifts that one veto, and only that one. Four guards, all load-bearing:
+    //
+    //   • the controller must vouch for THIS tool by name (the harbor passes the media
+    //     tools this run's own allow-list names — see harbor/index.ts);
+    //   • `alwaysAsk` must be the ONLY reason we're asking. Re-deciding with the flag
+    //     cleared is how that is checked, so a pre-authorized tool in `plan` mode is
+    //     still denied and one at the default mode still prompts — pre-authorization
+    //     never grants what the mode wouldn't;
+    //   • never when the call leaves the working directory or touches a protected file.
+    //     bypass mode allows both outright, so this cannot lean on the re-decide above:
+    //     "you may generate video" must not become "you may upload ~/.ssh/id_rsa as a
+    //     reference image", which is exactly the shape classify.ts flags;
+    //   • never on a remote-driven turn — that branch returned above. A driven turn has
+    //     a human holding the phone, and they get the prompt.
+    if (
+      req.alwaysAsk &&
+      !req.outside &&
+      !req.protected &&
+      this.deps.isSpendPreauthorized?.(req) === true &&
+      decideAuto({ ...req, alwaysAsk: false }, this.deps.getMode(), this.deps.allowlist, denylist) === "allow"
+    ) {
+      return "allow";
+    }
 
     // A dangerous command (or an always-ask destructive action) can be approved
     // once, but is never remembered: adding it to the allowlist or relaxing the

@@ -118,6 +118,14 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
 
+// A path from a list entry that may be a bare string or an object carrying one —
+// video_compose's `tracks` and `images` take both, and the tools open whichever arrives,
+// so the classifier has to resolve whichever arrives. Miss the object form and
+// `tracks: [{path: "~/.ssh/id_rsa"}]` reads a key with `outside` left false.
+function nestedPath(entry: unknown): string {
+  return entry && typeof entry === "object" ? str((entry as Record<string, unknown>).path) : str(entry);
+}
+
 function firstPath(input: Record<string, unknown>): string {
   return str(input.path ?? input.file_path ?? input.file ?? input.filename ?? input.dir ?? input.directory);
 }
@@ -169,6 +177,7 @@ const MEDIA_TOOLS = new Set([
   "generate_model",
   "generate_speech",
   "generate_music",
+  "generate_sfx",
   "media_capabilities",
   "video_compose",
 ]);
@@ -182,12 +191,17 @@ const MEDIA_TOOLS = new Set([
 // remembered, so every generation is a fresh human decision. video_compose is
 // excluded on purpose — it is local ffmpeg, no egress and no spend — and
 // media_capabilities is a read.
-const MEDIA_GEN_TOOLS = new Set([
+// Exported because it is the definition of "this call bills, so a human decides": the
+// harbor reads it to work out which of a routine's granted tools its pre-authorization
+// has to cover (harbor/index.ts), and a second hand-written copy of this list there
+// would be one that drifts.
+export const BILLED_MEDIA_TOOLS: ReadonlySet<string> = new Set([
   "generate_image",
   "generate_video",
   "generate_model",
   "generate_speech",
   "generate_music",
+  "generate_sfx",
 ]);
 const MEDIA_TITLES: Record<string, string> = {
   generate_image: "Generate an image (billed to your Privateer account)",
@@ -195,9 +209,12 @@ const MEDIA_TITLES: Record<string, string> = {
   // The dearest of these per call, and the one whose price moves with the
   // options, so the title says so out loud rather than leaving the human to
   // work it out from a JSON blob of flags.
-  generate_model: "Generate a 3D model (billed; roughly $0.32-$1.26 a mesh)",
+  generate_model: "Generate a 3D model (billed; $0.14-$2.41 a mesh depending on the model)",
   generate_speech: "Generate speech (billed to your Privateer account)",
   generate_music: "Generate music (billed; music prompts have no zero-retention option)",
+  // Cheap per call and therefore the one most likely to be called twenty times in a
+  // row for a single cut, which is the number the title should let a human weigh.
+  generate_sfx: "Generate a sound effect (billed ~$0.02; effect models are non-ZDR)",
   video_compose: "Compose video/audio locally",
   media_capabilities: "Read media capabilities",
 };
@@ -271,9 +288,22 @@ export function classifyToolCall(
       ...(Array.isArray(obj.inputs) ? (obj.inputs as unknown[]).map(str) : []),
       str(obj.input),
       str(obj.audio),
-      ...(Array.isArray(obj.images) ? (obj.images as unknown[]).map(str) : []),
+      // `images` is a list of paths for generate_video's reference stills and a list of
+      // OBJECTS for video_compose overlay_image's layers — both shapes have to resolve, or
+      // the nested one is a path the gate never judges.
+      ...(Array.isArray(obj.images) ? (obj.images as unknown[]).map(nestedPath) : []),
       str(obj.firstFrame),
       str(obj.lastFrame),
+      // video_compose mix_audio carries its paths INSIDE objects — one per placed
+      // track — and a nested path is one the gate would never judge: `tracks:
+      // [{path: "~/.ssh/id_rsa"}]` would read a key outside scope with `outside`
+      // left false. Bare strings are accepted here too because the tool accepts
+      // them, and the classifier must see whatever the tool will open.
+      ...(Array.isArray(obj.tracks) ? (obj.tracks as unknown[]).map(nestedPath) : []),
+      // overlay_text renders a font file into the frame, and burn_subtitles reads a whole
+      // subtitle file into it, so an out-of-scope or protected one is a read like any other.
+      str(obj.fontFile),
+      str(obj.subtitles),
     ].filter(Boolean);
     // Resolve each input once, then flag the two ways an input is sensitive: it leaves
     // the working directory, or it is a guarded file (.env, keys, credentials, …). The
@@ -325,7 +355,7 @@ export function classifyToolCall(
       detail: `${outputOutside ? absOut : outPath}${inputNote}`,
       protected: isProtectedPath(absOut) || protectedInputs.length > 0,
       outside,
-      alwaysAsk: MEDIA_GEN_TOOLS.has(name),
+      alwaysAsk: BILLED_MEDIA_TOOLS.has(name),
       path: absOut,
     };
   }

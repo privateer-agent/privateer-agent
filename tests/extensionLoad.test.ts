@@ -255,3 +255,80 @@ test("extensions: privateer-gate owns the relay file tools wherever it loads", a
     assert.ok(tools.includes(tool), `expected ${tool}, got: ${tools.join(", ") || "(none)"}`);
   }
 });
+
+// ── privateer-media in a subagent child ──────────────────────────────────────
+// A child of an in-code parent (the harbor, a routine, a live task session) gets its moat
+// from the fallback list in bin/privateer-subagent.mjs, which now includes this extension.
+// Listing it there is only safe because the extension SHAPES ITSELF: video_compose is local
+// ffmpeg and always registers, while the billing generate_* tools register only when the
+// parent handed this child a spend grant. A child that got them without one would spend its
+// context discovering one gate refusal at a time.
+async function loadMediaAsChild(grant: string | undefined): Promise<string[]> {
+  const home = mkdtempSync(join(tmpdir(), "priv-extload-media-"));
+  const agentDir = join(home, "agent");
+  mkdirSync(join(agentDir, "extensions"), { recursive: true });
+  const saved = {
+    PRIVATEER_HOME: process.env.PRIVATEER_HOME,
+    PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+    PI_SUBAGENT_CHILD: process.env.PI_SUBAGENT_CHILD,
+    PRIVATEER_CHILD_SPEND: process.env.PRIVATEER_CHILD_SPEND,
+    HARBOR_MEDIA: process.env.HARBOR_MEDIA,
+  };
+  process.env.PRIVATEER_HOME = home;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_SUBAGENT_CHILD = "1";
+  process.env.HARBOR_MEDIA = "1";
+  if (grant === undefined) delete process.env.PRIVATEER_CHILD_SPEND;
+  else process.env.PRIVATEER_CHILD_SPEND = grant;
+  // mediaEnabled() is `HARBOR_MEDIA=1 && signed in`, so the run needs a credential to be
+  // testing the grant rather than the sign-in.
+  writeFileSync(
+    join(home, "credentials.json"),
+    JSON.stringify({ accessToken: "test", refreshToken: "test", user: { id: "u", email: "t@example.com" } }),
+  );
+
+  try {
+    const { createAgentSessionServices } = await import("@earendil-works/pi-coding-agent");
+    const services = await createAgentSessionServices({
+      cwd: REPO,
+      agentDir,
+      resourceLoaderOptions: {
+        additionalExtensionPaths: [join(REPO, "extensions", "privateer-media.ts")],
+      } as any,
+    });
+    const mine = services.resourceLoader
+      .getExtensions()
+      .extensions.filter((e: any) => String(e.path).includes("privateer-media"));
+    assert.equal(mine.length, 1, "privateer-media did not load via -e");
+    const tools = (mine[0] as any).tools;
+    return tools instanceof Map ? [...tools.keys()] : Object.keys(tools ?? {});
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("extensions: a granted subagent child gets the billing media tools", async () => {
+  const tools = await loadMediaAsChild("generate_sfx,generate_music");
+  assert.ok(tools.includes("video_compose"), `expected video_compose, got: ${tools.join(", ")}`);
+  assert.ok(
+    tools.includes("generate_sfx") && tools.includes("generate_video"),
+    `a granted child should be able to generate, got: ${tools.join(", ")}`,
+  );
+});
+
+test("extensions: an ungranted subagent child can compose but not generate", async () => {
+  const tools = await loadMediaAsChild(undefined);
+  assert.deepEqual(
+    tools.filter((t) => t.startsWith("generate_")),
+    [],
+    "an unattended child with no spend grant must not be handed tools its gate will only deny",
+  );
+  assert.ok(
+    tools.includes("video_compose"),
+    "it must still be able to cut together what its parent generated — that is local ffmpeg, no spend",
+  );
+});

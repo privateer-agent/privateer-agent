@@ -32,6 +32,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import * as priv from "../src/auth/privateer.ts";
 import { paletteFor } from "../src/ui/palette.ts";
 import { noQuarterActive, setNoQuarter } from "../src/permissions/noQuarter.ts";
+import { childSpendAllows } from "../src/permissions/childSpend.ts";
 import type { PermissionMode } from "../src/config/permissionMode.ts";
 
 const MODES: PermissionMode[] = ["default", "acceptEdits", "bypass", "plan"];
@@ -429,6 +430,12 @@ const gate = makePermissionGate({
   // which subagent children inherit through the env. See src/permissions/noQuarter.ts.
   getSkipAllPermissions: noQuarterActive,
   remoteAsk: bridge.remoteAsk,
+  // Billing tools this process was authorized for BEFORE it started. Only ever non-empty
+  // inside a subagent child whose parent handed one down (childSpend.ts reads the env only
+  // when pi-subagents has marked us a child), so a terminal keeps asking its human. This
+  // is what lets an unattended run delegate a shot to a subagent: without it the child's
+  // gate denies every generate_* call, having no one to ask.
+  isSpendPreauthorized: (req) => childSpendAllows(req.tool),
 });
 
 export default function privateerControl(pi: any): void {

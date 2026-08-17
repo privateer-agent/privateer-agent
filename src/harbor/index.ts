@@ -68,6 +68,8 @@ import { isHosted, publishRelayPub, webEnabled, mediaEnabled } from "../config/h
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
 import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
 import { COMPOSE_TOOL_NAMES } from "../tools/videoCompose.ts";
+import { BILLED_MEDIA_TOOLS } from "../permissions/classify.ts";
+import { grantChildSpend } from "../permissions/childSpend.ts";
 
 // The safe, read-only toolset for unattended runs — Pi builtins with no
 // write/edit/bash, so a routine firing with nobody watching can't mutate the
@@ -129,6 +131,11 @@ const GATE_TIMEOUT_MS = 5 * 60_000;
 // endpoint or an expired OAuth token from stalling a scheduled run.
 const WARM_TIMEOUT_MS = Number(process.env.PRIVATEER_MCP_WARM_MS) || 30_000;
 const WARM_POLL_MS = 250;
+
+// Distinguishes concurrent runs in the child-spend registry. A counter rather than a
+// timestamp: two runs starting in the same millisecond would share a key, and the second
+// to finish would release a grant the first still holds.
+let runSeq = 0;
 
 interface HarborConfig {
   defaultModel: string;
@@ -789,8 +796,14 @@ export class Harbor {
   // activation, so the build is serialized (serializeBuild) and the previous value is
   // restored. "__none__" is its sentinel for "register none": an unattended run with
   // no connector selectors gets no direct tools, whatever a shared mcp.json says.
-  private buildSessionServices(cwd: string, directTools: string[], media?: ResultMedia): Promise<any> {
+  private buildSessionServices(
+    cwd: string,
+    directTools: string[],
+    media?: ResultMedia,
+    spendGrant: readonly string[] = [],
+  ): Promise<any> {
     return serializeBuild(async () => {
+      const granted = new Set(spendGrant);
       const gate: GateController = {
         getMode: () => "bypass",
         setMode: () => {},
@@ -801,6 +814,14 @@ export class Harbor {
         async localAsk() {
           return "deny";
         },
+        // The billing media tools THIS run was granted. Without this the run below is a
+        // contradiction: a routine may name generate_video (naming it is the operator's
+        // decision — see MEDIA_GEN_TOOLS above), the tool registers, and then every call
+        // is denied, because `alwaysAsk` outranks bypass and localAsk has nobody to ask.
+        // Scoped to this session's gate rather than a process-wide switch, so two
+        // concurrent runs can hold different grants. The gate still refuses to let a
+        // grant cover a call that leaves cwd or reads a protected file.
+        isSpendPreauthorized: (req) => granted.has(req.tool),
       };
       // Every extension this session gets, in the one canonical order — including the MCP
       // adapter (Phase 5), the web/media capability shaping, and the filter that ignores
@@ -945,8 +966,14 @@ export class Harbor {
     // is going to the user's own mailbox, which `delivery: cloud` already chose.
     const allowedTools = spec.media ? [...resolved.tools, ATTACH_RESULT_TOOL] : resolved.tools;
     const { directToolsEnv, notes } = resolved;
+    // The billing tools this run may use: the ones its own allow-list names, and no
+    // others. Authorizes the run's own calls (the gate, below) and its subagents' —
+    // children are a separate process and read the grant from the environment, released
+    // in the finally so it can never outlive the run that holds it.
+    const spendGrant = allowedTools.filter((t) => BILLED_MEDIA_TOOLS.has(t));
+    const releaseChildSpend = grantChildSpend(`run:${++runSeq}`, spendGrant);
     try {
-      const services = await this.buildSessionServices(spec.cwd, directToolsEnv, spec.media);
+      const services = await this.buildSessionServices(spec.cwd, directToolsEnv, spec.media, spendGrant);
 
       const { provider, modelId } = parseSpec(spec.model);
       if (provider === "privateer") {
@@ -996,6 +1023,9 @@ export class Harbor {
         // and its entry must survive a harbor run's teardown (see providers/account.ts).
         try { await dropPersistedAccountCredential(); } catch { /* nothing persisted */ }
       }
+      // Drop this run's child grant. Unconditional and last: a grant left behind would
+      // authorize the NEXT run's subagents for tools that run never named.
+      releaseChildSpend();
     }
     return { out, status, error, notes };
   }

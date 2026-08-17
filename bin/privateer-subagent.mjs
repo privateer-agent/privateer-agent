@@ -35,8 +35,15 @@ const REPO = resolve(HERE, ".."); // repo root
 // which build their moat from factories and have no `-e` list to hand down. Those get the
 // floor and nothing else: gate = the permission moat (fail-closed, forwards the child's
 // approvals to the parent); privacy = ZDR/TEE posture + attestation dispatcher; account =
-// the privateer/* provider, so a child can run account models. Deliberately narrower than
-// a terminal's — an unattended run's children have no human to approve a tool that spends.
+// the privateer/* provider, so a child can run account models.
+//
+// media is here for the work an unattended run most wants to delegate — a film is a
+// per-shot job, and a shot per subagent is the shape that fits. It is SAFE to list
+// unconditionally because the extension shapes itself rather than trusting its position
+// on this list: video_compose (local ffmpeg, no spend) always registers, and the billing
+// generate_* tools register only when the parent handed this child an explicit spend
+// grant. See extensions/privateer-media.ts and src/permissions/childSpend.ts. Still
+// narrower than a terminal's list — no web, no MCP, no brand/hints/update surface.
 export function moatExtensionPaths(repoRoot = REPO, env = process.env) {
   const inherited = (env.PRIVATEER_CHILD_EXTENSIONS ?? "")
     .split(delimiter)
@@ -47,6 +54,7 @@ export function moatExtensionPaths(repoRoot = REPO, env = process.env) {
     join(repoRoot, "extensions", "privateer-gate.ts"),
     join(repoRoot, "extensions", "privateer-privacy.ts"),
     join(repoRoot, "extensions", "privateer-account.ts"),
+    join(repoRoot, "extensions", "privateer-media.ts"),
   ];
 }
 

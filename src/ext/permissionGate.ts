@@ -53,6 +53,11 @@ export interface GateController {
   // launch flag (env PRIVATEER_NO_QUARTER); when true the gate auto-allows every
   // action with no prompt.
   getSkipAllPermissions?(): boolean;
+  // Billing tools the operator authorized before this run started, so an unattended
+  // session can spend what it was told it may spend instead of denying every media
+  // call for want of a human. Lifts `alwaysAsk` and nothing else — see
+  // ModeGate.isSpendPreauthorized for the guards.
+  isSpendPreauthorized?(req: PermissionRequest): boolean;
   // Block a tool outright while the turn is remote-driven (only consulted when
   // getRemote() is true). For tools whose own prompts render on the host terminal
   // rather than the relay — e.g. pi-subagents — so a driven turn can't wedge on an
@@ -144,6 +149,7 @@ export async function decideToolCall(
     getNoQuarter: ctrl.getNoQuarter,
     getAutoApprove: ctrl.getAutoApprove,
     getSkipAllPermissions: ctrl.getSkipAllPermissions,
+    isSpendPreauthorized: ctrl.isSpendPreauthorized,
   });
 
   let decision: "allow" | "deny";
