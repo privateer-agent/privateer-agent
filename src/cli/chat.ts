@@ -580,6 +580,41 @@ async function main() {
     const t = TIERS[res.tier];
     const color = t.posture === "green" ? GREEN : t.posture === "yellow" ? YELLOW : DIM;
     console.log(`\n${color}⛉ ${t.label}${RESET} ${DIM}(${res.tier}${res.teePosture ? "/" + res.teePosture : ""}) — ${t.blurb}${RESET}${res.error ? `\n${RED}  ${res.error}${RESET}` : ""}`);
+    // What the verified quote says about the enclave that answered (Phala today). The
+    // ordering here is the point: the self-consistency checks PASSED to get this far,
+    // so they are stated as fact; the image identity is only ever "same as last time",
+    // so it is stated as memory. Never let the second read like the first.
+    const enclave = "enclaveIdentity" in res ? res.enclaveIdentity : undefined;
+    if (enclave) {
+      const { measurements, identity, pin } = enclave;
+      console.log(`${DIM}  event log replays to the signed registers; app_compose matches the attested compose-hash${RESET}`);
+      if (enclave.skippedChecks.length) {
+        console.log(`${YELLOW}  not checked (no material in the report): ${enclave.skippedChecks.join(", ")}${RESET}`);
+      }
+
+      if (pin.state === "changed") {
+        // The one line here that should stop a reader. Not a failure — Phala upgrades
+        // the gateway legitimately — but it is the only moment we can ever detect a
+        // swapped image, so it must not read like routine output.
+        console.log(`${YELLOW}  ⚠ enclave image CHANGED since ${pin.firstSeenAt ?? "first use"}:${RESET}`);
+        for (const line of pin.changed) console.log(`${YELLOW}      ${line}${RESET}`);
+      } else if (pin.state === "first-seen") {
+        console.log(`${DIM}  image recorded on first use — no prior value to compare against${RESET}`);
+      } else {
+        console.log(`${DIM}  image unchanged since ${pin.firstSeenAt ?? "first use"}${RESET}`);
+      }
+
+      for (const [name, value] of Object.entries({ ...measurements, ...identity })) {
+        if (value) console.log(`${DIM}    ${name.padEnd(12)} ${value}${RESET}`);
+      }
+      if (enclave.repoCommit) {
+        console.log(`${DIM}  declares source ${enclave.repoUrl ?? "?"} @ ${enclave.repoCommit}${RESET}`);
+        console.log(`${DIM}    (self-declared — the quote does not prove this binary came from that commit)${RESET}`);
+      }
+      if (enclave.downstreamDomain) {
+        console.log(`${DIM}  forwards to ${enclave.downstreamDomain} — a separate trust domain we do not attest${RESET}`);
+      }
+    }
   }
 
   async function remoteAccess(on: boolean) {

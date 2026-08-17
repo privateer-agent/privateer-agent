@@ -31,7 +31,7 @@ import http from "node:http";
 import { Readable } from "node:stream";
 import { SecureClient } from "tinfoil";
 import { serverBaseUrl } from "../auth/privateer.ts";
-import { attestPhala, phalaSealedFetch } from "./phalaSeal.ts";
+import { attestPhala, phalaSealedFetch, type PhalaEnclaveIdentity } from "./phalaSeal.ts";
 import { iterateSSE } from "./phala/sse.ts";
 
 // Providers whose enclave supports application-layer body encryption + client-verified
@@ -109,6 +109,11 @@ export interface SealedAttestation {
   ok: boolean;
   enclave?: string;
   error?: string;
+  // Phala only: what the verified quote says about the enclave that answered (see
+  // phalaSeal.ts). Distinct from `enclave` above, which is Tinfoil's enclave URL —
+  // Tinfoil's SecureClient verifies its enclave internally and exposes no equivalent
+  // identity, so a green Tinfoil result carries none of this. Absence is not a failure.
+  enclaveIdentity?: PhalaEnclaveIdentity;
 }
 
 // Drive the provider's client-side attestation (the SAME client/keyset the shim

@@ -34,6 +34,13 @@ import {
 // refuses. This wrapper delegates ed25519 to it unchanged and adds the secp256k1 arm
 // the spec allows (§4.3), leaving aci-verifier/ pristine for re-pulls.
 import { verifyAciReportBinding } from "./phala/reportBinding.ts";
+import {
+  parseEventLog,
+  appIdentityFrom,
+  checkReportConsistency,
+  type PhalaAppIdentity,
+} from "./phala/measurements.ts";
+import { checkPin, type PinResult } from "./phala/pin.ts";
 import { serverBaseUrl } from "../auth/privateer.ts";
 
 const DEFAULT_ACCEPTABLE_TCB = ["UpToDate"];
@@ -56,6 +63,51 @@ function acceptableTcb(): Set<string> {
   return new Set(list);
 }
 
+// The launch measurements carried by a verified TDX quote. MRTD measures the initial
+// TD build (the dstack OS image); RTMR0-2 accumulate firmware/kernel/config and RTMR3
+// carries the app-level extensions (compose hash, app id).
+//
+// READING these is not CHECKING them. Nothing here compares a measurement against a
+// known-good value, so they are evidence to display and pin later — never a verdict.
+// The quote's signature is verified before we get here, so the bytes are authentic:
+// what is unproven is that this particular image is the one we intend to be talking to.
+export interface PhalaMeasurements {
+  mrTd: string;
+  rtMr0: string;
+  rtMr1: string;
+  rtMr2: string;
+  rtMr3: string;
+}
+
+// Pull the measurements off a verified quote report (TD1.0/1.5 layouts), or undefined
+// when the report carries no TD measurement block (e.g. an SGX quote).
+export function extractQuoteMeasurements(report: Report): PhalaMeasurements | undefined {
+  const td = report.asTd10?.() ?? report.asTd15?.()?.base;
+  const fields = [td?.mrTd, td?.rtMr0, td?.rtMr1, td?.rtMr2, td?.rtMr3];
+  // All five or none. A partial set still reads as evidence while silently omitting
+  // the register that would have contradicted it — RTMR3 (the app layer) most of all.
+  if (fields.some((f) => !f?.length)) return undefined;
+  const [mrTd, rtMr0, rtMr1, rtMr2, rtMr3] = fields.map((f) => toHex(new Uint8Array(f as Uint8Array)));
+  return { mrTd, rtMr0, rtMr1, rtMr2, rtMr3 };
+}
+
+// Everything we can say about the enclave that answered, once its quote verified.
+// `measurements` and `identity` are what the hardware signed; `pin` is our own memory
+// of it; the provenance and downstream fields are the enclave's self-declarations,
+// carried for display precisely because they are NOT proven by the quote.
+export interface PhalaEnclaveIdentity {
+  measurements: PhalaMeasurements;
+  identity: PhalaAppIdentity;
+  pin: PinResult;
+  // Self-consistency checks we could not run (absent event log / app_compose). Named
+  // so "we didn't check" can never be read as "we checked and it passed".
+  skippedChecks: string[];
+  repoUrl?: string;
+  repoCommit?: string;
+  downstreamDomain?: string;
+  downstreamSpkiSha256?: string;
+}
+
 // The 64-byte report_data from a verified TDX quote report (TD1.0/1.5 layouts).
 function extractQuoteReportData(report: Report): Uint8Array {
   const td10 = report.asTd10?.();
@@ -70,6 +122,9 @@ function extractQuoteReportData(report: Report): Uint8Array {
 interface VerifiedAttestation {
   report: AttestationReport;
   verification: ReportVerification;
+  // Absent when the hardware quote was skipped (requireQuote off): with no verified
+  // quote there is nothing about the enclave we are entitled to show.
+  enclave?: PhalaEnclaveIdentity;
 }
 
 // Attest once, cache the verified report; drop the memo on failure so a later call
@@ -103,17 +158,24 @@ async function establishAttestation(): Promise<VerifiedAttestation> {
     const failed = verification.checks.filter((c) => !c.ok).map((c) => c.name).join(", ");
     throw new Error(`phala attestation binding failed: ${failed}`);
   }
-  await verifyHardwareQuote(report);
-  return { report, verification };
+  const enclave = await verifyHardwareQuote(report);
+  return { report, verification, enclave };
 }
 
-async function verifyHardwareQuote(report: AttestationReport): Promise<void> {
-  if (!requireQuote()) return;
+async function verifyHardwareQuote(report: AttestationReport): Promise<PhalaEnclaveIdentity | undefined> {
+  if (!requireQuote()) return undefined;
 
   const attestation = report.attestation as unknown as {
     tee_type?: string;
     report_data?: string;
-    evidence?: { quote?: string; quote_report_data?: string };
+    source_provenance?: { repo_url?: string; repo_commit?: string };
+    evidence?: {
+      quote?: string;
+      quote_report_data?: string;
+      event_log?: unknown;
+      app_compose?: unknown;
+      downstream_tls_binding?: { domain?: string; spki_sha256?: string };
+    };
   };
   const teeType = String(attestation?.tee_type || "");
   if (teeType !== "tdx") throw new Error(`phala: unsupported/absent tee_type "${teeType}" (only tdx is wired)`);
@@ -141,14 +203,74 @@ async function verifyHardwareQuote(report: AttestationReport): Promise<void> {
   if (typeof declared === "string" && declared && toHex(quoteReportData) !== declared.toLowerCase()) {
     throw new Error("phala: evidence.quote_report_data does not match the verified quote");
   }
+
+  // 4) The quote is authentic, so its measurement registers are trustworthy bytes.
+  const measurements = extractQuoteMeasurements(verified.report);
+  if (!measurements) return undefined; // non-TD quote: nothing further to check
+
+  // 5) SELF-CONSISTENCY GATES. The event log must replay to the registers the hardware
+  //    signed, and the shipped app_compose must hash to the compose-hash the log
+  //    attests. Both are checkable from the report alone, so a failure means the report
+  //    is doctored or malformed — refuse it rather than showing a green shield over it.
+  const events = parseEventLog(attestation.evidence?.event_log);
+  const identity = appIdentityFrom(events);
+  const consistency = checkReportConsistency({
+    events,
+    quoted: measurements,
+    appCompose: attestation.evidence?.app_compose,
+    identity,
+  });
+  if (!consistency.ok) {
+    const failed = consistency.checks.filter((c) => !c.ok).map((c) => `${c.name} (${c.detail})`).join("; ");
+    throw new Error(`phala: attestation self-consistency failed: ${failed}`);
+  }
+
+  // 6) IDENTITY, as evidence only. TOFU against the stored pin — this can say the image
+  //    CHANGED, never that it is the right one (no published registry to check against;
+  //    see phala/pin.ts). It moves no verdict and never throws.
+  const pin = checkPin({
+    mrTd: measurements.mrTd,
+    rtMr0: measurements.rtMr0,
+    rtMr1: measurements.rtMr1,
+    rtMr2: measurements.rtMr2,
+    appId: identity.appId,
+    composeHash: identity.composeHash,
+    osImageHash: identity.osImageHash,
+    mrKms: identity.mrKms,
+  });
+
+  const provenance = attestation.source_provenance;
+  const downstream = attestation.evidence?.downstream_tls_binding;
+  return {
+    measurements,
+    identity,
+    pin,
+    skippedChecks: consistency.skipped,
+    // Named so a human can go read the source; self-declared by the enclave and NOT
+    // proven by the quote (image_digest/image_provenance come back null), so it is a
+    // pointer to audit, never evidence that this binary came from that commit.
+    repoUrl: provenance?.repo_url,
+    repoCommit: provenance?.repo_commit,
+    // The attested enclave forwards to this downstream host over TLS. Surfaced because
+    // it marks where our attested boundary ENDS — that host is a separate trust domain
+    // we do not attest.
+    downstreamDomain: downstream?.domain,
+    downstreamSpkiSha256: downstream?.spki_sha256,
+  };
 }
 
 // Posture signal: does the attested keyset verify (crypto binding + hardware quote)?
-// A green result is a quote WE checked, bound to the E2EE key we seal to.
-export async function attestPhala(): Promise<{ ok: boolean; error?: string }> {
+// A green result is a quote WE checked, bound to the E2EE key we seal to. The
+// measurements ride along as evidence of WHICH image answered — unpinned, so they
+// inform the display without moving the verdict.
+export async function attestPhala(): Promise<{
+  ok: boolean;
+  error?: string;
+  enclaveIdentity?: PhalaEnclaveIdentity;
+}> {
   try {
-    await attest();
-    return { ok: true };
+    const { enclave } = await attest();
+    return { ok: true, enclaveIdentity: enclave };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }

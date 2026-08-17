@@ -36,6 +36,7 @@ import {
   ensureSealedShim,
   attestSealed,
 } from "./sealedShim.ts";
+import type { PhalaEnclaveIdentity } from "./phalaSeal.ts";
 
 // Seed/fallback catalog: registered synchronously so the account provider has real
 // models the instant it loads (before the live /api/models fetch resolves) — in
@@ -502,6 +503,10 @@ export interface AccountPosture {
   tier: PrivacyTier;
   teePosture?: "green" | "yellow" | "red";
   error?: string;
+  // Phala sealed path only: what the verified quote says about the enclave that
+  // answered. Evidence about WHICH image it was, not part of the verdict — the tier
+  // above is decided by the crypto binding + quote alone. See phalaSeal.ts.
+  enclaveIdentity?: PhalaEnclaveIdentity;
 }
 
 // Posture for an account-channel model. For NEAR models the attestation is fetched
@@ -526,7 +531,9 @@ export async function accountPosture(modelId: string): Promise<AccountPosture> {
   const sealedProvider = sealedEnabled() ? sealedProviderFor(modelId) : null;
   if (sealedProvider) {
     const att = await attestSealed(sealedProvider);
-    return att.ok ? { tier: "tee-verified" } : { tier: "tee-unverified", error: att.error };
+    return att.ok
+      ? { tier: "tee-verified", enclaveIdentity: att.enclaveIdentity }
+      : { tier: "tee-unverified", error: att.error };
   }
   // Honest labelling for the non-NEAR enclaves when we are NOT sealing — sealed mode
   // explicitly disabled (PRIVATEER_SEALED=0), or on but the shim never came up. Tinfoil
