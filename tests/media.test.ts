@@ -8,6 +8,7 @@ import {
   MEDIA_TOOL_NAMES,
   generateImageToolDefinition,
   generateVideoToolDefinition,
+  generateModelToolDefinition,
   generateSpeechToolDefinition,
   generateMusicToolDefinition,
   mediaCapabilitiesToolDefinition,
@@ -45,6 +46,7 @@ test("the exported tool-name lists match the registered definitions", () => {
     [
       generateImageToolDefinition,
       generateVideoToolDefinition,
+      generateModelToolDefinition,
       generateSpeechToolDefinition,
       generateMusicToolDefinition,
       mediaCapabilitiesToolDefinition,
@@ -64,7 +66,7 @@ test("media generation classifies as a write against its output path", () => {
     // The classifier canonicalizes symlinks (macOS /tmp → /private/tmp), so compare
     // against the real path rather than the one mkdtemp handed back.
     const real = realpathSync(cwd);
-    for (const name of ["generate_image", "generate_video", "generate_speech", "generate_music", "video_compose"]) {
+    for (const name of ["generate_image", "generate_video", "generate_model", "generate_speech", "generate_music", "video_compose"]) {
       const req = classifyToolCall(name, { prompt: "x", path: "out/thing.png", output: "out/thing.mp4" }, { cwd });
       assert.ok(req, `${name} must be gated`);
       assert.equal(req.kind, "write", `${name} should classify as a write`);
@@ -190,6 +192,80 @@ test("an empty input image is rejected rather than uploaded as zero bytes", asyn
     writeFileSync(join(cwd, "empty.png"), "");
     const out = await callMedia(generateImageToolDefinition, cwd, { prompt: "x", path: "a.png", images: ["empty.png"] });
     assert.match(out, /empty/);
+  } finally {
+    cleanup();
+  }
+});
+
+// ── generate_model ───────────────────────────────────────────────────────────
+// A mesh is the dearest call this file registers, so everything that can be
+// refused locally must be — a request rejected by the provider is still a round
+// trip, and a request rejected by our own server after the reservation is a
+// reservation to unwind.
+
+test("generate_model refuses a call with no reference image", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    // There is no text-to-mesh path, so this is a hard refusal rather than a
+    // fallback — and the message has to say what to do instead.
+    const out = await callMedia(generateModelToolDefinition, cwd, { images: [], path: "a.glb" });
+    assert.match(out, /at least one reference image is required/i);
+    assert.match(out, /generate_image/, "the refusal should name the tool that produces the input");
+  } finally {
+    cleanup();
+  }
+});
+
+test("generate_model refuses more views than the provider takes", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    for (const n of [1, 2, 3, 4, 5]) {
+      const names = Array.from({ length: n }, (_, i) => `v${i}.png`);
+      for (const name of names) writeFileSync(join(cwd, name), "x");
+      const out = await callMedia(generateModelToolDefinition, cwd, { images: names, path: "a.glb" });
+      // 1-4 views get past validation and fail at the (unauthenticated) account
+      // call; 5 is refused locally by name.
+      if (n > 4) assert.match(out, /at most 4 reference views/i, `${n} views should be refused locally`);
+      else assert.doesNotMatch(out, /at most 4 reference views/i, `${n} views should be allowed`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("generate_model needs a path, and reports a missing view locally", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    writeFileSync(join(cwd, "front.png"), "x");
+    assert.match(await callMedia(generateModelToolDefinition, cwd, { images: ["front.png"], path: "" }), /path is required/);
+    assert.match(
+      await callMedia(generateModelToolDefinition, cwd, { images: ["nope.png"], path: "a.glb" }),
+      /input image not found: nope\.png/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("generate_model's permission prompt names every reference view", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    const real = realpathSync(cwd);
+    // The inputs are base64'd up to our servers, so the human approving the
+    // spend has to see which files are being read — the same reason
+    // generate_image's `images` feed the classifier.
+    const req = classifyToolCall(
+      "generate_model",
+      { images: ["concept/front.png", "concept/back.png"], path: "assets/crate.glb" },
+      { cwd },
+    );
+    assert.ok(req, "generate_model must be gated");
+    assert.equal(req.kind, "write");
+    assert.ok(req.alwaysAsk, "a mesh is billed egress and must never be auto-approved");
+    assert.ok(req.path?.startsWith(real));
+    // And the title has to carry the cost — this is the priciest tool here.
+    assert.match(req.title ?? "", /3D model/i);
+    assert.match(req.title ?? "", /\$/, "the prompt should state what a mesh costs");
   } finally {
     cleanup();
   }

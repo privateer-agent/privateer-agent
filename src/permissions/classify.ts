@@ -166,6 +166,7 @@ const BASH_TOOLS = new Set(["bash", "shell", "run", "exec", "sh"]);
 const MEDIA_TOOLS = new Set([
   "generate_image",
   "generate_video",
+  "generate_model",
   "generate_speech",
   "generate_music",
   "media_capabilities",
@@ -184,12 +185,17 @@ const MEDIA_TOOLS = new Set([
 const MEDIA_GEN_TOOLS = new Set([
   "generate_image",
   "generate_video",
+  "generate_model",
   "generate_speech",
   "generate_music",
 ]);
 const MEDIA_TITLES: Record<string, string> = {
   generate_image: "Generate an image (billed to your Privateer account)",
   generate_video: "Generate a video (billed to your Privateer account)",
+  // The dearest of these per call, and the one whose price moves with the
+  // options, so the title says so out loud rather than leaving the human to
+  // work it out from a JSON blob of flags.
+  generate_model: "Generate a 3D model (billed; roughly $0.32-$1.26 a mesh)",
   generate_speech: "Generate speech (billed to your Privateer account)",
   generate_music: "Generate music (billed; music prompts have no zero-retention option)",
   video_compose: "Compose video/audio locally",

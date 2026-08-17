@@ -1,5 +1,6 @@
-// Media tools for Pi's TUI: generate images, video, speech and music through the
-// signed-in Privateer account, and stitch the results together locally with ffmpeg.
+// Media tools for Pi's TUI: generate images, video, 3D meshes, speech and music
+// through the signed-in Privateer account, and stitch the results together
+// locally with ffmpeg.
 //
 // Generation is registered only when the account channel can actually serve it
 // (mediaEnabled → signed in, and HARBOR_MEDIA not explicitly off). Omitting the

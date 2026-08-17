@@ -38,6 +38,7 @@ import { apiRequest } from "../auth/privateer.ts";
 export const MEDIA_TOOL_NAMES = [
   "generate_image",
   "generate_video",
+  "generate_model",
   "generate_speech",
   "generate_music",
   "media_capabilities",
@@ -48,6 +49,18 @@ export const MEDIA_TOOL_NAMES = [
 // caller can resume the poll rather than pay for another generation.
 const VIDEO_POLL_TIMEOUT_MS = Number(process.env.PRIVATEER_VIDEO_TIMEOUT_MS) || 12 * 60_000;
 const VIDEO_POLL_INTERVAL_MS = 5_000;
+// A mesh job runs about a minute at the provider's stated typical time, and
+// several for a large face count. Same bounded-wait contract as video: the job
+// id is reported on timeout so the caller can resume the poll rather than pay
+// for a second generation.
+const MESH_POLL_TIMEOUT_MS = Number(process.env.PRIVATEER_MESH_TIMEOUT_MS) || 10 * 60_000;
+const MESH_POLL_INTERVAL_MS = 5_000;
+// Four reference views at 8 MB each would be ~43 MB of base64 — past the
+// server's own body limit, so the request would be refused by a JSON parser with
+// a message about payload size rather than about pictures. Caught here first,
+// where the message can name the files.
+const MAX_MESH_VIEWS = 4;
+const MAX_MESH_INPUT_TOTAL_BYTES = 12 * 1024 * 1024;
 // Bound what we'll upload as an input frame/reference. The server enforces its own
 // ceiling; failing here first turns a 413 into a clear, local message.
 const MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -397,6 +410,186 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+// ── 3D ───────────────────────────────────────────────────────────────────────
+
+interface ModelSubmitResponse {
+  jobId?: string;
+  status?: string;
+  model?: string;
+  format?: string;
+  estimatedUsd?: number;
+}
+interface ModelStatusResponse {
+  status?: string;
+  message?: string;
+  format?: string;
+  mimeType?: string;
+  data?: string;
+  delivered?: boolean;
+  model?: string;
+}
+
+export const generateModelToolDefinition = {
+  name: "generate_model",
+  label: "Generate 3D Model",
+  description:
+    "Generate a 3D MESH — a .glb (or .obj) file for a game engine or DCC tool — from one or more " +
+    "reference images. (This makes 3D geometry; it has nothing to do with language models.) There is no " +
+    "text-to-mesh here: generate the concept art with generate_image first, look at it, and pass that " +
+    "path as `images` — which also means the shape is generated from a look someone approved rather " +
+    "than from a sentence. Supply up to four views (front, back, left, right) of the SAME object to stop " +
+    "the model inventing the sides it cannot see; that costs $0.15 more and is usually worth it. " +
+    "Generation takes a minute or more and this tool waits for it. EXPENSIVE and billed to the user's " +
+    "Privateer account: roughly $0.32-$1.26 a mesh depending on the options, so plan the asset before " +
+    "calling and tell the user the total before batching dozens of them. PRIVACY: 3D " +
+    "generation runs on a provider with no zero-retention option, so it is gated — a ZDR account must " +
+    "have enabled non-ZDR media. Call media_capabilities first if unsure.",
+  parameters: Type.Object({
+    images: Type.Array(Type.String(), {
+      description:
+        "Paths to reference images of one object, best view first. 1-4 of them, read as front, back, left, right. " +
+        "More views cost $0.15 extra in total (not each) and give the model the sides it would otherwise invent.",
+    }),
+    path: Type.String({
+      description:
+        "Where to write the mesh, relative to cwd or absolute (e.g. 'assets/props/crate.glb'). " +
+        "The extension is corrected to whatever container is actually delivered.",
+    }),
+    format: Type.Optional(
+      Type.String({
+        description:
+          "Container: 'glb' (default) or 'obj'. Prefer glb — it is the only one that carries the " +
+          "materials, so an 'obj' of a textured mesh arrives as bare geometry, and 'obj' is not produced " +
+          "at all for generateType 'Geometry'. Falls back to glb whenever the provider doesn't render it.",
+      }),
+    ),
+    generateType: Type.Optional(
+      Type.String({
+        description:
+          "'Normal' ($0.375, default) — textured mesh. 'LowPoly' ($0.45) — retopologised, best for a game " +
+          "asset that will deform or needs clean edges; dearer because it is more work, not less. " +
+          "'Geometry' ($0.225) — untextured geometry only, for blockouts and greyboxing.",
+      }),
+    ),
+    polygonType: Type.Optional(
+      Type.String({
+        description:
+          "'triangle' (default) or 'quadrilateral'. Quads deform far better under animation, so choose them " +
+          "for anything that will be rigged; triangles are fine for static props.",
+      }),
+    ),
+    faceCount: Type.Optional(
+      Type.Number({
+        description:
+          "Target face budget, 1000-500000, honoured exactly. ADDS $0.15 because the provider charges for " +
+          "a custom count. Leaving it unset is cheaper but uses the provider's 500k default — measured at " +
+          "8.6 MB untextured and 64 MB textured, against 15 MB for a textured 60k mesh. Set it for " +
+          "anything going into a game.",
+      }),
+    ),
+    pbr: Type.Optional(
+      Type.Boolean({
+        description:
+          "Generate PBR materials (base colour, normal, roughness/metallic) instead of a flat texture. " +
+          "ADDS $0.15. Essential for anything lit by a modern engine. Cannot be combined with generateType 'Geometry'.",
+      }),
+    ),
+    model: Type.Optional(Type.String({ description: "Override the account's 3D model. Leave unset to use the account default." })),
+  }),
+  async execute(
+    _toolCallId: string,
+    params: {
+      images: string[]; path: string; format?: string; generateType?: string;
+      polygonType?: string; faceCount?: number; pbr?: boolean; model?: string;
+    },
+    signal?: AbortSignal,
+    _onUpdate?: unknown,
+    ctx?: { cwd?: string },
+  ) {
+    const cwd = ctx?.cwd ?? process.cwd();
+    const paths = params.images ?? [];
+    if (paths.length === 0) return text("Error: at least one reference image is required — generate one with generate_image first.");
+    if (paths.length > MAX_MESH_VIEWS) {
+      return text(`Error: at most ${MAX_MESH_VIEWS} reference views (front, back, left, right); got ${paths.length}.`);
+    }
+    if (!params.path) return text("Error: path is required — say where to save the mesh.");
+
+    let images: { data: string; mimeType: string }[];
+    try {
+      images = paths.map((p) => readInputImage(cwd, p));
+    } catch (e) {
+      return text(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // base64 is 4 bytes per 3, so compare decoded sizes against the decoded cap.
+    const totalBytes = images.reduce((sum, img) => sum + Math.floor((img.data.length * 3) / 4), 0);
+    if (totalBytes > MAX_MESH_INPUT_TOTAL_BYTES) {
+      return text(
+        `Error: the reference views total ${(totalBytes / 1048576).toFixed(1)} MB; the limit for one request is ` +
+          `${MAX_MESH_INPUT_TOTAL_BYTES / 1048576} MB. Use fewer views, or downscale them first.`,
+      );
+    }
+
+    const submitted = await callAccount<ModelSubmitResponse>("/api/agent/media/models", {
+      method: "POST",
+      signal,
+      body: {
+        images,
+        ...(params.format ? { format: params.format } : {}),
+        ...(params.generateType ? { generateType: params.generateType } : {}),
+        ...(params.polygonType ? { polygonType: params.polygonType } : {}),
+        ...(params.faceCount != null ? { faceCount: params.faceCount } : {}),
+        ...(params.pbr ? { pbr: true } : {}),
+        ...(params.model ? { model: params.model } : {}),
+      },
+    });
+    if (!submitted.ok) return text(`3D generation failed: ${submitted.message}`);
+    const jobId = submitted.data.jobId;
+    if (!jobId) return text("3D generation failed: Privateer did not return a job id.");
+
+    // Poll to completion. The account is charged when the provider delivers, so an
+    // abandoned poll still costs money — hence the timeout message names the job id.
+    const deadline = Date.now() + MESH_POLL_TIMEOUT_MS;
+    const cancelled = () =>
+      text(`3D job ${jobId} was submitted but the wait was cancelled. It is still running and will still be billed.`);
+    for (;;) {
+      if (signal?.aborted) return cancelled();
+      await sleep(MESH_POLL_INTERVAL_MS, signal);
+      if (signal?.aborted) return cancelled();
+      const poll = await callAccount<ModelStatusResponse>(`/api/agent/media/models/${encodeURIComponent(jobId)}`, {
+        method: "GET",
+        signal,
+      });
+      if (!poll.ok) return text(`3D job ${jobId} could not be polled: ${poll.message}`);
+
+      const status = String(poll.data.status ?? "").toLowerCase();
+      if (status === "failed") return text(`3D generation failed: ${poll.data.message ?? "the provider reported a failure"}.`);
+      if (status === "completed") {
+        if (!poll.data.data) {
+          return text(`3D job ${jobId} already delivered its bytes on an earlier poll; they were not saved. Generate again if the file is missing.`);
+        }
+        // The delivered container wins over the requested one. Writing GLB bytes
+        // into a path someone named `.fbx` produces a file that opens nowhere and
+        // a bug report about the importer.
+        const delivered = String(poll.data.format || "glb").toLowerCase();
+        const target = abs(cwd, params.path);
+        const asked = extname(target).replace(/^\./, "").toLowerCase();
+        const out = `${target.slice(0, target.length - extname(target).length)}.${delivered}`;
+        const summary = writeOut(out, Buffer.from(poll.data.data, "base64"));
+        const note = asked && asked !== delivered
+          ? `\n(Asked for .${asked}; the provider returned ${delivered.toUpperCase()}, so the file was saved with that extension.)`
+          : "";
+        return text(`Generated 3D model with ${poll.data.model ?? submitted.data.model ?? "the account 3D model"}: ${summary}${note}`);
+      }
+      if (Date.now() > deadline) {
+        return text(
+          `3D job ${jobId} is still ${status || "running"} after ${Math.round(MESH_POLL_TIMEOUT_MS / 60000)} minutes. ` +
+            "It will still complete and still be billed; nothing was saved here.",
+        );
+      }
+    }
+  },
+};
+
 // ── Audio ────────────────────────────────────────────────────────────────────
 
 interface AudioResponse {
@@ -500,6 +693,17 @@ export const generateMusicToolDefinition = {
 interface CapabilitiesResponse {
   image?: { model?: string; blockedByZdr?: boolean; maxPerCall?: number };
   video?: { model?: string; blockedByZdr?: boolean; durations?: number[] | null; aspectRatios?: string[] | null };
+  model3d?: {
+    model?: string;
+    configured?: boolean;
+    blockedByZdr?: boolean;
+    formats?: string[];
+    generateTypes?: string[];
+    polygonTypes?: string[];
+    faceCount?: { min?: number; max?: number } | null;
+    maxViews?: number;
+    priceUsd?: { min?: number; max?: number } | null;
+  };
   privacy?: { requireZdr?: boolean; allowNonZdrMedia?: boolean };
 }
 
@@ -517,16 +721,34 @@ export const mediaCapabilitiesToolDefinition = {
     const r = await callAccount<CapabilitiesResponse>("/api/agent/media/capabilities", { method: "GET", signal });
     if (!r.ok) return text(`Could not read media capabilities: ${r.message}`);
 
-    const { image, video, privacy } = r.data;
+    const { image, video, model3d, privacy } = r.data;
     const lines = [
       `Image model: ${image?.model ?? "unknown"}${image?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : ""}`,
       `  up to ${image?.maxPerCall ?? 1} image(s) per call`,
       `Video model: ${video?.model ?? "unknown"}${video?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : ""}`,
       `  clip lengths: ${video?.durations?.length ? `${video.durations.join(", ")}s` : "model default only"}`,
       `  aspect ratios: ${video?.aspectRatios?.length ? video.aspectRatios.join(", ") : "model default only"}`,
-      `Privacy: requireZdr=${privacy?.requireZdr ?? "?"}, allowNonZdrMedia=${privacy?.allowNonZdrMedia ?? "?"}`,
     ];
-    if (image?.blockedByZdr || video?.blockedByZdr) {
+
+    // 3D has two independent refusals — our deployment missing a provider key,
+    // and the user's own privacy setting — and telling someone to change a
+    // preference that isn't the problem wastes a turn each way.
+    if (model3d?.configured === false) {
+      lines.push("3D model generation: NOT AVAILABLE on this deployment (no provider key). Do not call generate_model.");
+    } else {
+      lines.push(
+        `3D model: ${model3d?.model ?? "unknown"}${model3d?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : ""}`,
+        `  formats: ${model3d?.formats?.length ? model3d.formats.join(", ") : "glb"}` +
+          `; types: ${model3d?.generateTypes?.length ? model3d.generateTypes.join(", ") : "Normal"}` +
+          `; topology: ${model3d?.polygonTypes?.length ? model3d.polygonTypes.join(", ") : "triangle"}`,
+        `  up to ${model3d?.maxViews ?? 4} reference views; faceCount ${model3d?.faceCount?.min ?? "?"}-${model3d?.faceCount?.max ?? "?"}`,
+        `  cost: $${(model3d?.priceUsd?.min ?? 0).toFixed(2)}-$${(model3d?.priceUsd?.max ?? 0).toFixed(2)} charged per mesh, ` +
+          "depending on generateType and the pbr / multi-view / faceCount surcharges",
+      );
+    }
+
+    lines.push(`Privacy: requireZdr=${privacy?.requireZdr ?? "?"}, allowNonZdrMedia=${privacy?.allowNonZdrMedia ?? "?"}`);
+    if (image?.blockedByZdr || video?.blockedByZdr || model3d?.blockedByZdr) {
       lines.push(
         "A [BLOCKED] model means the account requires Zero Data Retention and that model has no ZDR endpoint. " +
           "Only the account owner can change it (Settings → Privacy); do not keep retrying.",
@@ -538,7 +760,7 @@ export const mediaCapabilitiesToolDefinition = {
 };
 
 /**
- * Extension factory registering all five media tools. Used by the surfaces that build
+ * Extension factory registering all six media tools. Used by the surfaces that build
  * their session from an explicit `extensionFactories` list (harbor, channels, ACP, the
  * REPL); the interactive TUI picks the same definitions up through
  * `extensions/privateer-media.ts`, which the launcher passes it as an `-e` argument.
@@ -547,6 +769,7 @@ export function makeMediaTools() {
   return (pi: { registerTool?: (def: unknown) => void }): void => {
     pi.registerTool?.(generateImageToolDefinition);
     pi.registerTool?.(generateVideoToolDefinition);
+    pi.registerTool?.(generateModelToolDefinition);
     pi.registerTool?.(generateSpeechToolDefinition);
     pi.registerTool?.(generateMusicToolDefinition);
     pi.registerTool?.(mediaCapabilitiesToolDefinition);
