@@ -14,6 +14,7 @@ import { cliPalette } from "../ui/palette.ts"; // no Pi deps → safe pre-boot
 import { noQuarterActive, setNoQuarter } from "../permissions/noQuarter.ts"; // no Pi deps → safe pre-boot
 import type { GateController } from "../ext/permissionGate.ts"; // type-only → erased, safe pre-boot
 import { createUIContext } from "../ext/headlessUi.ts"; // no Pi deps → safe pre-boot
+import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts"; // node:child_process only → safe pre-boot
 
 // This lean REPL has no Pi TUI (and so no Theme), so it detects the terminal background
 // itself (COLORFGBG) and picks a palette — on a light terminal the standard "\x1b[33m"
@@ -47,6 +48,7 @@ async function main() {
     persistAccountCredential,
     dropPersistedAccountCredential,
     ensureAccountArmed,
+    verificationLink,
   } = await import("../providers/account.ts");
   const { modelRegistryOf } = await import("../providers/piAuthStore.ts");
   const { agentVersion } = await import("../config/version.ts");
@@ -637,9 +639,24 @@ async function main() {
     try {
       const user = await priv.runDeviceLogin({
         onCode: (code: any) => {
-          console.log(`\n${CYAN}Approve this terminal in the Privateer app:${RESET}`);
-          console.log(`  code: ${YELLOW}${code.user_code}${RESET}`);
-          if (code.verification_uri_complete) console.log(`  or open: ${DIM}${code.verification_uri_complete}${RESET}`);
+          // Browser-first, the same deal the TUI's /login widget makes: the URL carries
+          // the code, so the page lands straight on Authorize and the user clicks
+          // rather than types. verificationLink makes the server's scheme-less value
+          // absolute; canOpenBrowser decides the wording SYNCHRONOUSLY (SSH or a
+          // headless box keeps the old app-approve copy, because a launcher there
+          // would open on the wrong machine); and the link is printed either way, so
+          // an open that silently fails costs nothing.
+          const uri = verificationLink(code.verification_uri_complete ?? code.verification_uri);
+          const opening = Boolean(uri) && canOpenBrowser();
+          if (opening) void openInBrowser(uri);
+          console.log(
+            opening
+              ? `\n${CYAN}Authorize this terminal in the browser window that just opened:${RESET}`
+              : `\n${CYAN}Approve this terminal in the Privateer app:${RESET}`,
+          );
+          const match = opening ? `${DIM} — check it matches the one in your browser${RESET}` : "";
+          console.log(`  code: ${YELLOW}${code.user_code}${RESET}${match}`);
+          if (uri) console.log(`  ${opening ? "no browser? open" : "or open"}: ${DIM}${uri}${RESET}`);
           console.log(`${DIM}  waiting for approval…${RESET}`);
         },
       });
