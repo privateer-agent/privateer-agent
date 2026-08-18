@@ -396,6 +396,12 @@ Download for [macOS](https://privateer.pro/download/mac) (Apple silicon),
 [macOS Intel](https://privateer.pro/download/mac-intel), or
 [Windows](https://privateer.pro/download/windows).
 
+Once it's installed, **`/desktop`** in the terminal brings it up — no Spotlight detour. It
+opens the app, not a copy of this conversation: the desktop hosts its own session, so pick
+the folder you were working in from **File ▸ Spawn Privateer at…** and it starts on the same
+model and connectors this terminal uses (the per-folder defaults live in `~/.privateer`,
+which both read).
+
 It's an early release and **not yet code-signed or notarized** — macOS will warn on first
 open. Routines and channels deliberately aren't hosted here: those belong to the always-on
 harbor, so background work still wants `privateer harbor install`.
@@ -640,6 +646,7 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/extensions` | list loaded Pi extensions |
 | `/web-tools` | point `web_search`/`web_fetch` at a search provider of your own (signed in, they already work on your account) |
 | `/init` | scaffold a starter `PRIVATEER.md` in this directory |
+| `/desktop` | open the [desktop app](#desktop-app) — same login, same per-folder defaults |
 | `/update` · `/privateer` | update to the latest release / Privateer status and posture |
 
 Shell subcommands: `privateer` (interactive), `privateer update`, `privateer harbor …`,

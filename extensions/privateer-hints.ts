@@ -25,6 +25,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { keyText } from "@earendil-works/pi-coding-agent";
 import { configPath, globalDir } from "../src/config/paths.ts";
+import { desktopAppPath } from "../src/config/desktopApp.ts";
 
 const FIRST_MS = 6_000; // a turn shorter than this never shows a tip
 const EVERY_MS = 12_000;
@@ -76,8 +77,27 @@ const HINTS: Array<() => string> = [
       ? `${k} is push-to-talk — /speak on reads the answer back`
       : `/talk types what you say — /speak on reads the answer back`;
   },
+  () => (haveDesktopApp() ? `/desktop opens the Privateer desktop app — same login, same folder defaults` : ""),
   () => `these tips are /hints — /hints off silences them`,
 ];
+
+// A hint returns "" when it doesn't apply to THIS machine, and the rotation skips
+// it. The desktop tip is the case that needs it: naming a command for an app the
+// user has is discoverability, advertising one they haven't is an ad. Memoised
+// because the rotation asks every 12 s and the answer is a stat() on a path that
+// doesn't change under a running terminal (installing the app mid-session is worth
+// a restart, not a filesystem poll).
+let desktopSeen: boolean | undefined;
+function haveDesktopApp(): boolean {
+  if (desktopSeen === undefined) {
+    try {
+      desktopSeen = desktopAppPath() !== null;
+    } catch {
+      desktopSeen = false;
+    }
+  }
+  return desktopSeen;
+}
 
 // Default ON: absent file, absent block, or unreadable JSON all mean enabled.
 // Only an explicit { hints: { enabled: false } } turns the rotation off.
@@ -119,9 +139,20 @@ export default function privateerHints(pi: any): void {
     if (restoreDefault) uiRef?.setWorkingMessage?.();
   };
 
+  // The next hint that applies here, advancing the cursor past any that opted out.
+  // Bounded by the list length, so an all-empty list ends the rotation instead of
+  // spinning through it forever.
+  const nextHint = (): string => {
+    for (let i = 0; i < HINTS.length; i++) {
+      const text = HINTS[cursor++ % HINTS.length]();
+      if (text) return text;
+    }
+    return "";
+  };
+
   const showNext = (): void => {
-    const hint = HINTS[cursor % HINTS.length]();
-    cursor++;
+    const hint = nextHint();
+    if (!hint) return; // nothing applies on this machine — leave "Working..." alone
     uiRef?.setWorkingMessage?.(`Working... · tip: ${hint}`);
     timer = setTimeout(showNext, EVERY_MS);
   };

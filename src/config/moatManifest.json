@@ -11,6 +11,7 @@
     { "name": "privateer-privacy", "entry": "extensions/privateer-privacy.ts", "note": "pi-privacy + account tier resolver" },
     { "name": "privateer-connect", "entry": "extensions/privateer-connect.ts", "note": "/connect — MCP connector manager" },
     { "name": "privateer-media", "entry": "extensions/privateer-media.ts", "note": "image/video/speech/music + ffmpeg compose" },
+    { "name": "privateer-desktop", "entry": "extensions/privateer-desktop.ts", "note": "/desktop — open the Privateer desktop app" },
     { "name": "privateer-hints", "entry": "extensions/privateer-hints.ts", "note": "rotating tips in the working line + /hints" },
     { "name": "privateer-update", "entry": "extensions/privateer-update.ts", "note": "tool pack updates in place — banner flag + /update" },
     { "name": "privateer-speak", "entry": "extensions/privateer-speak.ts", "note": "spoken responses (/speak) + voice input (/talk) — pi-speak + confidential account TTS/STT" },
