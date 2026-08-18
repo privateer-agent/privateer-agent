@@ -13,10 +13,18 @@ import type { PermissionRequest } from "../src/permissions/gate.ts";
 
 const ENV = "PRIVATEER_NO_QUARTER";
 
-// The module seeds `active` from the env at import time, so clear the flag before
-// loading it — otherwise the assertion below depends on the ambient environment.
+// The env var IS the state, so clear the flag before loading the module — otherwise
+// the assertion below depends on the ambient environment.
 delete process.env[ENV];
 const { noQuarterActive, setNoQuarter, toggleNoQuarter } = await import("../src/permissions/noQuarter.ts");
+
+// A SECOND instance of the same module. Not a contrivance: Pi loads every extension
+// with its own jiti instance and `moduleCache: false`, so extensions/privateer-gate.ts
+// and extensions/privateer-privacy.ts each get their own copy of this file. The query
+// suffix reproduces that here — two module objects, one session state.
+// (the specifier is a variable so tsc doesn't try to resolve the query suffix as a path)
+const COPY_SPECIFIER = "../src/permissions/noQuarter.ts?extension-copy";
+const copy: typeof import("../src/permissions/noQuarter.ts") = await import(COPY_SPECIFIER);
 
 const edit: PermissionRequest = { tool: "edit", kind: "edit", title: "Edit file", detail: "a.ts" };
 const bash = (cmd: string): PermissionRequest => ({ tool: "bash", kind: "bash", title: "Run", detail: cmd });
@@ -33,6 +41,18 @@ test("toggling mirrors the env, so subagent children inherit the posture", () =>
   assert.equal(toggleNoQuarter(), false);
   assert.equal(noQuarterActive(), false);
   assert.equal(process.env[ENV], undefined); // and stops inheriting it once raised
+});
+
+test("a second copy of the module sees the toggle (one state, however many instances)", () => {
+  assert.notEqual(copy.noQuarterActive, noQuarterActive, "the copies must really be distinct");
+  try {
+    setNoQuarter(true);
+    assert.equal(copy.noQuarterActive(), true, "an extension that did not toggle must still see no quarter");
+    copy.setNoQuarter(false);
+    assert.equal(noQuarterActive(), false, "and a toggle from either copy raises the moat for both");
+  } finally {
+    setNoQuarter(false);
+  }
 });
 
 test("setNoQuarter is idempotent and explicit", () => {

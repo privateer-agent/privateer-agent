@@ -296,6 +296,20 @@ skipped entirely on an attested TEE or on-device channel, which provably can't r
 prompt anyway. It's best-effort structured-PII detection, labeled as such — a safety net, not
 a guarantee.
 
+Pattern detection fires on anything email-*shaped*, so some of what it finds isn't personal
+data at all. **`/privacy allow <value>`** is where you say so — an address
+(`me@acme.com`), a domain (`@acme.com`), an IPv4 block (`10.0.0.0/8`), or any exact or
+globbed value. Entries live in `privacy.piiAllow` in `~/.privateer/config.json`, apply from
+the next turn (no relaunch), and persist across sessions; `/privacy` on its own lists them
+and `/privacy unallow <value>` puts one back under the gate. Reserved shapes —
+`example.com`, loopback, `noreply@…`, `@users.noreply.github.com` — are allowed out of the
+box. `PI_PRIVACY_*` env vars and a `pi-privacy.config.json` are honoured too (a
+project-local file can only ever make the gate *stricter*).
+
+Under **no quarter** the gate doesn't ask — there's nobody to ask — so it redacts and sends,
+and prints what it masked. That's the one case where a false positive changes what the model
+sees without you seeing it first, which is why the notice tells you `/privacy allow` exists.
+
 ## Privateer account (billed inference)
 
 Instead of bringing your own key, run **`/signin`** to sign into a Privateer account. Your

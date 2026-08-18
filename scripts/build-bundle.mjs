@@ -265,8 +265,34 @@ function buildTarget(name) {
   return { name, archivePath, sha, bytes: buf.length };
 }
 
+// ---- stale-output guard ---------------------------------------------------
+// buildTarget() clears the staging dir of the target it builds — and nothing else.
+// Archives for targets NOT selected this run survive, each beside a .sha256 that
+// looks exactly as valid as a fresh one. CI never sees this (every matrix job is a
+// fresh checkout building one target), but a local `--target darwin-arm64` on a tree
+// that last built at an older version leaves the other three archives from THAT
+// version sitting in dist-bundle/ presenting as current. That is how a stale bundle
+// gets read — or uploaded — as this version's.
+//
+// So stamp the directory with the version that filled it and clear it when the stamp
+// does not match. .node-cache is keyed by NODE version, not app version, and costs a
+// ~50 MB download per target to refill, so it survives the sweep.
+function sweepStaleOutput() {
+  const stampPath = path.join(OUT, ".build-version");
+  const stamp = fs.existsSync(stampPath) ? fs.readFileSync(stampPath, "utf8").trim() : null;
+  if (stamp === PKG.version) return;
+  const KEEP = new Set([".node-cache", ".build-version"]);
+  const stale = fs.readdirSync(OUT).filter((e) => !KEEP.has(e));
+  if (stale.length) {
+    log(`dist-bundle/ holds output from ${stamp ? `v${stamp}` : "an unstamped build"}, not v${PKG.version} — clearing ${stale.length} entr${stale.length === 1 ? "y" : "ies"} (keeping .node-cache)`);
+    for (const e of stale) rmrf(path.join(OUT, e));
+  }
+  fs.writeFileSync(stampPath, `${PKG.version}\n`);
+}
+
 // ---- main -----------------------------------------------------------------
 mkdirp(OUT);
+sweepStaleOutput();
 log(`Node on build machine: ${runOut("node", ["-v"])}`);
 const results = [];
 for (const name of selected) results.push(buildTarget(name));

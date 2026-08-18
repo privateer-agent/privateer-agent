@@ -29,7 +29,9 @@
 // buildMoat(), exactly as it does every other Pi-touching import. Extensions load late
 // and import it statically.
 
+import { loadConfig, makePiPrivacyExtension } from "pi-privacy";
 import { noQuarterActive } from "../permissions/noQuarter.ts";
+import { addPiiAllow, piiAllowEntries, removePiiAllow } from "./piiAllow.ts";
 import { cliPalette, detectScheme } from "../ui/palette.ts";
 import { accountPosture, privateerChannel } from "../providers/account.ts";
 import { hasCredentials } from "../auth/privateer.ts";
@@ -38,15 +40,32 @@ import { hasCredentials } from "../auth/privateer.ts";
 // no-quarter flag (same glyph and color as the no-quarter banner in chat.ts and the gate
 // extension's status line), body in the accent color — distinct from a yellow warning and
 // from a red error, because this is neither: it's the answer we gave for you.
+// The tail is the point as much as the color is: unattended, nobody was asked, so the
+// only way to disagree with the answer is to know where to say so. `/privacy allow …`
+// is that place, and a notice about a masked filename is exactly when you want to know
+// it exists.
 function renderPiiAutoRedact(notice: string): string {
   const p = cliPalette(detectScheme());
   const body = notice.startsWith("⚑ ") ? notice.slice(2) : notice;
-  return `${p.RED}⚑${p.RESET} ${p.CYAN}${body}${p.RESET}`;
+  return `${p.RED}⚑${p.RESET} ${p.CYAN}${body}${p.RESET} ${p.DIM}· /privacy allow <value> if it shouldn't be masked${p.RESET}`;
 }
 
 /** The pi-privacy options every Privateer session gets, whichever route built it. */
 export function sharedPrivacyOptions() {
+  // pi-privacy's OWN configuration — PI_PRIVACY_* env vars and a pi-privacy.config.json.
+  // We used to build the options object by hand and never call this, so every one of
+  // those settings was silently ignored in Privateer and nowhere else: a user who set
+  // PI_PRIVACY_PII_ALLOW watched it do nothing. Ambient settings go UNDER ours, so the
+  // knobs Privateer has a product reason to hold (the tier resolver, the unattended
+  // signal, the account badge) are still ours, while the ones that are a matter of taste
+  // (piiPolicy, badge sinks, the exfil/downgrade policies) become settable.
+  //
+  // Safe against a repo you just opened: a project-local pi-privacy.config.json is
+  // clamped by pi-privacy itself — it may not weaken a policy below the built-in floor,
+  // and may not add allowlist entries at all.
+  const ambient = loadConfig();
   return {
+    ...ambient,
     // The account channel's real posture. pi-privacy ships a `privateer` provider, but it
     // is the PUBLIC developer-key channel (sk-priv-…, server-proxied and unverifiable
     // end-to-end), so from the package alone every privateer/* model floors to
@@ -92,6 +111,64 @@ export function sharedPrivacyOptions() {
     // unconditionally and each masks its own patterns, so the surviving content is the
     // same either way. Under "warn" the order WOULD matter, since it decides whether the
     // prompt is raised on a raw key or one we already masked.
-    toolResultPolicy: "redact" as const,
+    toolResultPolicy: ambient.toolResultPolicy ?? ("redact" as const),
+    // The operator's own "that is not personal data" list, read LIVE (see
+    // ./piiAllow.ts): `/privacy allow @acme.com` applies on the next turn, not the next
+    // launch. Ambient config entries come first — both lists are additive, since an
+    // allowlist can only ever remove detection and there is no sense in which one of
+    // them should silence the other.
+    piiAllow: () => [...(ambient.piiAllow ?? []), ...piiAllowEntries()],
+  };
+}
+
+// ── /privacy ─────────────────────────────────────────────────────────────────────────
+// The gate's escape hatch, at the point of complaint. Everything else about pi-privacy is
+// glanceable (the badge) or answerable in the moment (the prompt); the allowlist is the
+// only part that needs a place to live, and "edit ~/.privateer/config.json and relaunch"
+// is not a thing anyone does mid-task while the gate masks a filename in front of them.
+//
+// Registered from HERE rather than from the extension file, for the reason this module
+// exists at all: the factory-built sessions and the discovered extension must not drift.
+function registerPrivacyCommand(pi: any): void {
+  pi.registerCommand?.("privacy", {
+    description: "Values the PII gate must not treat as personal data: /privacy [allow <value> | unallow <value>]",
+    handler: (args: string, ctx: any) => {
+      const raw = String(args ?? "").trim();
+      const [verb, ...rest] = raw.split(/\s+/);
+      const value = rest.join(" ").trim();
+      const notify = (msg: string, level: "info" | "warning" = "info") => ctx?.ui?.notify?.(msg, level);
+
+      if (verb === "allow" || verb === "unallow") {
+        if (!value) return notify(`usage: /privacy ${verb} <value>`, "warning");
+        const r = verb === "allow" ? addPiiAllow(value) : removePiiAllow(value);
+        return notify(r.message, r.ok ? "info" : "warning");
+      }
+      if (verb) return notify(`unknown option "${verb}" — usage: /privacy [allow <value> | unallow <value>]`, "warning");
+
+      const mine = piiAllowEntries();
+      notify(
+        [
+          mine.length ? `PII allowlist (~/.privateer/config.json):\n  ${mine.join("\n  ")}` : "PII allowlist: empty",
+          "Reserved shapes (example.com, loopback, noreply@…) are allowed by default and not listed here.",
+          "Add one with /privacy allow <value> — an address (me@acme.com), a domain (@acme.com),",
+          "an IPv4 block (10.0.0.0/8), or any exact/globbed value.",
+        ].join("\n"),
+        "info",
+      );
+    },
+  });
+}
+
+/**
+ * The privacy half of the moat as ONE factory: pi-privacy configured the Privateer way,
+ * plus the `/privacy` command that maintains its allowlist. Both routes into pi-privacy
+ * (src/config/moat.ts and extensions/privateer-privacy.ts) use this, so neither can end
+ * up with the gate but not its escape hatch.
+ */
+export function privacyExtension() {
+  const privacy = makePiPrivacyExtension(sharedPrivacyOptions());
+  return function privateerPrivacyCore(pi: any): void {
+    privacy(pi);
+    registerPrivacyCommand(pi);
   };
 }

@@ -24,11 +24,13 @@ process.env.PRIVATEER_SEALED = "0"; // keep accountPosture off the network — s
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import privateerPrivacy from "../extensions/privateer-privacy.ts";
+import { privacyExtension } from "../src/config/privacyPolicy.ts";
 import { buildMoat, type ExtensionFactory } from "../src/config/moat.ts";
 import { setNoQuarter } from "../src/permissions/noQuarter.ts";
+import { addPiiAllow, removePiiAllow } from "../src/config/piiAllow.ts";
 import type { GateController } from "../src/ext/permissionGate.ts";
 
 rmSync(process.env.PRIVATEER_HOME!, { recursive: true, force: true });
@@ -191,6 +193,92 @@ for (const [route, factories] of [
     }
   });
 }
+
+// The bug that reached users: no quarter was ON and the PII gate asked anyway.
+//
+// Pi loads each extension with its own jiti instance and `moduleCache: false`, so
+// extensions/privateer-gate.ts (where shift+tab lives) and extensions/privateer-privacy.ts
+// each hold their OWN copy of src/permissions/noQuarter.ts. While that module kept the
+// state in a module-level `let`, the toggle only ever reached the copy the gate was
+// holding — the privacy extension's copy stayed false, and a session with the moat
+// visibly down still stopped the turn to ask about an email address. The state lives in
+// the env now, which is the one thing every copy shares; this drives the gate's copy the
+// way shift+tab does and asserts the privacy side follows.
+// (the specifier is a variable so tsc doesn't try to resolve the query suffix as a path)
+const GATE_COPY_SPECIFIER = "../src/permissions/noQuarter.ts?extension-copy";
+const gateCopy: typeof import("../src/permissions/noQuarter.ts") = await import(GATE_COPY_SPECIFIER);
+
+test("a toggle from the GATE extension's copy of the state reaches the privacy gate", async () => {
+  assert.notEqual(gateCopy.setNoQuarter, setNoQuarter, "the copies must really be distinct");
+  gateCopy.setNoQuarter(true); // shift+tab, as extensions/privateer-gate.ts applies it
+  try {
+    const s = session([privateerPrivacy]);
+    const out = await s.request(payloadWithPii());
+
+    assert.deepEqual(s.selects, [], "no quarter must not raise a privacy prompt, whoever flipped it");
+    assert.ok(!payloadText(out).includes(EMAIL), "the unattended answer is redact-then-send, not send-as-is");
+  } finally {
+    gateCopy.setNoQuarter(false);
+  }
+});
+
+// The operator's escape hatch, end to end. Detection is pattern-based, so some share of
+// what it finds is a filename, a version quad or a fixture mailbox — and under no quarter
+// nobody is asked before it is rewritten. `/privacy allow …` is the answer to that, and
+// it is only an answer if it reaches pi-privacy from the config file AND applies to the
+// session already running: "restart to stop masking your own asset filenames" is not one.
+test("an allowlisted value is not PII — and the entry applies mid-session", async () => {
+  mkdirSync(process.env.PRIVATEER_HOME!, { recursive: true });
+  setNoQuarter(true); // auto-redact, so the gate's answer is observable without a prompt
+  try {
+    const s = session([privateerPrivacy]);
+
+    const before = await s.request(payloadWithPii());
+    assert.ok(!payloadText(before).includes(EMAIL), "not allowlisted yet — masked before send");
+    assert.equal(s.notices.length, 1);
+
+    addPiiAllow("@acme-corp.io"); // `/privacy allow @acme-corp.io`, with the session live
+    const after = await s.request(payloadWithPii());
+    assert.ok(payloadText(after).includes(EMAIL), "left byte-for-byte alone, without a relaunch");
+    assert.equal(s.notices.length, 1, "and nothing to report — it was never PII here");
+  } finally {
+    removePiiAllow("@acme-corp.io");
+    setNoQuarter(false);
+  }
+});
+
+// `/privacy` is the only way most people will ever touch the allowlist, so it is worth a
+// test of its own: the wrong verb must not silently do nothing, and `allow` must actually
+// reach the file the gate reads.
+test("/privacy allow, unallow, and the bare listing", () => {
+  mkdirSync(process.env.PRIVATEER_HOME!, { recursive: true });
+  const commands = new Map<string, any>();
+  privacyExtension()({
+    on: () => {},
+    registerProvider: () => {},
+    registerCommand: (name: string, spec: any) => commands.set(name, spec),
+    registerTool: () => {},
+  } as any);
+
+  const privacy = commands.get("privacy");
+  assert.ok(privacy, "the escape hatch has to be reachable");
+
+  const said: string[] = [];
+  const ctx = { ui: { notify: (m: string) => said.push(m) } };
+  const run = (args: string) => (said.length = 0, privacy.handler(args, ctx), said.join("\n"));
+
+  assert.match(run(""), /allowlist: empty/i);
+  assert.match(run("allow @acme-corp.io"), /no longer treated as PII/);
+  try {
+    assert.match(run(""), /@acme-corp\.io/, "and it is listed back");
+    assert.match(run("allow"), /usage/, "a verb with no value explains itself");
+    assert.match(run("wat"), /unknown option/, "a typo'd verb is never a silent no-op");
+    assert.match(run("unallow @acme-corp.io"), /gated again/);
+    assert.match(run(""), /allowlist: empty/i);
+  } finally {
+    removePiiAllow("@acme-corp.io");
+  }
+});
 
 // The other half: with the moat up, the question is the user's to answer. Without this,
 // the tests above would still pass if the gate were simply switched off.

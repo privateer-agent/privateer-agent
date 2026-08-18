@@ -176,17 +176,16 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   if (!caps) throw new Error(`buildMoat: unknown kind "${opts.kind}"`);
 
   const { makePermissionGate } = await import("../ext/permissionGate.ts");
-  const { makePiPrivacyExtension } = await import("pi-privacy");
   const { makeAccountProvider } = await import("../providers/account.ts");
   const { webEnabled, mediaEnabled } = await import("./hosted.ts");
-  const { sharedPrivacyOptions } = await import("./privacyPolicy.ts");
+  const { privacyExtension } = await import("./privacyPolicy.ts");
 
   const factories: ExtensionFactory[] = [makePermissionGate(opts.gate)];
 
   // pi-privacy is configured in exactly ONE place, shared with the DISCOVERED copy of this
   // extension (the TUI's, and every subagent child's) — see ./privacyPolicy.ts for the two
   // bugs that came of configuring it in two.
-  factories.push(makePiPrivacyExtension(sharedPrivacyOptions()));
+  factories.push(privacyExtension());
   factories.push(makeAccountProvider()); // must follow pi-privacy — see header
 
   if (opts.relayFiles) {

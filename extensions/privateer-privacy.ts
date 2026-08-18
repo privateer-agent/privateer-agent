@@ -23,9 +23,8 @@
 // win regardless of the order pi discovers extensions in. This is purely a
 // display/resolution + routing list — posture and attestation are dispatcher-bound and
 // unaffected by the model set.
-import { makePiPrivacyExtension } from "pi-privacy";
 import { registerAccountModels } from "../src/providers/account.ts";
-import { sharedPrivacyOptions } from "../src/config/privacyPolicy.ts";
+import { privacyExtension } from "../src/config/privacyPolicy.ts";
 
 // Tinfoil's live chat models (inference.tinfoil.sh/v1/models), kimi-k2-6 first — the
 // launcher's default. Non-chat endpoints (embeddings, tts, whisper, websearch,
@@ -55,9 +54,10 @@ function tinfoilModel(id: string) {
 
 // One configuration, shared with the factory-built copy in src/config/moat.ts — the tier
 // resolver for the private ACCOUNT channel, the unattended/no-quarter handling, the ingest
-// policy. Adding an option HERE rather than there is how this file and the moat drifted
-// twice; src/config/privacyPolicy.ts records what that cost.
-const privacy = makePiPrivacyExtension(sharedPrivacyOptions());
+// policy, the operator's PII allowlist and the `/privacy` command that maintains it.
+// Adding an option HERE rather than there is how this file and the moat drifted twice;
+// src/config/privacyPolicy.ts records what that cost.
+const privacy = privacyExtension();
 
 export default function privateerPrivacy(pi: any): void {
   privacy(pi);
