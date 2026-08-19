@@ -63,6 +63,12 @@ const DEFAULT_MODELS = [
   // account catalog automatically; these seeds just make them resolve at launch).
   "moonshotai/kimi-k3",
   "z-ai/glm-5.2",
+  // Both verified 2026-08-19 against /endpoints/zdr and GET /api/models: ZDR-covered
+  // and servable. Same reason as the line above — the live catalog already carries
+  // them, this only closes the first-launch window where a saved default that isn't
+  // yet in the cache would fall through to a BYO provider.
+  "x-ai/grok-4.6",
+  "openai/gpt-5.6-luna",
 ];
 
 function seedModel(id: string) {
