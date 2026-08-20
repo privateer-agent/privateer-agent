@@ -270,6 +270,44 @@ export function classifyToolCall(
     };
   }
 
+  // save_cargo (src/tools/cargo.ts) — hand an artifact to the connected app, which
+  // encrypts it and stores it in the user's Cargo.
+  //
+  // Left to the unknown-tool branch this is bash-kind: a "Run save_cargo" prompt over a
+  // JSON blob, and an outright DENY in plan/readonly. Denying it there is the wrong call
+  // twice over — it writes nothing on this machine, and "show me this on my phone" is a
+  // reasonable thing to ask for while planning.
+  //
+  // Classified as a WRITE even though no local file changes, because that is what it is
+  // from the user's side: a new, persistent thing in their account, against their storage
+  // quota. Not alwaysAsk — unlike the generate_* tools it spends no credit, and unlike an
+  // ordinary egress the destination is the user's OWN device, encrypted there before it
+  // is stored, so there is no third party to leak to and nothing irreversible to stop.
+  //
+  // `outside` is about the SOURCE. The content is read off disk and shipped off-machine,
+  // so `path: "~/Documents/notes.md"` discloses a file from outside the working directory
+  // — the same disclosure the media tools flag on their inputs, and the reason `outside`
+  // has to be set here: it forces a prompt even under acceptEdits, which would otherwise
+  // swallow the call as an ordinary in-scope write.
+  if (name === "save_cargo") {
+    const src = str(obj.path);
+    if (!src) return unknownTarget(toolName, "write");
+    const abs = resolveInCwd(scope.cwd, src);
+    const outside = isOutsideScope(scope, abs);
+    const protectedSrc = isProtectedPath(abs);
+    const kindNote = str(obj.kind) ? ` as ${str(obj.kind)}` : "";
+    const titleNote = str(obj.title) ? ` "${str(obj.title)}"` : "";
+    return {
+      tool: toolName,
+      kind: "write",
+      title: protectedSrc ? "Save a protected file to Cargo in the app" : "Save to Cargo in the Privateer app",
+      detail: `${outside || protectedSrc ? abs : src}${kindNote}${titleNote} → the app encrypts it and stores it in Cargo`,
+      protected: protectedSrc,
+      outside,
+      path: abs,
+    };
+  }
+
   // Media generation (src/tools/media.ts) and local composition (videoCompose.ts).
   //
   // Left to the unknown-tool branch at the bottom these classify as bash-kind, which

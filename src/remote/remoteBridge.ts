@@ -15,11 +15,19 @@ import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/modeGate.ts";
 import type { RelayCallbacks } from "./relayClient.ts";
+import type { CargoSaveRequest, CargoSaveResult } from "./cargoSave.ts";
 
 // How much of a driven turn's reply we hold for possible outbox delivery. The
 // sealed item is capped at 45k plaintext anyway; this just stops a pathological
 // turn from growing the buffer without bound.
 const MAX_TURN_CAPTURE = 60_000;
+
+// How long the app gets to encrypt an artifact and store it before the save_cargo tool
+// gives up. Generous because the app end is a real round trip — encrypt, POST /api/cargo,
+// wait on the network — and a phone on a slow link is the normal case, not the edge one.
+// Read per call rather than at module load so a test can set it without re-importing the
+// module (and so the env is read in the process that actually runs the save).
+const cargoSaveTimeoutMs = (): number => Number(process.env.PRIVATEER_CARGO_TIMEOUT_MS) || 60_000;
 
 // The outbound surface the bridge needs; RelayClient implements all of it.
 export interface RelayLike {
@@ -39,6 +47,7 @@ export interface RelayLike {
   sendFileMatches(id: string, matches: { path: string; isDir: boolean }[]): void;
   sendExtensions(payload: ExtensionsPayload): void;
   sendSkills(payload: SkillsPayload): void;
+  requestCargoSave(id: string, req: CargoSaveRequest): void;
 }
 
 // The installed-extensions snapshot relayed to the app's extensions manager.
@@ -139,6 +148,7 @@ export class RemoteBridge {
   private readonly pending = new Map<string, (d: AskOutcome) => void>();
   private readonly pendingSelects = new Map<string, (v: string | null) => void>();
   private readonly pendingInputs = new Map<string, (v: string | null) => void>();
+  private readonly pendingCargo = new Map<string, (r: CargoSaveResult) => void>();
   private pendingAttachments: RemoteAttachment[] = [];
   // The driven turn in flight, kept only so it can be delivered to the outbox if it
   // turns out nobody was watching (see settleTurn). Bounded: the outbox truncates at
@@ -229,6 +239,10 @@ export class RemoteBridge {
     onInputResponse: (id, value) => {
       const resolve = this.pendingInputs.get(id);
       if (resolve) resolve(value);
+    },
+    onCargoSaved: (id, result) => {
+      const resolve = this.pendingCargo.get(id);
+      if (resolve) resolve(result);
     },
     onFilesSearch: (id, query) => this.cfg.onFilesSearch?.(id, query),
     onNoQuarter: (on) => {
@@ -402,6 +416,57 @@ export class RemoteBridge {
     return this.relay.sendFile(file);
   }
 
+  // Hand an artifact to the app to encrypt and store as Cargo (the save_cargo tool),
+  // and wait for its verdict. The app owns the master key; this process never has one,
+  // so this round trip IS the feature rather than a convenience — see cargoSave.ts.
+  //
+  // Three ways this ends without a stored artifact, each with its own message, because
+  // the model gets the reason verbatim and they call for different next moves:
+  //
+  //  - No controller. Unlike sendFile, "handed to an open socket" is not good enough
+  //    here: the caller is promised an artifact id, and with nobody attached the server
+  //    drops the frames and we would wait out the full timeout to learn it. hasController()
+  //    is checked up front so the failure is immediate and says what to do about it.
+  //  - The app answered a refusal (locked vault, storage full, guest session). Passed
+  //    through as written — those messages already exist for a person to read.
+  //  - Nothing came back inside the deadline. Nothing else wraps this in a timeout the
+  //    way the gate wraps remoteAsk, so a silent or too-old app would wedge the turn
+  //    forever without one.
+  saveCargoRemote = (req: CargoSaveRequest, signal?: AbortSignal): Promise<CargoSaveResult> => {
+    if (!this.relay) return Promise.resolve({ ok: false, reason: "remote access is not enabled — run /remote-access on and drive this terminal from the Privateer app" });
+    if (!this.relay.isConnected()) return Promise.resolve({ ok: false, reason: "the relay is not connected" });
+    // hasController is optional on RelayLike; a transport that can't tell is treated as
+    // attached, matching how the rest of the bridge reads it.
+    if (this.relay.hasController && !this.relay.hasController()) {
+      return Promise.resolve({ ok: false, reason: "the Privateer app is not attached to this terminal — only the app holds the key that encrypts an artifact, so open it and attach before saving" });
+    }
+    const id = randomUUID();
+    return new Promise<CargoSaveResult>((resolve) => {
+      const settle = (r: CargoSaveResult) => {
+        if (!this.pendingCargo.has(id)) return; // already settled (abort raced the reply)
+        this.pendingCargo.delete(id);
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(r);
+      };
+      const onAbort = () => settle({ ok: false, reason: "the turn was interrupted before the app confirmed the save" });
+      const deadline = cargoSaveTimeoutMs();
+      const timer = setTimeout(
+        () => settle({ ok: false, reason: `the app did not answer within ${Math.round(deadline / 1000)}s — it may be an older version that cannot save artifacts from a terminal` }),
+        deadline,
+      );
+      // Don't hold the process open on this timer alone; an exiting CLI shouldn't
+      // linger for a save the app is never going to answer.
+      timer.unref?.();
+      this.pendingCargo.set(id, settle);
+      if (signal) {
+        if (signal.aborted) return onAbort();
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.relay!.requestCargoSave(id, req);
+    });
+  };
+
   private rejectAllPending(): void {
     for (const resolve of this.pending.values()) resolve("deny");
     this.pending.clear();
@@ -411,5 +476,15 @@ export class RemoteBridge {
     // Same for a relayed text prompt: a gone controller resolves to "no input".
     for (const resolve of this.pendingInputs.values()) resolve(null);
     this.pendingInputs.clear();
+    // A save whose controller vanished mid-flight is NOT reported as failed-and-done:
+    // the app may have encrypted and stored the artifact before its socket dropped, and
+    // the frame carrying the id is what we lost. Saying "it didn't save" would send the
+    // model round again and leave the user with two copies of the same artifact, so the
+    // reason says plainly that the outcome is unknown and names Cargo as the place to
+    // look before retrying.
+    for (const resolve of this.pendingCargo.values()) {
+      resolve({ ok: false, reason: "the app disconnected before confirming the save — it may or may not have stored the artifact; check Cargo in the app before saving again" });
+    }
+    this.pendingCargo.clear();
   }
 }

@@ -20,6 +20,7 @@ function makeFakeRelay() {
   const extensions: any[] = [];
   const skills: any[] = [];
   const fileMatches: { id: string; matches: { path: string; isDir: boolean }[] }[] = [];
+  const cargoSaves: { id: string; req: any }[] = [];
   let connected = true;
   // Distinct from `connected`: the relay socket can be up with nobody attached, which
   // is exactly when a finished turn has to be delivered another way.
@@ -29,6 +30,7 @@ function makeFakeRelay() {
     notices: typeof notices; commandLists: typeof commandLists; selects: typeof selects;
     inputs: typeof inputs; extensions: typeof extensions; skills: typeof skills;
     fileMatches: typeof fileMatches;
+    cargoSaves: typeof cargoSaves;
     setConnected(v: boolean): void;
     setController(v: boolean): void;
   } = {
@@ -42,6 +44,7 @@ function makeFakeRelay() {
     extensions,
     skills,
     fileMatches,
+    cargoSaves,
     setConnected(v) { connected = v; },
     setController(v) { controller = v; },
     requestApproval(id, req) { approvals.push({ id, req }); },
@@ -57,6 +60,7 @@ function makeFakeRelay() {
     sendExtensions(payload) { extensions.push(payload); },
     sendSkills(payload) { skills.push(payload); },
     sendFileMatches(id, matches) { fileMatches.push({ id, matches }); },
+    requestCargoSave(id, req) { cargoSaves.push({ id, req }); },
   };
   return relay;
 }

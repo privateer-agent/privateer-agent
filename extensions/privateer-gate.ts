@@ -21,6 +21,7 @@ import {
 } from "../src/remote/subagentRelay.ts";
 import { RelayClient } from "../src/remote/relayClient.ts";
 import { makeSendFileTool } from "../src/tools/sendFile.ts";
+import { makeSaveCargoTool } from "../src/tools/cargo.ts";
 import { makeSaveAttachmentTool } from "../src/tools/saveAttachment.ts";
 import { AttachmentStore, type StoredAttachment } from "../src/util/attachmentStore.ts";
 import { makeExtensionsControl } from "../src/remote/extensionsControl.ts";
@@ -474,6 +475,11 @@ export default function privateerControl(pi: any): void {
   // driving. The daemon no longer loads this file, so there is nothing to shadow.
   pi.registerTool?.(makeSendFileTool(bridge));
   pi.registerTool?.(makeSaveAttachmentTool(attachments));
+  // save_cargo belongs with them: it is the same bridge, the same "needs a connected
+  // app" precondition, and the same failure mode if it were registered anywhere the
+  // relay isn't this file's. Unlike the pair it hands the app PLAINTEXT to encrypt —
+  // the terminal has no master key, so the round trip is the feature (cargoSave.ts).
+  pi.registerTool?.(makeSaveCargoTool(bridge));
 
   // Subagents (and print/rpc) run as headless child `pi` processes with no UI. There
   // no one can approve, so a "default" gate would fail-closed on every tool and the

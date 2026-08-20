@@ -138,6 +138,23 @@ agent → app   file_begin   → file_chunk*   → file_end       (~135 KB decod
 
 Backstops on the agent side: 10 MB per file, 8 transfers in flight, and a running byte check in case `size` was absent or lied at begin time.
 
+**Saving an artifact is a third chunked family, and the only one that exists because of a key the CLI doesn't have.** A Cargo row is `encryptedContent` + `encryptedMetadata`, AES-256-GCM under the account master key, and the terminal holds no master key — the device grant mints a session token and nothing else (`src/crypto/accountVerify.ts`). So `save_cargo` relays the artifact as **plaintext** and the app encrypts it, calling the same `saveCargo()` the chat's Save button and the file importer call:
+
+```
+agent → app   cargo_begin → cargo_chunk* → cargo_end        (artifact TEXT, ≤512 KB, 120k chars/chunk)
+app → agent   cargo_saved                                    (keyed by the same id: cargoId, or a reason)
+```
+
+Text rather than base64 — every Cargo kind is HTML, markdown or CSV, so there is nothing binary to inflate. The ceiling is the *app's* artifact cap (`MAX_DOC_BYTES`), not the 10 MB file cap, because what arrives lands in the same store and the same preview surfaces as a model-authored artifact. Chunk payloads skip `redactSecrets()` for the same reason file bytes do: redaction inside a document is corruption.
+
+Three things follow from the round trip and are easy to get wrong:
+
+- **`save_cargo` needs a controller, not just a socket.** `hasController()` is checked up front, so a terminal nobody is driving fails immediately with a message naming the cause instead of waiting out the deadline.
+- **The bridge supplies its own timeout** (`PRIVATEER_CARGO_TIMEOUT_MS`, 60s). Nothing else wraps a tool that awaits the app the way the gate wraps `remoteAsk`, and an app too old to understand `cargo_begin` simply never answers.
+- **A mid-flight disconnect reports the outcome as UNKNOWN, not as a failure.** The app may have stored the artifact and lost the socket before replying; saying it failed is how a user ends up with two copies.
+
+A harbor is headless, so it has no controller to ask and `save_cargo` is not registered there. An unattended run still delivers an artifact the way it always has — as a fence in its Inbox result (§8, `src/routines/resultBrief.ts`) — and that is the intended split, not a gap to close by widening this.
+
 Beyond driving a turn, the same socket carries the management vocabulary: `extensions_*`, `skills_*`, `routines_*`, `workflows_*`, `channels_*`, `mcp_*`, `task_submit` / `task_spawn`, plus `select_request`/`select_response` and `input_request`/`input_response` for CLI-initiated prompts.
 
 ---
@@ -248,6 +265,8 @@ The terminal holds **no account key material** — it seals *to* the account and
 | `privateer-agent/src/remote/relayClient.ts` | agent-side WS client: ticket, frames, heartbeat, chunked files |
 | `privateer-agent/src/remote/remoteBridge.ts` | `RelayLike` interface + callbacks wiring the relay to the gate/turn loop |
 | `privateer-agent/src/remote/controlAuth.ts` | fail-closed verify for signed control frames |
+| `privateer-agent/src/remote/cargoSave.ts` | the `cargo_*` wire contract + why the save is a round trip |
+| `privateer-agent/src/tools/cargo.ts` | the `save_cargo` tool (validates before anything reaches the app) |
 | `privateer-agent/src/outbox/cloudOutbox.ts` | sealed store-and-forward when no controller is attached |
 | `privateer-agent/src/auth/privateer.ts` | device-code login, `serverBaseUrl`, `apiRequest` |
 | `treeview/server/routes/relay.js` | `POST /relay/ticket`, `GET /relay/terminals`, terminate/label |

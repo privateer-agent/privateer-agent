@@ -22,6 +22,7 @@ import { apiRequest, serverBaseUrl } from "../auth/privateer.ts";
 import { MOAT_SHIMS, reservedNames } from "../config/moatManifest.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
+import { CARGO_CHUNK_CHARS, type CargoSaveRequest, type CargoSaveResult } from "./cargoSave.ts";
 
 // Display label for THIS running terminal. Deliberately NON-PII: we do NOT send
 // username@hostname or the working-directory name to the server/controller (the
@@ -134,6 +135,13 @@ export interface RelayCallbacks {
   // The app answered a CLI-initiated text-input prompt (the id from requestInput).
   // A null value means the app dismissed the prompt without submitting.
   onInputResponse?: (id: string, value: string | null) => void;
+  // The app finished a CLI-initiated Cargo save (the id from requestCargoSave):
+  // it encrypted the artifact under the account master key and stored it, or
+  // refused. Optional so callbacks that predate the frame keep compiling — and a
+  // controller too old to understand cargo_begin simply never answers, which the
+  // bridge's bounded wait turns into a clean "this app can't save artifacts yet"
+  // rather than a wedged tool call.
+  onCargoSaved?: (id: string, result: CargoSaveResult) => void;
   // The app's composer is autocompleting an `@file` mention — reply with the cwd
   // files/dirs matching `query` (a sendFileMatches frame, keyed by the same id).
   // Read-only; resolution of the picked path still happens on the prompt turn.
@@ -667,6 +675,11 @@ export class RelayClient {
       query?: string;
       sig?: string;
       ts?: number;
+      // cargo_saved (the app's verdict on a save_cargo round trip)
+      ok?: boolean;
+      cargoId?: string;
+      storageType?: string;
+      reason?: string;
     };
     try {
       frame = JSON.parse(data.toString());
@@ -724,6 +737,24 @@ export class RelayClient {
       case "input_response":
         if (frame.id) this.cb.onInputResponse?.(frame.id, typeof frame.value === "string" ? frame.value : null);
         break;
+      // The app's verdict on a Cargo save we sent up. Everything is re-typed off
+      // the wire rather than trusted: the id keys a pending tool call, and the
+      // rest is quoted back to the model, so a malformed frame must degrade to a
+      // refusal with a reason instead of an `undefined` the tool prints.
+      case "cargo_saved": {
+        if (typeof frame.id !== "string" || !frame.id) break;
+        const result: CargoSaveResult =
+          frame.ok === true && typeof frame.cargoId === "string" && frame.cargoId
+            ? {
+                ok: true,
+                cargoId: frame.cargoId,
+                title: typeof frame.title === "string" ? frame.title : "",
+                storageType: frame.storageType === "local" ? "local" : "cloud",
+              }
+            : { ok: false, reason: typeof frame.reason === "string" && frame.reason ? frame.reason : "the app refused the save without giving a reason" };
+        this.cb.onCargoSaved?.(frame.id, result);
+        break;
+      }
       case "files_search":
         if (typeof frame.id === "string") this.cb.onFilesSearch?.(frame.id, typeof frame.query === "string" ? frame.query : "");
         break;
@@ -1356,6 +1387,34 @@ export class RelayClient {
       title: safe(req.title, 200),
       placeholder: req.placeholder ? safe(req.placeholder, 200) : undefined,
     });
+  }
+
+  // Ask the app to save an artifact as Cargo: it encrypts under the account
+  // master key (which this process does not have — see cargoSave.ts) and stores
+  // it, then answers with a cargo_saved keyed by `id`.
+  //
+  // Chunked like sendFile, and for the same reason: the relay caps a frame at
+  // 256 KB and an artifact may be 512 KB. Ordering is the WS's, so the app can
+  // reject a seq gap as a dropped transfer rather than silently storing a
+  // half-artifact.
+  //
+  // NOT run through `safe()`. That redacts secrets, and redaction inside an
+  // artifact is corruption — it would store a document with `[redacted]` where
+  // the model wrote an API shape, and the user would find out on Preview. Same
+  // call sendFile makes about its bytes; the tool decides what is safe to send.
+  requestCargoSave(id: string, req: CargoSaveRequest): void {
+    this.flushDeltas(); // land the save in order relative to buffered text
+    this.rawSend({
+      type: "cargo_begin",
+      id,
+      kind: req.kind,
+      title: req.title ? clip(req.title, 200) : undefined,
+      size: Buffer.byteLength(req.content, "utf8"),
+    });
+    for (let off = 0, seq = 0; off < req.content.length; off += CARGO_CHUNK_CHARS, seq++) {
+      this.rawSend({ type: "cargo_chunk", id, seq, data: req.content.slice(off, off + CARGO_CHUNK_CHARS) });
+    }
+    this.rawSend({ type: "cargo_end", id });
   }
 
   requestApproval(id: string, req: PermissionRequest): void {

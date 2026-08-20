@@ -34,6 +34,7 @@ import { basename } from "node:path";
 import { managedNames } from "./moatManifest.ts";
 import type { GateController } from "../ext/permissionGate.ts";
 import type { SendFileBridge } from "../tools/sendFile.ts";
+import type { CargoSaveBridge } from "../tools/cargo.ts";
 import type { AttachmentStore } from "../util/attachmentStore.ts";
 
 /** A Pi extension factory, as DefaultResourceLoader takes them. */
@@ -61,7 +62,7 @@ export interface MoatOptions {
    * its module-level bridge and stands them down inside the daemon, so a live spawn's own
    * pair is what the model gets (see tools/relayFileTools.ts).
    */
-  relayFiles?: { bridge: SendFileBridge; attachments: AttachmentStore };
+  relayFiles?: { bridge: SendFileBridge & CargoSaveBridge; attachments: AttachmentStore };
   /**
    * THIS run's inbox-attachment staging area (routines/resultMedia.ts). Passed only by
    * a path whose result reaches the app's Inbox — a scheduled routine, a submitted

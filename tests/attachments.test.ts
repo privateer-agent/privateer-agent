@@ -62,14 +62,25 @@ test("relay file tools factory registers both directions against the given bridg
   const { makeRelayFileTools } = await import("../src/tools/relayFileTools.ts");
   const store = new AttachmentStore();
   let sent: unknown = null;
+  let saved: unknown = null;
   const bridge = {
     isConnected: () => true,
     sendFile: async (file: unknown) => { sent = file; return { ok: true }; },
+    saveCargoRemote: async (req: unknown) => { saved = req; return { ok: true as const, cargoId: "c1", title: "Notes", storageType: "cloud" }; },
   };
   const registered = new Map<string, any>();
   makeRelayFileTools(bridge, store)({ registerTool: (t: any) => registered.set(t.name, t) });
 
-  assert.deepEqual([...registered.keys()].sort(), ["save_attachment", "send_file_to_client"]);
+  assert.deepEqual([...registered.keys()].sort(), ["save_attachment", "save_cargo", "send_file_to_client"]);
+
+  // save_cargo rides with the pair and must be bound to the SAME bridge — the whole
+  // point of this factory is that a live task spawn's tools talk to its own relay.
+  const cargoPath = "/private/tmp/claude-501/pv-relayfile-test.md";
+  writeFileSync(cargoPath, "# Notes\n\nbody");
+  const cargoRes: any = await registered.get("save_cargo").execute("t", { path: cargoPath }, undefined, undefined, {});
+  assert.match(cargoRes.content[0].text, /Saved "Notes" to Cargo/);
+  assert.equal((saved as any)?.kind, "md");
+  rmSync(cargoPath, { force: true });
 
   // …and the send tool talks to THAT bridge, not some other session's.
   const path = "/private/tmp/claude-501/pv-relayfile-test.txt";

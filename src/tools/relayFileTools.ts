@@ -13,11 +13,18 @@
 // moat is no longer discoverable (src/config/moat.ts), so there is only ever one pair.
 import { makeSendFileTool, type SendFileBridge } from "./sendFile.ts";
 import { makeSaveAttachmentTool } from "./saveAttachment.ts";
+import { makeSaveCargoTool, type CargoSaveBridge } from "./cargo.ts";
 import type { AttachmentStore } from "../util/attachmentStore.ts";
 
-export function makeRelayFileTools(bridge: SendFileBridge, attachments: AttachmentStore) {
+// save_cargo rides with the file pair rather than with the media tools, because it
+// shares their precondition and not media's: it needs a CONNECTED APP, not a signed-in
+// account. Registering it in the moat's media block would put it in every harbor and
+// channels session, where there is no controller and every call would fail — see
+// remote/cargoSave.ts on why unattended runs deliver an artifact a different way.
+export function makeRelayFileTools(bridge: SendFileBridge & CargoSaveBridge, attachments: AttachmentStore) {
   return function relayFileTools(pi: any): void {
     pi.registerTool?.(makeSendFileTool(bridge));
     pi.registerTool?.(makeSaveAttachmentTool(attachments));
+    pi.registerTool?.(makeSaveCargoTool(bridge));
   };
 }
