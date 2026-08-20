@@ -289,6 +289,63 @@ export function classifyToolCall(
   // — the same disclosure the media tools flag on their inputs, and the reason `outside`
   // has to be set here: it forces a prompt even under acceptEdits, which would otherwise
   // swallow the call as an ordinary in-scope write.
+  // The chart tools (src/tools/charts.ts) — read and write the boards in the user's app.
+  //
+  // Split by direction, because they are not the same act. list_charts and read_chart are
+  // READS, and left to the unknown-tool branch they'd be bash-kind prompts denied outright
+  // in plan/readonly — wrong twice over: they touch nothing on this machine, and "look at
+  // what's already on my board" is exactly the kind of thing a plan-mode turn wants.
+  //
+  // read_chart is still worth naming precisely in the prompt rather than folding in with
+  // the listing. It returns DECRYPTED content out of the user's account — the only tool
+  // here that does — and the detail line says which chart, so an approval is a decision
+  // about a specific board rather than a blanket yes to reading their charts.
+  //
+  // create_chart and edit_chart are WRITES for the same reason save_cargo is: a new,
+  // persistent thing in the user's account against their quota. Not alwaysAsk — no credit
+  // is spent and the destination is the user's own device, encrypted there before storage,
+  // so there is no third party and nothing irreversible. `outside` is deliberately NOT set:
+  // unlike save_cargo there is no source file, so there is no out-of-scope disclosure to
+  // flag. A delete_node step is the one thing here that destroys something the user made,
+  // so it is surfaced in the title rather than buried in the op list.
+  if (name === "list_charts") {
+    return { tool: toolName, kind: "read", title: "List charts in the Privateer app", detail: "titles and card counts" };
+  }
+  if (name === "read_chart") {
+    const chartId = str(obj.chartId);
+    return {
+      tool: toolName,
+      kind: "read",
+      title: "Read a chart from the Privateer app",
+      detail: chartId ? `chart ${chartId} — the app decrypts its cards on the device` : "a chart's cards",
+    };
+  }
+  if (name === "create_chart") {
+    const nodes = Array.isArray(obj.nodes) ? obj.nodes.length : 0;
+    const titleNote = str(obj.title) ? ` "${str(obj.title)}"` : "";
+    return {
+      tool: toolName,
+      kind: "write",
+      title: "Create a chart in the Privateer app",
+      detail: `${nodes} card${nodes === 1 ? "" : "s"}${titleNote} → the app encrypts them and stores them in Charts`,
+    };
+  }
+  if (name === "edit_chart") {
+    const ops = Array.isArray(obj.ops) ? (obj.ops as Array<Record<string, unknown>>) : [];
+    const deletes = ops.filter((o) => o?.edit === "delete_node").length;
+    const chartId = str(obj.chartId);
+    const kinds = [...new Set(ops.map((o) => str(o?.edit)).filter(Boolean))].join(", ");
+    return {
+      tool: toolName,
+      kind: "write",
+      title: deletes ? "Edit a chart in the Privateer app (deletes cards)" : "Edit a chart in the Privateer app",
+      detail:
+        `${ops.length} step${ops.length === 1 ? "" : "s"}${kinds ? ` (${kinds})` : ""}` +
+        `${chartId ? ` on chart ${chartId}` : ""}` +
+        `${deletes ? ` — ${deletes} card${deletes === 1 ? "" : "s"} deleted` : ""}`,
+    };
+  }
+
   if (name === "save_cargo") {
     const src = str(obj.path);
     if (!src) return unknownTarget(toolName, "write");

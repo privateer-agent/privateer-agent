@@ -33,6 +33,7 @@ function makeFakeRelay(opts: { connected?: boolean; controller?: boolean } = {})
     sendSkills() {},
     sendFileMatches() {},
     requestCargoSave(id, req) { cargoSaves.push({ id, req }); },
+    requestChartOp() {},
   };
   return relay;
 }

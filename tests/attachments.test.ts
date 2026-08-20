@@ -63,15 +63,20 @@ test("relay file tools factory registers both directions against the given bridg
   const store = new AttachmentStore();
   let sent: unknown = null;
   let saved: unknown = null;
+  let charted: unknown = null;
   const bridge = {
     isConnected: () => true,
     sendFile: async (file: unknown) => { sent = file; return { ok: true }; },
     saveCargoRemote: async (req: unknown) => { saved = req; return { ok: true as const, cargoId: "c1", title: "Notes", storageType: "cloud" }; },
+    chartOpRemote: async (req: unknown) => { charted = req; return { ok: true as const, op: "list" as const, charts: [] }; },
   };
   const registered = new Map<string, any>();
   makeRelayFileTools(bridge, store)({ registerTool: (t: any) => registered.set(t.name, t) });
 
-  assert.deepEqual([...registered.keys()].sort(), ["save_attachment", "save_cargo", "send_file_to_client"]);
+  assert.deepEqual([...registered.keys()].sort(), [
+    "create_chart", "edit_chart", "list_charts", "read_chart",
+    "save_attachment", "save_cargo", "send_file_to_client",
+  ]);
 
   // save_cargo rides with the pair and must be bound to the SAME bridge — the whole
   // point of this factory is that a live task spawn's tools talk to its own relay.
@@ -81,6 +86,13 @@ test("relay file tools factory registers both directions against the given bridg
   assert.match(cargoRes.content[0].text, /Saved "Notes" to Cargo/);
   assert.equal((saved as any)?.kind, "md");
   rmSync(cargoPath, { force: true });
+
+  // The chart tools ride here for the same reason and must be bound to the same bridge:
+  // they need a connected app, not merely a signed-in account, so a spawn's charts have
+  // to reach the app driving THAT session.
+  const listRes: any = await registered.get("list_charts").execute("t", {});
+  assert.match(listRes.content[0].text, /No charts yet/);
+  assert.deepEqual(charted, { op: "list" });
 
   // …and the send tool talks to THAT bridge, not some other session's.
   const path = "/private/tmp/claude-501/pv-relayfile-test.txt";

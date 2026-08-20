@@ -23,6 +23,7 @@ import { MOAT_SHIMS, reservedNames } from "../config/moatManifest.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import { CARGO_CHUNK_CHARS, type CargoSaveRequest, type CargoSaveResult } from "./cargoSave.ts";
+import { parseChartResult, type ChartOpRequest, type ChartOpResult } from "./chartOps.ts";
 
 // Display label for THIS running terminal. Deliberately NON-PII: we do NOT send
 // username@hostname or the working-directory name to the server/controller (the
@@ -142,6 +143,12 @@ export interface RelayCallbacks {
   // bridge's bounded wait turns into a clean "this app can't save artifacts yet"
   // rather than a wedged tool call.
   onCargoSaved?: (id: string, result: CargoSaveResult) => void;
+  // The app finished a CLI-initiated Chart operation (the id from requestChartOp): it
+  // read, created or edited the chart and encrypted anything it stored, or refused.
+  // Optional for the same reason onCargoSaved is — a controller too old to understand
+  // chart_request simply never answers, which the bridge's bounded wait turns into a
+  // clean "this app can't do charts yet" rather than a wedged tool call.
+  onChartResult?: (id: string, result: ChartOpResult) => void;
   // The app's composer is autocompleting an `@file` mention — reply with the cwd
   // files/dirs matching `query` (a sendFileMatches frame, keyed by the same id).
   // Read-only; resolution of the picked path still happens on the prompt turn.
@@ -680,6 +687,9 @@ export class RelayClient {
       cargoId?: string;
       storageType?: string;
       reason?: string;
+      // chart_result (the app's answer to a chart op). Left `unknown` on purpose —
+      // it has four shapes and parseChartResult is what decides which one arrived.
+      result?: unknown;
     };
     try {
       frame = JSON.parse(data.toString());
@@ -753,6 +763,14 @@ export class RelayClient {
               }
             : { ok: false, reason: typeof frame.reason === "string" && frame.reason ? frame.reason : "the app refused the save without giving a reason" };
         this.cb.onCargoSaved?.(frame.id, result);
+        break;
+      }
+      // The app's answer to a chart op. Re-typed rather than trusted, for the same
+      // reason cargo_saved is: the id keys a pending tool call and the payload is
+      // quoted to the model.
+      case "chart_result": {
+        if (typeof frame.id !== "string" || !frame.id) break;
+        this.cb.onChartResult?.(frame.id, parseChartResult(frame.result));
         break;
       }
       case "files_search":
@@ -1415,6 +1433,23 @@ export class RelayClient {
       this.rawSend({ type: "cargo_chunk", id, seq, data: req.content.slice(off, off + CARGO_CHUNK_CHARS) });
     }
     this.rawSend({ type: "cargo_end", id });
+  }
+
+  // Ask the app to run a chart operation: it decrypts to read, encrypts to write, and
+  // answers with a chart_result keyed by `id`. See chartOps.ts for why the round trip
+  // is the feature rather than a convenience.
+  //
+  // Unchunked, unlike requestCargoSave — chartOps caps a request well under the relay's
+  // 256 KB frame, which is a product decision (a card is something you read on a phone)
+  // as much as a wire one.
+  //
+  // NOT run through `safe()`, and for cargo's exact reason: that redacts secrets, and
+  // redaction inside content the user asked to store is corruption. A card reading
+  // `[redacted key]` where the model wrote an API shape is a defect the user only finds
+  // on their canvas. The tools decide what is safe to send.
+  requestChartOp(id: string, req: ChartOpRequest): void {
+    this.flushDeltas(); // land the op in order relative to buffered text
+    this.rawSend({ type: "chart_request", id, req });
   }
 
   requestApproval(id: string, req: PermissionRequest): void {

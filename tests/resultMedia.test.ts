@@ -148,6 +148,37 @@ test("brief: names the artifact fences the app can actually render", () => {
   assert.match(brief, /Nobody is at this terminal/);
 });
 
+test("brief: describes the chart fence, which is a headless run's ONLY route to a chart", () => {
+  // With no controller attached the create_chart tool isn't registered and the outbox
+  // seal is write-only, so this fence is the entire mechanism. A model that doesn't know
+  // it exists will never produce one.
+  const brief = deliveryBrief({ inbox: true, canAttach: false });
+  assert.match(brief, /```chart/);
+  assert.match(brief, /"kind":"note"/);
+  assert.match(brief, /"kind":"answer"/);
+  // The two constraints most likely to be broken: inventing card kinds, and doing layout.
+  assert.match(brief, /Two card kinds only/);
+  assert.match(brief, /do NOT give positions/);
+  // And the one that keeps charts from being made out of answers that aren't charts.
+  assert.match(brief, /A linear answer is not a chart/);
+});
+
+test("brief: the chart example parses as the spec the app will accept", () => {
+  // The example is the only schema the model gets, so a typo in it is a feature that
+  // silently never works. Pull it back out and check it is real JSON of the right shape.
+  const brief = deliveryBrief({ inbox: true, canAttach: false });
+  const line = brief.split("\n").find((l) => l.includes("```chart") && l.includes('"nodes"'))!;
+  const json = line.slice(line.indexOf("{"), line.lastIndexOf("}") + 1);
+  const spec = JSON.parse(json) as { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> };
+  assert.equal(spec.nodes.length, 2);
+  assert.equal(spec.nodes[0].kind, "note");
+  assert.ok(spec.nodes[0].body, "the note card must carry `body`");
+  assert.equal(spec.nodes[1].kind, "answer");
+  assert.ok(spec.nodes[1].prompt && spec.nodes[1].answer, "the answer card must carry both halves");
+  assert.equal(spec.nodes[1].parent, spec.nodes[0].ref);
+  assert.equal(spec.edges[0].from, spec.nodes[0].ref);
+});
+
 test("brief: mentions attach_to_result ONLY when the tool is registered", () => {
   assert.doesNotMatch(deliveryBrief({ inbox: true, canAttach: false }), /attach_to_result/);
   assert.match(deliveryBrief({ inbox: true, canAttach: true }), /attach_to_result/);

@@ -22,6 +22,7 @@ import {
 import { RelayClient } from "../src/remote/relayClient.ts";
 import { makeSendFileTool } from "../src/tools/sendFile.ts";
 import { makeSaveCargoTool } from "../src/tools/cargo.ts";
+import { makeChartTools } from "../src/tools/charts.ts";
 import { makeSaveAttachmentTool } from "../src/tools/saveAttachment.ts";
 import { AttachmentStore, type StoredAttachment } from "../src/util/attachmentStore.ts";
 import { makeExtensionsControl } from "../src/remote/extensionsControl.ts";
@@ -480,6 +481,12 @@ export default function privateerControl(pi: any): void {
   // relay isn't this file's. Unlike the pair it hands the app PLAINTEXT to encrypt —
   // the terminal has no master key, so the round trip is the feature (cargoSave.ts).
   pi.registerTool?.(makeSaveCargoTool(bridge));
+  // The chart tools, for the same reasons and one more. Same: this bridge, the same
+  // "needs a connected app" precondition, the same plaintext-out/app-encrypts round trip
+  // (chartOps.ts). More: they also READ the user's stored content back, so registering
+  // them anywhere the relay isn't this file's would mean a session asking for decrypted
+  // charts over a relay nobody is driving.
+  for (const tool of makeChartTools(bridge)) pi.registerTool?.(tool);
 
   // Subagents (and print/rpc) run as headless child `pi` processes with no UI. There
   // no one can approve, so a "default" gate would fail-closed on every tool and the

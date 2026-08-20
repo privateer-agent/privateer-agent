@@ -8,9 +8,17 @@
 //
 // So we prepend this. It states the surface (markdown, in an app), what the surface can
 // render beyond prose (ONE fenced artifact, which the app turns into a Cargo card with
-// Preview / Download / Save), and how to hand over media (the attach_to_result tool —
-// only mentioned when it is actually registered, because a brief that advertises a tool
-// the run doesn't have is how a model ends up describing an attachment nobody gets).
+// Preview / Download / Save; and a ```chart fence, which becomes an "Add to Charts"
+// button), and how to hand over media (the attach_to_result tool — only mentioned when it
+// is actually registered, because a brief that advertises a tool the run doesn't have is
+// how a model ends up describing an attachment nobody gets).
+//
+// The chart line earns its tokens because there is NO other way for an unattended run to
+// put one in front of the user. When the app is attached a terminal builds charts
+// directly (the create_chart tool), but the outbox seal is write-only by construction —
+// a headless run cannot reach into the account at all. Describing the chart in the answer
+// and letting the user press a button hours later is the whole mechanism, and a model
+// that doesn't know the fence exists will never use it.
 //
 // Deliberately short. It is prepended to every unattended turn, so every line costs
 // tokens on every run; anything that isn't load-bearing for the delivery is the user's
@@ -43,6 +51,9 @@ export function deliveryBrief(opts: BriefOptions): string {
     "    ```md kind=pdf … ```        a document (also kind=docx, kind=md).",
     "    ```csv kind=sheet … ```     a spreadsheet.",
     "  The app turns that fence into an artifact card with Preview, Download and Save — so don't also paste the same content as prose.",
+    "- If the answer has STRUCTURE worth seeing — parts and how they connect, options and their trade-offs, the branches of an investigation — you may ALSO end with one ```chart fence holding JSON, which the app offers as \"Add to Charts\" (a canvas of cards the user pans around and can keep working in):",
+    '    ```chart {"title":"Auth flow","nodes":[{"kind":"note","ref":"a","body":"markdown text"},{"kind":"answer","ref":"b","parent":"a","prompt":"the question","answer":"the response"}],"edges":[{"from":"a","to":"b","label":"calls"}]} ```',
+    "  Two card kinds only: \"note\" (needs body) and \"answer\" (needs prompt AND answer — the user can tap it and keep the branch going, which a note can't do). Give each card a short `ref` and use `parent` to say what hangs off what; do NOT give positions, the app lays them out. Max 12 cards. A linear answer is not a chart — skip the fence and just write it.",
   ];
   if (opts.canAttach) {
     lines.push(

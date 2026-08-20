@@ -16,6 +16,7 @@ import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/modeGate.ts";
 import type { RelayCallbacks } from "./relayClient.ts";
 import type { CargoSaveRequest, CargoSaveResult } from "./cargoSave.ts";
+import type { ChartOpRequest, ChartOpResult } from "./chartOps.ts";
 
 // How much of a driven turn's reply we hold for possible outbox delivery. The
 // sealed item is capped at 45k plaintext anyway; this just stops a pathological
@@ -28,6 +29,12 @@ const MAX_TURN_CAPTURE = 60_000;
 // Read per call rather than at module load so a test can set it without re-importing the
 // module (and so the env is read in the process that actually runs the save).
 const cargoSaveTimeoutMs = (): number => Number(process.env.PRIVATEER_CARGO_TIMEOUT_MS) || 60_000;
+
+// How long the app gets to answer a chart op. Same generosity and the same reasoning as
+// the cargo deadline — a create fans out into one POST per card, each encrypted on the
+// device first, so a chart of a dozen cards over a phone link is several seconds of real
+// work, not a round trip.
+const chartOpTimeoutMs = (): number => Number(process.env.PRIVATEER_CHART_TIMEOUT_MS) || 60_000;
 
 // The outbound surface the bridge needs; RelayClient implements all of it.
 export interface RelayLike {
@@ -48,6 +55,7 @@ export interface RelayLike {
   sendExtensions(payload: ExtensionsPayload): void;
   sendSkills(payload: SkillsPayload): void;
   requestCargoSave(id: string, req: CargoSaveRequest): void;
+  requestChartOp(id: string, req: ChartOpRequest): void;
 }
 
 // The installed-extensions snapshot relayed to the app's extensions manager.
@@ -149,6 +157,7 @@ export class RemoteBridge {
   private readonly pendingSelects = new Map<string, (v: string | null) => void>();
   private readonly pendingInputs = new Map<string, (v: string | null) => void>();
   private readonly pendingCargo = new Map<string, (r: CargoSaveResult) => void>();
+  private readonly pendingCharts = new Map<string, (r: ChartOpResult) => void>();
   private pendingAttachments: RemoteAttachment[] = [];
   // The driven turn in flight, kept only so it can be delivered to the outbox if it
   // turns out nobody was watching (see settleTurn). Bounded: the outbox truncates at
@@ -242,6 +251,10 @@ export class RemoteBridge {
     },
     onCargoSaved: (id, result) => {
       const resolve = this.pendingCargo.get(id);
+      if (resolve) resolve(result);
+    },
+    onChartResult: (id, result) => {
+      const resolve = this.pendingCharts.get(id);
       if (resolve) resolve(result);
     },
     onFilesSearch: (id, query) => this.cfg.onFilesSearch?.(id, query),
@@ -467,6 +480,43 @@ export class RemoteBridge {
     });
   };
 
+  // Run a chart operation on the app and wait for its answer. Structurally the twin of
+  // saveCargoRemote — the app owns the master key, so reading a card and writing one are
+  // both round trips — with one difference worth stating: this is the only place the CLI
+  // asks the app for the user's stored CONTENT back. A refusal here has to be as legible
+  // as a write failure, because "read the chart first, then add to it" is the normal
+  // shape of the work and the model has to be able to act on why it couldn't.
+  chartOpRemote = (req: ChartOpRequest, signal?: AbortSignal): Promise<ChartOpResult> => {
+    if (!this.relay) return Promise.resolve({ ok: false, reason: "remote access is not enabled — run /remote-access on and drive this terminal from the Privateer app" });
+    if (!this.relay.isConnected()) return Promise.resolve({ ok: false, reason: "the relay is not connected" });
+    if (this.relay.hasController && !this.relay.hasController()) {
+      return Promise.resolve({ ok: false, reason: "the Privateer app is not attached to this terminal — only the app holds the key that opens a chart, so open it and attach first" });
+    }
+    const id = randomUUID();
+    return new Promise<ChartOpResult>((resolve) => {
+      const settle = (r: ChartOpResult) => {
+        if (!this.pendingCharts.has(id)) return; // already settled (abort raced the reply)
+        this.pendingCharts.delete(id);
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(r);
+      };
+      const onAbort = () => settle({ ok: false, reason: "the turn was interrupted before the app answered" });
+      const deadline = chartOpTimeoutMs();
+      const timer = setTimeout(
+        () => settle({ ok: false, reason: `the app did not answer within ${Math.round(deadline / 1000)}s — it may be an older version that cannot work with charts from a terminal` }),
+        deadline,
+      );
+      timer.unref?.();
+      this.pendingCharts.set(id, settle);
+      if (signal) {
+        if (signal.aborted) return onAbort();
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.relay!.requestChartOp(id, req);
+    });
+  };
+
   private rejectAllPending(): void {
     for (const resolve of this.pending.values()) resolve("deny");
     this.pending.clear();
@@ -486,5 +536,14 @@ export class RemoteBridge {
       resolve({ ok: false, reason: "the app disconnected before confirming the save — it may or may not have stored the artifact; check Cargo in the app before saving again" });
     }
     this.pendingCargo.clear();
+    // A chart op whose controller vanished mid-flight gets the same honest "unknown"
+    // wording as a cargo save, and for a sharper reason: `edit` applies its steps in
+    // order, so a socket that died halfway leaves a chart that is PARTLY changed. Telling
+    // the model it failed invites a retry that re-adds every card it already wrote. The
+    // only safe next move is to look, so the reason says exactly that.
+    for (const resolve of this.pendingCharts.values()) {
+      resolve({ ok: false, reason: "the app disconnected before answering — some of the change may already have been applied; open the chart in the app to see what landed before trying again" });
+    }
+    this.pendingCharts.clear();
   }
 }

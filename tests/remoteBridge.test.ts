@@ -61,6 +61,7 @@ function makeFakeRelay() {
     sendSkills(payload) { skills.push(payload); },
     sendFileMatches(id, matches) { fileMatches.push({ id, matches }); },
     requestCargoSave(id, req) { cargoSaves.push({ id, req }); },
+    requestChartOp() {},
   };
   return relay;
 }
