@@ -25,8 +25,10 @@ import {
 } from "../src/auth/privateer.ts";
 
 // Offline-testable surface: URL safety, base-URL resolution, credential storage.
-// The network flows (device login / spawn / refresh) need the account server and
-// are covered by a live login smoke gated on real credentials.
+// The device-code PROTOCOL is offline-testable too and lives in deviceLogin.test.ts
+// (stub server). The flows that genuinely need the account server — approving a real
+// code, spawning and revoking a session against it — are covered live, gated on smoke
+// credentials, by treeview/desktop/scripts/check-account-drive.mjs.
 
 test("isSafeServerUrl: https ok, http only for loopback", () => {
   assert.equal(isSafeServerUrl("https://helix-server.example.com"), true);

@@ -18,7 +18,7 @@
  * app's seal(): X25519 → HKDF-SHA256 → AES-256-GCM.
  */
 
-import { readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { x25519 } from "@noble/curves/ed25519";
 import { globalDir } from "../config/paths.ts";
@@ -67,6 +67,14 @@ function loadOrCreate(): { publicKey: Uint8Array; secretKey: Uint8Array } {
   const secretKey = x25519.utils.randomPrivateKey();
   const publicKey = x25519.getPublicKey(secretKey);
   const file: TerminalKeyFile = { v: 1, publicKey: b64(publicKey), secretKey: b64(secretKey) };
+  // The home may not exist yet: the FIRST thing a fresh machine does is /login, and
+  // requestDeviceCode swallows a throw from here (a login must not fail over a key it
+  // can live without). Without the mkdir that swallow turned an absent directory into
+  // a login that silently carried no pubkey — so the app had nothing to pin and every
+  // app-sealed secret to this terminal stayed impossible until the next re-link.
+  // saveCredentials writes into the same directory and has always created it; this is
+  // the same rule, one step earlier in the flow.
+  mkdirSync(globalDir(), { recursive: true, mode: 0o700 });
   // Create 0600 from the start — passing `mode` to writeFileSync avoids the TOCTOU
   // window where a fresh file briefly carries umask perms (group/world-readable)
   // before a follow-up chmod. `mode` only applies on CREATE, so also chmod to fix an
