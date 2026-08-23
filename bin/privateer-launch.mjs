@@ -29,6 +29,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 import { routeUpdate } from "./update-route.mjs";
+import { runToCompletion } from "./run-to-completion.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
 const REPO = path.resolve(HERE, "..");
@@ -132,18 +133,6 @@ if (sub === "--version" || sub === "-V") {
 }
 
 // Faithfully propagate a child's exit/signal, mirroring bash `exec`.
-function runToCompletion(cmd, cmdArgs, opts = {}) {
-  const child = spawn(cmd, cmdArgs, { stdio: "inherit", env: process.env, ...opts });
-  child.on("exit", (code, signal) => {
-    if (signal) process.kill(process.pid, signal);
-    else process.exit(code ?? 0);
-  });
-  child.on("error", (e) => {
-    console.error(`privateer: failed to launch — ${e.message}`);
-    process.exit(1);
-  });
-}
-
 // npm gives no usable progress, so on a TTY show a braille spinner while it runs
 // and keep its output buffered — shown only if the install fails. Non-TTY (CI,
 // piped) keeps the old passthrough behaviour. The global package is replaced in
@@ -291,7 +280,9 @@ if (sub === "update") {
 else if (sub === "harbor" || sub === "daemon") {
   sweepLegacyShims(); // a harbor-only machine upgrades too — see the function's note
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
-  runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-harbor.mjs"), ...args.slice(1)]);
+  // A resident background process, stopped by launchd/systemd/scripts with a plain
+  // `kill` — which reaches only this launcher. See runToCompletion.
+  runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-harbor.mjs"), ...args.slice(1)], { forwardSignals: true });
 }
 
 // --- `privateer verify` ----------------------------------------------------
@@ -314,7 +305,9 @@ else if (sub === "verify") {
 else if (sub === "acp") {
   sweepLegacyShims(); // silent: only ever removes files
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
-  runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-acp.mjs"), ...args.slice(1)]);
+  // Long-lived and driven over stdio by an editor, which stops it by terminating
+  // the process rather than by a keystroke. Same leak, same fix.
+  runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-acp.mjs"), ...args.slice(1)], { forwardSignals: true });
 }
 
 // --- normal launch: resolve the moat, then exec Pi's TUI with it -----------
