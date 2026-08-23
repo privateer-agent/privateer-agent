@@ -383,6 +383,11 @@ export class RelayClient {
   private reconnectDelay = RECONNECT_MS;
   // Last refusal reason reported, so a 4xx is logged once instead of on every retry.
   private refusal: string | null = null;
+  // Why the last connection attempt failed, kept for connectionStatus(). A refusal
+  // (4xx) outranks it — that one is a decision, not a hiccup — but without either,
+  // every un-connected relay reports as a bare "connecting…", which is the same
+  // sentence whether the socket opens in two seconds or never opens again.
+  private lastFailure: string | null = null;
   // Ordered delta buffer (text/reasoning) coalesced into one frame per flush.
   private bufKind: "text" | "reasoning" | null = null;
   private buf = "";
@@ -518,6 +523,7 @@ export class RelayClient {
       ws.on("open", () => {
         opened = true;
         this.refusal = null; // a later refusal is news again
+        this.lastFailure = null; // whatever kept us out is history
         this.reconnectDelay = RECONNECT_MS; // reachable again — next blip retries fast
         this.connectedAt = Date.now();
         this.startHeartbeat(ws);
@@ -537,6 +543,9 @@ export class RelayClient {
         // attach/detach frame said. Re-learned on the next attach or inbound frame.
         this.controllerHere = false;
         this.cb.onDisconnected?.();
+        // A socket that never opened failed for a reason worth reporting; one that
+        // opened and dropped is an ordinary blip the reconnect handles.
+        this.lastFailure = opened ? null : lastErr || "the relay connection closed before it opened";
         if (!this.closed) {
           this.cb.onStatus?.(
             opened
@@ -560,6 +569,7 @@ export class RelayClient {
       const status = (err as { status?: number })?.status;
       const refused = typeof status === "number" && status >= 400 && status < 500;
       if (refused) {
+        this.lastFailure = msg;
         this.settleFirstConnect(err instanceof Error ? err : new Error(msg));
         // A refusal is a decision, not a hiccup: hammering the same request every few
         // seconds can't change it, and for a harbor — whose onStatus goes to a log file,
@@ -578,6 +588,7 @@ export class RelayClient {
       }
       // Transient (network/route/5xx): stay on the fast retry.
       this.refusal = null;
+      this.lastFailure = msg;
       this.cb.onStatus?.(`Remote access couldn't reach the relay (${msg}) — retrying…`);
       this.scheduleReconnect();
     } finally {
@@ -970,8 +981,19 @@ export class RelayClient {
   // quiet for longer than the server's 25s ping cadence is the shape of the half-open
   // failure the watchdog exists to catch, so it is worth showing rather than a bare
   // "connected".
-  connectionStatus(): { connected: boolean; upSec?: number; quietSec?: number } {
-    if (!this.isConnected()) return { connected: false };
+  connectionStatus(): { connected: boolean; upSec?: number; quietSec?: number; detail?: string; refused?: boolean } {
+    // Not connected: say WHY when we know. A standing refusal (the plan's agent cap,
+    // a rejected ticket) is the answer that matters most — it will not clear on its
+    // own, and it's the one case a caller should present as a decision rather than a
+    // wait — so it wins over the last transient error and is flagged as itself.
+    if (!this.isConnected()) {
+      const detail = this.refusal ?? this.lastFailure;
+      return {
+        connected: false,
+        ...(detail ? { detail } : {}),
+        ...(this.refusal ? { refused: true } : {}),
+      };
+    }
     const now = Date.now();
     return {
       connected: true,

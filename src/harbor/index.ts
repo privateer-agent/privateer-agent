@@ -651,6 +651,16 @@ export class Harbor {
   }
 
   private async tick(): Promise<void> {
+    // Retry the relay every tick, not just at startup. syncRelay() bails when the
+    // account isn't signed in on this machine — and a harbor that came up in that
+    // state used to stay off the relay FOREVER, because start() was the only caller
+    // that mattered (the three IPC commands that also call it are ones the desktop
+    // app never sends). Signing in afterwards wrote credentials.json and changed
+    // nothing: the harbor kept answering IPC, so the app called it running, while
+    // its relay socket had never been opened — the permanent "Connecting" with a
+    // harbor that fires no routine and answers no spawn. Cheap and idempotent: it
+    // returns immediately once a client exists, or while remote access is off.
+    this.syncRelay();
     void this.flushPendingCloud();
     const now = Date.now();
     for (const r of loadRoutines()) {
@@ -1269,19 +1279,35 @@ export class Harbor {
   private relayStatus(): RelayStatus {
     const termId = routineRelayId();
     if (this.relayTerminated) {
-      return { termId, connected: false, detail: "remote access was turned off from the app — restart the harbor to re-enable it" };
+      return { termId, connected: false, reason: "terminated", detail: "remote access was turned off from the app — restart the harbor to re-enable it" };
     }
     if (!this.relay) {
+      // "relay not started" with credentials present is now a sub-tick window, not a
+      // permanent state: tick() re-runs syncRelay(), so a harbor that came up signed
+      // out connects on its own once you sign in. Reported as "connecting" because
+      // that is what it now is.
+      const signedIn = hasCredentials();
       return {
         termId,
         connected: false,
-        detail: hasCredentials()
+        reason: signedIn ? "connecting" : "signed-out",
+        detail: signedIn
           ? "relay not started"
-          : "no account signed in on this machine — run `privateer` and /login, then restart the harbor",
+          : "no account signed in on this machine — run `privateer` and /login",
       };
     }
     const conn = this.relay.connectionStatus();
-    if (!conn.connected) return { termId, connected: false, detail: "connecting…" };
+    // The client knows why it isn't up — a refused ticket, an unreachable server —
+    // and reporting a flat "connecting…" over the top of that is what made a harbor
+    // that will never connect look like one that is about to.
+    if (!conn.connected) {
+      return {
+        termId,
+        connected: false,
+        reason: conn.refused ? "refused" : "connecting",
+        detail: conn.detail ?? "connecting…",
+      };
+    }
     return { termId, connected: true, upSec: conn.upSec, quietSec: conn.quietSec };
   }
 

@@ -43,6 +43,21 @@ export type IpcRequest =
   | { cmd: "reload" };
 
 /**
+ * Why a harbor isn't on the relay, as a code rather than a sentence.
+ *
+ * `detail` below is written for a terminal — it names CLI commands and is English
+ * only — so the app can't put it in front of a user. It used to have nothing else
+ * to go on, and said "give it a moment" about every one of these, including the
+ * three that never clear on their own. This is the machine-readable half.
+ *
+ *   terminated  remote access was switched off from the app; needs a restart
+ *   signed-out  no account credentials on this machine
+ *   refused     the server said no (plan's agent cap, rejected ticket) — standing
+ *   connecting  genuinely still trying; this one really is worth a moment
+ */
+export type RelayReason = "terminated" | "signed-out" | "refused" | "connecting";
+
+/**
  * The harbor's view of its own relay connection, reported by `status`.
  *
  * A harbor answering on this socket is running; that is NOT the same as being
@@ -62,6 +77,8 @@ export interface RelayStatus {
   quietSec?: number;
   /** Why it isn't connected, when we know: signed out, turned off from the app, … */
   detail?: string;
+  /** The same fact as `detail`, for a caller that has to localize it. */
+  reason?: RelayReason;
 }
 
 export interface IpcResponse {
