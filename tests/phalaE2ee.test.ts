@@ -10,7 +10,7 @@ import {
   type ReportVerification,
 } from "../src/providers/phala/aci-verifier/index.ts";
 
-// Proves the vendored @dstack/aci-verifier E2EE channel runs correctly on Node's
+// Proves the vendored aci-verifier E2EE channel runs correctly on Node's
 // native Web Crypto (no polyfills) by simulating the enclave side in full:
 //   client(seal) → [service private key decrypts]  — the request path
 //   [enclave encrypts to client pub] → client(open) — the response path
@@ -73,17 +73,24 @@ async function fixture(): Promise<{ report: AttestationReport; verification: Rep
   const service = (await subtle.generateKey({ name: "X25519" }, true, ["deriveBits"])) as CryptoKeyPair;
   const servicePubHex = toHex(new Uint8Array(await subtle.exportKey("raw", service.publicKey)));
   const digest = "test-keyset-digest";
+  const keyset = { e2ee_public_keys: [{ algo: ALGO, public_key: servicePubHex }] };
   const report = {
-    api_version: "1",
-    workload_id: "w",
+    api_version: "aci/1",
     workload_keyset_digest: digest,
     attestation: {
-      workload_keyset: { e2ee_public_keys: [{ algo: ALGO, public_key: servicePubHex }] },
+      tee_type: "tdx",
+      workload_keyset: keyset,
       report_data: "",
-      keyset_endorsement: { algo: "ed25519", value: "" },
     },
   } as unknown as AttestationReport;
-  const verification: ReportVerification = { ok: true, checks: [], workloadId: "w", workloadKeysetDigest: digest };
+  // The channel reads its key off `verification.keyset` — the object the binding
+  // check canonicalized — not the report's copy.
+  const verification = {
+    ok: true,
+    checks: [],
+    workloadKeysetDigest: digest,
+    keyset,
+  } as unknown as ReportVerification;
   return { report, verification, servicePriv: service.privateKey };
 }
 

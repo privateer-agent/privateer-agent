@@ -9,9 +9,10 @@
 > Four things the live run found, all fixed:
 > 1. **Content-Type needs a charset.** EHBP seals the body but not headers, so the enclave
 >    router validates the cleartext `Content-Type` and 400s a bare `application/json`.
-> 2. **Phala signs its keyset endorsement with `ecdsa-secp256k1`**, which ACI §4.3 allows
->    but upstream's Web-Crypto-only verifier throws on. Dispatch now lives outside the
->    vendored tree in `src/providers/phala/reportBinding.ts`.
+> 2. **Phala signed its keyset endorsement with `ecdsa-secp256k1`**, which the ACI spec
+>    allowed but upstream's Web-Crypto-only verifier threw on, so the dispatch lived
+>    outside the vendored tree. Obsolete since the gateway moved to `aci/1` (see the
+>    2026-08-24 note below): there is no keyset endorsement any more.
 > 3. **`phala/*` is sealed-only** — no cleartext route exists — so it is registered only
 >    while the shim is actually listening (`isServableAccountModel`).
 > 4. **Streaming turns billed as UNBILLED.** Tinfoil returns usage as an HTTP *trailer*
@@ -26,6 +27,19 @@
 >
 > Still unproven: the full expire → refresh → retry loop (step 6) was only verified as far
 > as "a dead bearer 401s cleanly through the shim".
+>
+> **Update (2026-08-24): the Phala gateway shipped `aci/1`, a breaking report change.**
+> The keyset no longer carries a `workload_identity` key that endorses it, and the report
+> no longer carries `workload_id` or `keyset_endorsement`; the keyset is bound straight
+> into `report_data` (statement `{keyset_digest, nonce, purpose}`) and per-key custody
+> moved to `evidence.key_custody` (a dstack-KMS chain the spec leaves to policy). A client
+> written against the old shape does not degrade — it dereferences an absent field and
+> throws, which surfaced as `502 sealed shim: Cannot read properties of undefined (reading
+> 'public_key')` on every `phala/*` turn. The vendored verifier was re-pulled at gateway
+> commit `1a044e96` and `reportBinding.ts` deleted; E2EE v2 itself is unchanged (it moved
+> to its own `spec/e2ee-v2.md` and the gateway still advertises it). Re-verified live:
+> attestation binding + TDX quote + all four RTMR replays + compose hash pass, and a
+> sealed turn round-trips both buffered and streamed.
 
 ## The problem, in one line
 

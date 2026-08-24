@@ -8,13 +8,16 @@
 // (`${server}/api/sealed/phala`, treeview/server/routes/sealed.js) injects PHALA_API_KEY
 // and forwards ciphertext — it can't read prompts or responses.
 //
-// Crypto is the vendored @dstack/aci-verifier (./phala/aci-verifier), pure Web Crypto
+// Crypto is the vendored aci-verifier (./phala/aci-verifier), pure Web Crypto
 // (X25519/HKDF/AES-GCM/Ed25519). Node ≥ 22 provides all of it on globalThis.crypto —
 // no polyfills, unlike the RN app.
 //
 // Two-layer attestation, fail-secure:
-//   (1) verifyAciReportBinding — the report's crypto binding (keyset digest,
-//       report_data == statement(nonce), endorsement sig). Self-attesting alone.
+//   (1) verifyReportBinding — the report's crypto binding (§9.1 checks 2–3): the
+//       served keyset canonicalizes to the digest that the attestation statement for
+//       OUR nonce hashes into report_data, and the keyset has not expired. Every key
+//       we go on to use — the X25519 key we seal to above all — is a member of that
+//       one object, so the binding covers them without a separate signature.
 //   (2) verifyHardwareQuote — the hardware root: @phala/dcap-qvl verifies the TDX quote
 //       against Intel collateral and binds the quote's report_data to (1)'s statement
 //       digest. requireQuote defaults TRUE; PRIVATEER_PHALA_REQUIRE_QUOTE=0 drops it
@@ -23,17 +26,13 @@
 import type { Report } from "@phala/dcap-qvl";
 import {
   openE2eeChannel,
+  verifyReportBinding,
   toHex,
   fromHex,
   type AttestationReport,
   type ReportVerification,
   type E2eeChannel,
 } from "./phala/aci-verifier/index.ts";
-// Not the vendored verifyReportBinding directly: the deployed gateway signs its
-// keyset endorsement with ecdsa-secp256k1, which upstream's Web-Crypto-only verifier
-// refuses. This wrapper delegates ed25519 to it unchanged and adds the secp256k1 arm
-// the spec allows (§4.3), leaving aci-verifier/ pristine for re-pulls.
-import { verifyAciReportBinding } from "./phala/reportBinding.ts";
 import {
   parseEventLog,
   appIdentityFrom,
@@ -153,7 +152,7 @@ async function establishAttestation(): Promise<VerifiedAttestation> {
   if (!res.ok) throw new Error(`phala attestation HTTP ${res.status}`);
   const report = (await res.json()) as AttestationReport;
 
-  const verification = await verifyAciReportBinding(report, nonce);
+  const verification = await verifyReportBinding(report, nonce);
   if (!verification.ok) {
     const failed = verification.checks.filter((c) => !c.ok).map((c) => c.name).join(", ");
     throw new Error(`phala attestation binding failed: ${failed}`);

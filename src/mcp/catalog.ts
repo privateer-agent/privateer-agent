@@ -375,6 +375,47 @@ export const MCP_CATALOG: CatalogEntry[] = [
     hosted: false,
     docsUrl: "https://dev.epicgames.com/documentation/unreal-engine/unreal-mcp-in-unreal-editor",
   },
+  {
+    // Godot ships no MCP server of its own. This is the "Godot MCP Native" editor
+    // plugin (MIT, Godot Asset Library) — chosen because it serves streamable HTTP
+    // from INSIDE the editor process, which is the same shape as the Unreal entry
+    // above and needs nothing installed on the machine outside Godot itself.
+    //
+    // Deliberately NOT one of the npx-launched Godot servers: those shell out to the
+    // `godot` BINARY headlessly (a second, non-interactive copy of the project rather
+    // than the editor the user is looking at), and every one of them is configured by
+    // a GODOT_PATH env var — a filesystem path, which is neither a token nor a
+    // placeholder arg, so this catalog has no `needs` that could ask for it honestly.
+    //
+    // Two things differ from Unreal, and they are the only two:
+    //  1. THE PLUGIN IS NOT PART OF THE ENGINE. Install "Godot MCP Native" from the
+    //     Asset Library and enable it in Project → Project Settings → Plugins. Until
+    //     that is done the port is simply closed, which looks identical to "Godot is
+    //     not running" — so the setup guide below matters more here than it does for
+    //     Unreal, where the plugin ships with 5.8.
+    //  2. ITS BIND ADDRESS IS NOT DOCUMENTED UPSTREAM. Unreal's is (loopback, plus an
+    //     Origin check); this one's is not, so the honest claim is only that WE dial
+    //     127.0.0.1 — never that the editor cannot be reached from the LAN. Its own
+    //     `auth_enabled` is off by default (user://mcp_settings.cfg), which is the
+    //     knob to turn on when the machine sits on a network you don't trust.
+    //
+    // Everything else matches Unreal: nothing to authorize on the wire we use (hence
+    // localHttp + auth:"none"), it answers only while the editor is open, and the port
+    // is editable (`http_port`) — hence needs:"url", confirm the endpoint.
+    id: "godot",
+    name: "godot",
+    label: "Godot Engine",
+    blurb: "Drive the Godot editor — scenes, nodes, scripts, resources.",
+    transport: "http",
+    url: "http://127.0.0.1:9080/mcp",
+    localHttp: true,
+    needs: "url",
+    // Same reason as Unreal: hostedCapable() derives its answer from `oauth`, so
+    // http-with-no-auth would otherwise read as hostable. An enclave cannot reach a
+    // loopback port on the user's desk.
+    hosted: false,
+    docsUrl: "https://github.com/yurineko73/Godot-MCP-Native",
+  },
 ];
 
 export function catalogEntry(id: string): CatalogEntry | undefined {

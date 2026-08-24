@@ -234,9 +234,9 @@ test("moat: the launcher's -e paths load the moat next to the user's own extensi
 // ffmpeg, no account, no network, no spend) is grantable everywhere.
 test("moat profiles: each kind builds a gate, and web stays off the interactive paths", async () => {
   const cwd = REPO;
-  const kinds: MoatKind[] = ["harbor-session", "live-task", "channels", "acp", "repl"];
+  const kinds: MoatKind[] = ["harbor-session", "live-task", "channels", "acp", "repl", "desktop"];
   for (const kind of kinds) {
-    const factories = await buildMoat({ kind, gate: stubGate(cwd) });
+    const factories = await buildMoat({ kind, gate: stubGate(cwd), webHint: "sign in" });
     assert.ok(factories.length >= 3, `${kind}: expected at least gate + privacy + account`);
     assert.ok(
       factories.every((f) => typeof f === "function"),
@@ -254,22 +254,77 @@ test("moat profiles: each kind builds a gate, and web stays off the interactive 
 test("moat: attach_to_result exists only for a run with an Inbox to attach to", async () => {
   const { ResultMedia } = await import("../src/routines/resultMedia.ts");
 
-  // A stub `pi` that records tool names and shrugs at everything else an extension does.
-  const toolsFrom = (factories: ((pi: any) => void)[]): string[] => {
-    const names: string[] = [];
-    const pi: any = new Proxy(
-      { registerTool: (t: any) => { if (t?.name) names.push(t.name); } },
-      { get: (target, prop) => (prop in target ? (target as any)[prop] : () => undefined) },
-    );
-    for (const f of factories) {
-      try { f(pi); } catch { /* an extension that needs a real host is not what we're asking about */ }
-    }
-    return names;
-  };
-
   const without = await buildMoat({ kind: "harbor-session", gate: stubGate(REPO) });
   assert.ok(!toolsFrom(without).includes("attach_to_result"), "no staging area ⇒ no tool");
 
   const withMedia = await buildMoat({ kind: "harbor-session", gate: stubGate(REPO), resultMedia: new ResultMedia() });
   assert.ok(toolsFrom(withMedia).includes("attach_to_result"), "a staged run must be able to attach");
+});
+
+// A stub `pi` that records tool names and shrugs at everything else an extension does.
+// Shared by every test that asks what a kind's factories actually REGISTER — hoisted, so
+// the attach_to_result test above uses this one rather than its own former copy.
+function toolsFrom(factories: ((pi: any) => void)[]): string[] {
+  const names: string[] = [];
+  const pi: any = new Proxy(
+    { registerTool: (t: any) => { if (t?.name) names.push(t.name); } },
+    { get: (target, prop) => (prop in target ? (target as any)[prop] : () => undefined) },
+  );
+  for (const f of factories) {
+    try { f(pi); } catch { /* an extension that needs a real host is not what we're asking about */ }
+  }
+  return names;
+}
+
+// THE REGRESSION THIS KIND WAS ADDED FOR. The desktop app built its own factory array and
+// never loaded privateer-media, so the Super Computer was the one surface with no
+// generation at all — and, more tellingly, no video_compose either, which every other kind
+// gets unconditionally because it is local ffmpeg work that spends nothing. Meanwhile its
+// MCP connectors worked, so it could drive the Godot and Unreal editors but not make a
+// texture to put in them.
+//
+// Pinned as a COMPARISON rather than a tool list, deliberately: generation is credentials-
+// gated (mediaEnabled → hasCredentials), so an absolute assertion would say different
+// things on a signed-in laptop and in CI. "Whatever the harbor gets, the desktop gets" is
+// true in both, and it is the actual claim — an attended session with a human watching
+// must never have LESS media than an unattended one.
+test("moat: the desktop kind is not a lesser kind for media than the harbor", async () => {
+  const desktop = toolsFrom(await buildMoat({ kind: "desktop", gate: stubGate(REPO), webHint: "sign in" }));
+  const harbor = toolsFrom(await buildMoat({ kind: "harbor-session", gate: stubGate(REPO) }));
+
+  const MEDIA = new Set([
+    "generate_image", "generate_video", "generate_model",
+    "generate_speech", "generate_music", "generate_sfx",
+    "media_capabilities", "video_compose",
+  ]);
+  for (const name of harbor.filter((n) => MEDIA.has(n))) {
+    assert.ok(desktop.includes(name), `desktop is missing ${name}, which harbor-session has`);
+  }
+  // Unconditional everywhere — no account, no network, no spend — so this one is safe to
+  // assert outright, and it is the half that had no excuse for being absent.
+  assert.ok(desktop.includes("video_compose"), "local composition costs nothing and must always be there");
+});
+
+// web has two shapes and the difference is not a preference — see MoatCaps.web. The
+// unattended kinds decide once at build; an attended one cannot, because /signin happens
+// in the middle of the session it would have decided for. So the desktop's web tools exist
+// whether or not this machine is signed in, which is the only form of the assertion that
+// means the same thing on a developer's laptop as in CI.
+test("moat: an attended kind gets web tools that outlive sign-in", async () => {
+  const desktop = toolsFrom(await buildMoat({ kind: "desktop", gate: stubGate(REPO), webHint: "sign in" }));
+  assert.ok(desktop.includes("web_search"), "guarded web_search must be registered regardless of credentials");
+  assert.ok(desktop.includes("web_fetch"), "guarded web_fetch must be registered regardless of credentials");
+});
+
+// The guard's message is the caller's to write (src/tools/web.ts), so a kind that asks for
+// guarded web tools without supplying one is a programming error — and a silent default
+// would be exactly the plausible-but-wrong drift this module exists to prevent. Fail at
+// build, where the test catches it, rather than telling a signed-out user something
+// generic about an account menu they may not have.
+test("moat: guarded web without a hint is a build error, not a default", async () => {
+  await assert.rejects(
+    () => buildMoat({ kind: "desktop", gate: stubGate(REPO) }),
+    /webHint/,
+    "a guarded kind must be made to supply its own sign-in message",
+  );
 });

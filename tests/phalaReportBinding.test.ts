@@ -1,123 +1,129 @@
-// verifyAciReportBinding — the algorithm dispatch that lets us attest the deployed
-// Phala gateway (ecdsa-secp256k1 keyset endorsement) without patching the vendored
-// upstream verifier. See src/providers/phala/reportBinding.ts.
+// verifyReportBinding — the crypto binding that establishes the Phala workload
+// keyset (§9.1 checks 2–3). See src/providers/phala/aci-verifier/report.ts.
+//
+// Under aci/1 there is no keyset endorsement to check: the served keyset
+// canonicalizes to a digest, that digest plus our nonce make the attestation
+// statement, and sha256 of the statement is the `report_data` the TDX quote
+// signs (phalaSeal.ts verifies the quote itself). So this one recomputation is
+// what stops a relay swapping the X25519 key we seal our prompts to.
 //
 // The fixture is a REAL attestation report fetched from
-// ${server}/api/sealed/phala/attestation on 2026-07-31, trimmed to the fields the
-// binding checks read (the TDX quote belongs to the hardware layer, phalaSeal.ts).
-// It was fetched WITHOUT a nonce, so report_data is the no-nonce statement digest.
+// ${server}/api/sealed/phala/attestation on 2026-08-24 with NONCE below, trimmed
+// to the fields the binding checks read (the TDX quote and the event log belong
+// to the hardware layer — phalaSeal.ts and measurements.ts).
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { verifyAciReportBinding } from "../src/providers/phala/reportBinding.ts";
 import {
   verifyReportBinding,
-  UnsupportedAlgorithmError,
-  toHex,
-  fromHex,
+  computeKeysetDigest,
+  AciFormatError,
   type AttestationReport,
+  type Check,
 } from "../src/providers/phala/aci-verifier/index.ts";
 
 const REPORT: AttestationReport = JSON.parse(
-  readFileSync(new URL("./fixtures/phala-report-secp256k1.json", import.meta.url), "utf8"),
+  readFileSync(new URL("./fixtures/phala-report-aci1.json", import.meta.url), "utf8"),
 );
 
-// Pinned so the keyset_epoch/freshness checks stay deterministic — the fixture's
-// keyset expires (not_after 1786181275) and a wall-clock test would rot.
-const NOW = 1785483500; // inside the fixture's [fetched_at, stale_after) window
+// The nonce the fixture was issued for. report_data binds to it, so it is as much
+// of the fixture as the JSON is.
+const NONCE = "2ad0e49a3bbdaa1e91bc22464c29d447424d2511d020e83707b3457a77b0e85a";
+
+// Pinned so the expiry check stays deterministic — the fixture's keyset expires
+// (not_after 1789869673 = 2026-09-20) and a wall-clock test would rot.
+const NOW = 1787537180; // when the fixture was fetched
 
 const clone = (): AttestationReport => JSON.parse(JSON.stringify(REPORT)) as AttestationReport;
+const named = (checks: Check[], name: string) => checks.find((c) => c.name === name);
 
-test("verifies the live gateway's secp256k1 keyset endorsement (the case upstream refuses)", async () => {
-  // Baseline: the vendored verifier cannot do this report at all.
-  await assert.rejects(
-    () => verifyReportBinding(REPORT, null, { now: NOW }),
-    UnsupportedAlgorithmError,
-    "fixture should be the algorithm upstream rejects — otherwise this test proves nothing",
-  );
-
-  const res = await verifyAciReportBinding(REPORT, null, { now: NOW, trustPlatformClock: true });
-  assert.equal(res.ok, true, `failed: ${res.checks.filter((c) => !c.ok).map((c) => c.name)}`);
+test("verifies the live gateway's aci/1 report for the nonce it was issued for", async () => {
+  const res = await verifyReportBinding(REPORT, NONCE, { now: NOW });
+  assert.equal(res.ok, true, `failed: ${res.checks.filter((c) => !c.ok).map((c) => c.detail)}`);
   assert.deepEqual(
     res.checks.map((c) => c.name),
-    ["workload_id", "workload_keyset_digest", "report_data", "keyset_endorsement", "keyset_epoch.not_after", "freshness_window"],
+    ["api_version", "workload_keyset_digest", "report_data", "not_after"],
   );
   assert.equal(res.workloadKeysetDigest, REPORT.workload_keyset_digest);
+  // The established keyset is what callers seal to — it must come back parsed.
+  assert.ok(res.keyset?.e2ee_public_keys.some((k) => k.algo === "x25519-aes-256-gcm-hkdf-sha256"));
 });
 
-test("a tampered endorsement signature fails the check — it does not throw", async () => {
-  const r = clone();
-  const sig = fromHex(r.attestation.keyset_endorsement.value);
-  sig[10] ^= 0xff;
-  r.attestation.keyset_endorsement.value = toHex(sig);
-
-  const res = await verifyAciReportBinding(r, null, { now: NOW });
+test("binds the nonce: report_data fails under a nonce it wasn't issued for", async () => {
+  const other = NONCE.slice(0, 63) + (NONCE.endsWith("a") ? "b" : "a");
+  const res = await verifyReportBinding(REPORT, other, { now: NOW });
   assert.equal(res.ok, false);
-  const check = res.checks.find((c) => c.name === "keyset_endorsement");
-  assert.equal(check?.ok, false);
+  assert.equal(named(res.checks, "report_data")?.ok, false);
 });
 
-test("accepts a high-s signature (malleability is meaningless over a fixed payload)", async () => {
-  // (r, n-s) is an equally valid ECDSA signature. A signer that doesn't normalize
-  // would otherwise fail attestation about half the time, intermittently.
-  const raw = fromHex(REPORT.attestation.keyset_endorsement.value);
-  const s = BigInt("0x" + toHex(raw.slice(32)));
-  const flipped = secp256k1.CURVE.n - s;
-  const hex = flipped.toString(16).padStart(64, "0");
+test("a no-nonce statement does not satisfy a nonced report", async () => {
+  const res = await verifyReportBinding(REPORT, null, { now: NOW });
+  assert.equal(named(res.checks, "report_data")?.ok, false);
+});
+
+test("swapping the attested E2EE key breaks the binding — the whole point", async () => {
   const r = clone();
-  r.attestation.keyset_endorsement.value = toHex(raw.slice(0, 32)) + hex;
+  const keys = (
+    r.attestation.workload_keyset as { e2ee_public_keys: { algo: string; public_key: string }[] }
+  ).e2ee_public_keys;
+  const key = keys.find((k) => k.algo === "x25519-aes-256-gcm-hkdf-sha256")!;
+  key.public_key = key.public_key.slice(0, -1) + (key.public_key.endsWith("0") ? "1" : "0");
 
-  const res = await verifyAciReportBinding(r, null, { now: NOW });
-  assert.equal(res.checks.find((c) => c.name === "keyset_endorsement")?.ok, true);
-});
-
-test("a signature of the wrong shape is rejected, not thrown", async () => {
-  for (const bad of ["", "abcd", REPORT.attestation.keyset_endorsement.value + "00"]) {
-    const r = clone();
-    r.attestation.keyset_endorsement.value = bad;
-    const res = await verifyAciReportBinding(r, null, { now: NOW });
-    assert.equal(res.checks.find((c) => c.name === "keyset_endorsement")?.ok, false, `shape ${bad.length}`);
-  }
-});
-
-test("binds the nonce: the report_data check fails under a nonce it wasn't issued for", async () => {
-  const res = await verifyAciReportBinding(REPORT, "deadbeef", { now: NOW });
+  const res = await verifyReportBinding(r, NONCE, { now: NOW });
   assert.equal(res.ok, false);
-  assert.equal(res.checks.find((c) => c.name === "report_data")?.ok, false);
+  // Both: the keyset no longer digests to what the report restates, and the
+  // recomputed digest no longer produces the report_data the quote signed.
+  assert.equal(named(res.checks, "workload_keyset_digest")?.ok, false);
+  assert.equal(named(res.checks, "report_data")?.ok, false);
 });
 
-test("an endorsement algo that disagrees with the identity key fails", async () => {
+test("the recomputed digest is authoritative, not the report's restated copy", async () => {
   const r = clone();
-  r.attestation.keyset_endorsement.algo = "ed25519";
-  const res = await verifyAciReportBinding(r, null, { now: NOW });
-  assert.equal(res.checks.find((c) => c.name === "keyset_endorsement")?.ok, false);
+  r.workload_keyset_digest = "sha256:" + "0".repeat(64);
+  const res = await verifyReportBinding(r, NONCE, { now: NOW });
+  assert.equal(named(res.checks, "workload_keyset_digest")?.ok, false);
+  // report_data still passes: the statement was built from the keyset's own bytes.
+  assert.equal(named(res.checks, "report_data")?.ok, true);
 });
 
-test("an expired keyset epoch fails", async () => {
-  const res = await verifyAciReportBinding(REPORT, null, {
-    now: REPORT.attestation.workload_keyset.keyset_epoch.not_after + 1,
-  });
+test("an expired keyset fails", async () => {
+  const keyset = REPORT.attestation.workload_keyset as { not_after: number };
+  const res = await verifyReportBinding(REPORT, NONCE, { now: keyset.not_after + 1 });
   assert.equal(res.ok, false);
-  assert.equal(res.checks.find((c) => c.name === "keyset_epoch.not_after")?.ok, false);
+  assert.equal(named(res.checks, "not_after")?.ok, false);
 });
 
-test("ed25519 reports are delegated to the vendored verifier, byte for byte", async () => {
-  // Drift guard: whatever upstream does for ed25519, we must return exactly that —
-  // including future checks we never learn about. The report need not be valid;
-  // identical failure output proves the delegation.
+test("a foreign api_version is refused", async () => {
   const r = clone();
-  r.attestation.workload_keyset.workload_identity.public_key.algo = "ed25519";
-  r.attestation.keyset_endorsement.algo = "ed25519";
-
-  const ours = await verifyAciReportBinding(r, null, { now: NOW, trustPlatformClock: true });
-  const upstream = await verifyReportBinding(r, null, { now: NOW, trustPlatformClock: true });
-  assert.deepEqual(ours, upstream);
+  r.api_version = "aci/2";
+  const res = await verifyReportBinding(r, NONCE, { now: NOW });
+  assert.equal(res.ok, false);
+  assert.equal(named(res.checks, "api_version")?.ok, false);
 });
 
-test("an algorithm neither path can check still throws — never a silent pass", async () => {
+test("a keyset that is not an object fails every downstream check, without throwing", async () => {
   const r = clone();
-  r.attestation.workload_keyset.workload_identity.public_key.algo = "rsa-pss-sha256";
-  await assert.rejects(() => verifyAciReportBinding(r, null, { now: NOW }), UnsupportedAlgorithmError);
+  (r.attestation as { workload_keyset: unknown }).workload_keyset = "not-an-object";
+  const res = await verifyReportBinding(r, NONCE, { now: NOW });
+  assert.equal(res.ok, false);
+  assert.deepEqual(
+    res.checks.map((c) => c.name),
+    ["api_version", "workload_keyset_digest", "report_data", "not_after"],
+  );
+  assert.equal(res.keyset, undefined);
+});
+
+test("a malformed nonce is the caller's bug and throws", async () => {
+  // Server-supplied fields are reported as failed checks; our own input is not.
+  await assert.rejects(() => verifyReportBinding(REPORT, "deadbeef", { now: NOW }), AciFormatError);
+});
+
+test("the keyset digest is over the served object, unknown members included", async () => {
+  // Appendix A canonicalizes what was parsed — an extension field the client does
+  // not understand still changes the digest, so it cannot be smuggled in.
+  const keyset = JSON.parse(JSON.stringify(REPORT.attestation.workload_keyset)) as Record<string, unknown>;
+  assert.equal(await computeKeysetDigest(keyset), REPORT.workload_keyset_digest);
+  keyset.some_future_field = "x";
+  assert.notEqual(await computeKeysetDigest(keyset), REPORT.workload_keyset_digest);
 });

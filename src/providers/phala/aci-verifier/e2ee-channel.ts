@@ -41,7 +41,9 @@ export async function openE2eeChannel(
   if (!verification.ok || verification.workloadKeysetDigest !== report.workload_keyset_digest) {
     throw new Error('openE2eeChannel: report is not verified — call verifyReportBinding and check .ok');
   }
-  const keys = (report.attestation.workload_keyset.e2ee_public_keys ?? []) as Array<{
+  // Read the keys off the ESTABLISHED keyset — the object whose JCS the
+  // verifier hashed to the digest the quote signed — not the report's copy.
+  const keys = (verification.keyset?.e2ee_public_keys ?? []) as Array<{
     algo: string;
     public_key: string;
   }>;

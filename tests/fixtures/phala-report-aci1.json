@@ -1,0 +1,57 @@
+{
+  "api_version": "aci/1",
+  "workload_keyset_digest": "sha256:417660861768cb214cec05ff9c4e820c033f523b03ad843d296b8fdb595c613b",
+  "attestation": {
+    "tee_type": "tdx",
+    "workload_keyset": {
+      "subject": null,
+      "not_after": 1789869673,
+      "receipt_signing_keys": [
+        {
+          "key_id": "dstack-kms-receipt-ed25519-v1",
+          "algo": "ed25519",
+          "public_key": "110f3824daeeef29dbeba9677a5794ffed257b1082d9fd4599b3c0819953aa0a"
+        }
+      ],
+      "e2ee_public_keys": [
+        {
+          "key_id": "dstack-kms-e2ee-v1",
+          "algo": "secp256k1-aes-256-gcm-hkdf-sha256",
+          "public_key": "04943cea0b4babf60f6e2031e9a00866a37c4ae696fb45895b3a9b38ab8cbb898f42c85b704aceaa0a396cf26f7fdf79d83205be7e11d3a5d70419a68277158c3d"
+        },
+        {
+          "key_id": "dstack-kms-e2ee-x25519-v1",
+          "algo": "x25519-aes-256-gcm-hkdf-sha256",
+          "public_key": "408e82d159832cfae15007781bcade0badee7d50e9f76d50eaa1777464006537"
+        }
+      ],
+      "tls_public_keys": [
+        {
+          "spki_sha256": "11af02e1c69bb2227e9b65903010abb60fbb626930cd11b0866281bb291a352c",
+          "domain": "tee.redpill.ai"
+        },
+        {
+          "spki_sha256": "698c87b1ed32d3d67f23d14295fc443e91b82ad4e40482041ac1a9158c8212e2",
+          "domain": "inference.phala.com"
+        },
+        {
+          "spki_sha256": "c2ebede7c2c632381123e3193b01f5f3fa45cc6c6327b2d0536749348ceeb408",
+          "domain": "api.redpill.ai"
+        }
+      ]
+    },
+    "report_data": "7efa3df885881ccf334ba8059a451dd9e58f5028dfff8adcd862e50b380049cd",
+    "source_provenance": {
+      "repo_url": "https://github.com/Dstack-TEE/private-ai-gateway.git",
+      "repo_commit": "1a044e960fbec8ab20f38524bc93aa0ced83d5b0",
+      "image_digest": null,
+      "image_provenance": null
+    }
+  },
+  "service_capabilities": {
+    "supported_e2ee_versions": [
+      "2"
+    ],
+    "serving": "aggregator"
+  }
+}

@@ -1,43 +1,39 @@
 /**
- * @dstack/aci-verifier — a zero-dependency ACI Level 1 verifier.
+ * @phala/aci-verifier — a zero-dependency ACI verifier for the browser and node.
  *
- * Level 1 (receipt verification, §10.2) is fully implemented against an
- * established keyset. {@link verifyReportBinding} adds the cryptographic-binding
- * checks of Level 2 (§10.1 checks 2–6); the hardware quote, key custody, and
- * provenance checks (§10.1 checks 1, 7–10) are verifier-profile territory and
- * out of scope here. All crypto is Web Crypto (Ed25519, SHA-256); `ecdsa-secp256k1`
- * is unsupported (not in the Web Crypto API) and raises a clear error.
+ * Report binding (§9.1 checks 2–3) establishes the workload keyset: the served
+ * keyset canonicalizes to the digest the attestation statement hashes into
+ * `report_data`, which the hardware quote signs. Everything downstream — the
+ * E2EE key we seal to, receipt signing keys, TLS pins — is a member of that one
+ * quote-bound object, so nothing else needs its own signature. Receipt
+ * verification (§9.3) runs against an established keyset. All crypto here is
+ * Web Crypto (Ed25519, SHA-256/384); the quote itself is ../../phalaSeal.ts.
  */
 
-// Canonicalization (§3)
+// Canonicalization (Appendix A)
 export { canonicalize, jcsBytes } from './jcs';
 export type { JcsValue } from './jcs';
 
 // Crypto primitives (Web Crypto only)
 export {
   sha256,
+  sha384,
   sha256Hex,
   sha256Prefixed,
   verifyEd25519,
-  verifySignature,
   toHex,
   fromHex,
+  toBase64,
+  fromBase64,
 } from './crypto';
 
-// Digest & canonical-signing-bytes constructions (§4, §8.5, §9.2)
-export {
-  computeWorkloadId,
-  computeKeysetDigest,
-  attestationStatement,
-  computeReportData,
-  keysetEndorsementPayload,
-  keysetRevocationPayload,
-  receiptSigningBytes,
-  sessionMaterial,
-  computeSessionId,
-} from './digest';
+// Digest constructions (Appendix A, §3.1, §3.2)
+export { computeKeysetDigest, attestationStatement, computeReportData } from './digest';
 
-// E2EE AAD builders (§7.3)
+// Attested sessions: content addressing and evidence (§8, §9.3)
+export { computeSessionId, checkSessionApiVersion, checkSessionEvidence } from './session';
+
+// E2EE v2 AAD builders (spec/e2ee-v2.md §6)
 export {
   requestAad,
   requestAadString,
@@ -46,39 +42,37 @@ export {
 } from './e2ee';
 export type { AadCommon } from './e2ee';
 
-// E2EE channel to a verified workload — encrypt requests, decrypt replies (§7)
+// E2EE v2 channel to a verified workload — encrypt requests, decrypt replies
 export { openE2eeChannel } from './e2ee-channel';
 export type { E2eeChannel } from './e2ee-channel';
 
-// Level 1 receipt verification (§10.2)
+// Receipt verification (§9.3)
 export {
   verifyReceipt,
   findEvent,
   hashBody,
   checkRequestBodyHash,
-  checkResponseWireHash,
-  checkResponseCleartextHash,
+  checkResponseBodyHash,
 } from './receipt';
 
-// Level 2 report-binding checks (§10.1 checks 2–6, no hardware quote)
+// Report binding (§9.1 checks 2–3)
 export { verifyReportBinding } from './report';
 export type { ReportBindingOptions } from './report';
 
 // Errors
-export { AciError, AciFormatError, UnsupportedAlgorithmError } from './errors';
+export { AciError, AciFormatError } from './errors';
 
 // Wire & result types
 export type {
-  PublicKey,
-  WorkloadIdentity,
-  ReceiptSigningKey,
+  KeysetKey,
+  TlsKeyPin,
   WorkloadKeyset,
-  ReceiptSignature,
-  ReceiptEvent,
-  Receipt,
-  Endorsement,
+  SourceProvenance,
   Attestation,
   AttestationReport,
+  ReceiptEnvelope,
+  ReceiptEvent,
+  ReceiptPayload,
   SessionEvidence,
   SessionRecord,
   Check,

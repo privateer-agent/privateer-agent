@@ -63,7 +63,12 @@ function serializeObject(obj: { [key: string]: JcsValue | undefined }): string {
   return out + '}';
 }
 
-/** Canonicalize and encode to UTF-8 bytes — the form fed to SHA-256 and signatures. */
-export function jcsBytes(value: JcsValue): Uint8Array {
-  return new TextEncoder().encode(canonicalize(value));
+/**
+ * Canonicalize and encode to UTF-8 bytes — the form fed to SHA-256 and
+ * signatures. Takes `unknown` because the values that get canonicalized are
+ * parsed server JSON (a keyset, a receipt document); anything outside the ACI
+ * subset is rejected by {@link canonicalize} rather than mis-serialized.
+ */
+export function jcsBytes(value: unknown): Uint8Array {
+  return new TextEncoder().encode(canonicalize(value as JcsValue));
 }

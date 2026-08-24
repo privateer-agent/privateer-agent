@@ -1,49 +1,41 @@
 /**
- * Level 2 report-binding checks (§10.1 checks 2–6), minus the hardware root of
- * trust. This verifies the *cryptographic binding* of the report — that its
- * `workload_id`, keyset digest, `report_data`, and endorsement are internally
- * consistent and endorsed by the identity key — for the nonce the client
- * supplied. It does NOT do §10.1 check 1 (the TEE quote verifies to the vendor
- * root) or the "hardware evidence binds `report_data`" half of check 4: parsing
- * and checking a TDX/SEV-SNP quote is verifier-profile territory and needs
- * primitives outside the Web Crypto API. Compose this with a quote verifier and
- * the custody/provenance/channel checks (§10.1 checks 1, 7–10) for full Level 2.
+ * Report binding checks a verifier can run with pure Web Crypto — §9.1 check 2
+ * (binding and freshness: keyset bytes → digest → statement → `report_data`)
+ * and check 3 (expiry), plus the aci/1 protocol gate. Check 1 (the hardware
+ * quote verifies to the vendor root and binds `report_data`) is done by
+ * ../../phalaSeal.ts with @phala/dcap-qvl; checks 5–6 (custody, channel) stay
+ * policy / caller territory.
+ *
+ * Local omission (see VENDORED.md): upstream's `verifyQuote` and
+ * `verifyComposeMeasurement` live in this file too. They are not carried here —
+ * phalaSeal.ts owns the quote (it also gates TCB status and pins measurements)
+ * and measurements.ts owns the event-log replay across all four RTMRs. Leaving
+ * them out keeps this tree dependency-free and @phala/dcap-qvl off the import
+ * path of every startup.
  */
 
-import {
-  computeWorkloadId,
-  computeKeysetDigest,
-  computeReportData,
-  keysetEndorsementPayload,
-} from './digest';
-import { verifySignature, fromHex } from './crypto';
-import type { AttestationReport, Check, ReportVerification } from './types';
+import { computeKeysetDigest, computeReportData } from './digest';
+import type { AttestationReport, Check, ReportVerification, WorkloadKeyset } from './types';
 
 /** Options for {@link verifyReportBinding}. */
 export interface ReportBindingOptions {
   /**
-   * Current time in Unix seconds for the freshness check (§10.1 check 6).
-   * Defaults to the local clock. Pass an explicit value for deterministic tests.
+   * Current time in Unix seconds for the expiry check (§9.1 check 3).
+   * Defaults to the local clock; pass an explicit value for deterministic tests.
    */
   now?: number;
-  /**
-   * Whether the profile trusts the platform's declared validity window
-   * (`freshness.fetched_at`/`stale_after`, §5.1). Off by default — recency comes
-   * from the nonce binding, and `fetched_at`/`stale_after` need a securely
-   * synced TEE clock to mean anything.
-   */
-  trustPlatformClock?: boolean;
 }
 
 /**
- * Verify the report's cryptographic bindings for `nonce` (§10.1 checks 2–6).
- * `nonce` is the value the verifier supplied to `GET /v1/aci/attestation`, or
- * `null`/`undefined` when it requested no nonce (§4.4).
+ * Verify the report's cryptographic bindings for `nonce` — the value this
+ * client sent to `GET /v1/aci/attestation`, or `null`/`undefined` when it sent
+ * none (§3.2). One recomputation establishes that the keyset is exactly what
+ * the quote bound and that the quote postdates the challenge (§9.1 check 2).
  *
- * Returns a per-check result and the identity recomputed from the report's
- * keyset; a failed check is `ok: false`, never thrown. Throws
- * {@link UnsupportedAlgorithmError} when the identity key algorithm is outside
- * Web Crypto scope (e.g. `ecdsa-secp256k1`).
+ * Returns per-check results plus the established keyset (digest, exact bytes,
+ * parsed form); a failed check on the served report is `ok: false`, never
+ * thrown. The one exception is the caller's own input: a nonce that is not
+ * 64 lowercase hex throws {@link AciFormatError} (§3.2).
  */
 export async function verifyReportBinding(
   report: AttestationReport,
@@ -53,71 +45,56 @@ export async function verifyReportBinding(
   const now = options.now ?? Math.floor(Date.now() / 1000);
   const checks: Check[] = [];
 
-  const keyset = report.attestation.workload_keyset;
-  const identityKey = keyset.workload_identity.public_key;
+  // Protocol gate (Appendix B): artifacts with another version are rejected.
+  const versionOk = report.api_version === 'aci/1';
+  checks.push({
+    name: 'api_version',
+    ok: versionOk,
+    ...(versionOk ? {} : { detail: `api_version "${report.api_version}" is not "aci/1"` }),
+  });
 
-  // Check 2: workload_id == digest of the identity public key in the report's keyset.
-  const workloadId = await computeWorkloadId(identityKey);
-  pushEqual(checks, 'workload_id', report.workload_id, workloadId);
+  const keysetValue = report.attestation.workload_keyset;
+  if (keysetValue === null || typeof keysetValue !== 'object' || Array.isArray(keysetValue)) {
+    const detail = 'workload_keyset is not a JSON object';
+    for (const name of ['workload_keyset_digest', 'report_data', 'not_after']) {
+      checks.push({ name, ok: false, detail });
+    }
+    return { ok: false, checks };
+  }
 
-  // Check 3: workload_keyset_digest == digest of the report's keyset.
-  const workloadKeysetDigest = await computeKeysetDigest(keyset);
-  pushEqual(checks, 'workload_keyset_digest', report.workload_keyset_digest, workloadKeysetDigest);
-
-  // Check 4 (binding half): report_data == the §4.4 statement digest for this nonce.
-  // The hardware-evidence-binds-report_data half is out of scope (see file header).
-  const expectedReportData = await computeReportData(workloadId, workloadKeysetDigest, nonce);
+  // §9.1 check 2: recompute the whole chain from the served keyset object —
+  // canonicalize exactly what was parsed, unknown members included. The
+  // recomputed digest is authoritative (Appendix A) — the report's restated copy is
+  // checked for consistency but never feeds the statement.
+  const digest = await computeKeysetDigest(keysetValue);
+  pushEqual(checks, 'workload_keyset_digest', report.workload_keyset_digest, digest);
+  const expectedReportData = await computeReportData(digest, nonce);
   pushEqual(checks, 'report_data', report.attestation.report_data, expectedReportData);
 
-  // Check 5: keyset endorsement verifies under the identity key, algo matching.
-  const endorsement = report.attestation.keyset_endorsement;
-  if (endorsement.algo !== identityKey.algo) {
+  const keyset = keysetValue as WorkloadKeyset;
+
+  // §9.1 check 3: now < not_after in the decoded keyset.
+  if (typeof keyset.not_after !== 'number') {
     checks.push({
-      name: 'keyset_endorsement',
+      name: 'not_after',
       ok: false,
-      detail: `endorsement.algo "${endorsement.algo}" != identity key algo "${identityKey.algo}"`,
+      detail: 'keyset has no numeric not_after',
     });
   } else {
-    const ok = await verifySignature(
-      identityKey.algo,
-      fromHex(identityKey.public_key),
-      fromHex(endorsement.value),
-      keysetEndorsementPayload(workloadKeysetDigest),
-      'keyset endorsement (§4.3)',
-    );
+    const ok = now < keyset.not_after;
     checks.push({
-      name: 'keyset_endorsement',
+      name: 'not_after',
       ok,
-      ...(ok ? {} : { detail: 'endorsement signature failed under identity key' }),
+      ...(ok ? {} : { detail: `now ${now} >= not_after ${keyset.not_after}` }),
     });
   }
 
-  // Check 6: freshness. Nonce binding is check 4; here bound the epoch and,
-  // when trusted, the declared validity window.
-  const notAfter = keyset.keyset_epoch.not_after;
-  const epochOk = now < notAfter;
-  checks.push({
-    name: 'keyset_epoch.not_after',
-    ok: epochOk,
-    ...(epochOk ? {} : { detail: `now ${now} >= not_after ${notAfter}` }),
-  });
-  if (options.trustPlatformClock) {
-    const freshness = report.attestation.freshness;
-    const fetchedAt = freshness?.fetched_at;
-    const staleAfter = freshness?.stale_after;
-    const windowOk =
-      typeof fetchedAt === 'number' &&
-      typeof staleAfter === 'number' &&
-      fetchedAt <= now &&
-      now < staleAfter;
-    checks.push({
-      name: 'freshness_window',
-      ok: windowOk,
-      ...(windowOk ? {} : { detail: `now ${now} outside [${fetchedAt}, ${staleAfter})` }),
-    });
-  }
-
-  return { ok: checks.every((c) => c.ok), checks, workloadId, workloadKeysetDigest };
+  return {
+    ok: checks.every((c) => c.ok),
+    checks,
+    workloadKeysetDigest: digest,
+    keyset,
+  };
 }
 
 function pushEqual(checks: Check[], name: string, actual: string, expected: string): void {
