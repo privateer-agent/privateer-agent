@@ -20,12 +20,15 @@ import { resolveDep } from "../bin/apply-patches.mjs";
 //      403 was judged retryable and burned the full retry budget, twice, before the
 //      user ever saw what had happened.
 //
-// The fix is two hunks in patches/@earendil-works+pi-coding-agent+*.patch (mirrored
+// The fix is three hunks in patches/@earendil-works+pi-coding-agent+*.patch (mirrored
 // and unit-tested as compactProviderError / isHardHttpFailure in src/engine/errors.ts):
-// squeeze the page before anything reads it, and let the STATUS decide retryability.
-// This test drives the real CLI against a server that answers exactly like that edge
-// did, because the bug lived in the wiring between those two hunks and Pi's event flow,
-// not in either helper.
+// squeeze the page before anything reads it, let the STATUS decide retryability, and
+// do not fall through to compaction on a first-attempt hard 4xx. A live session that
+// already has usage will otherwise summarise against the same blocked endpoint, and
+// the summarizer retries on the raw HTML (it contains "500"/"502") until its budget
+// burns — which is the hang this file is named after. These tests drive the real CLI
+// against a server that answers exactly like that edge did, because the bug lived in
+// the wiring between those hunks and Pi's event flow, not in either helper.
 
 const CLI = resolveDep(path.resolve(import.meta.dirname, ".."), "@earendil-works/pi-coding-agent", "dist", "cli.js");
 
@@ -89,9 +92,15 @@ async function startBlockingEdge(): Promise<{ port: number; requests: () => numb
   };
 }
 
-function runPrint(opts: { cwd: string; agentDir: string; extensions: string[]; timeoutMs: number }) {
+function runPrint(opts: {
+  cwd: string;
+  agentDir: string;
+  extensions: string[];
+  timeoutMs: number;
+  extraArgs?: string[];
+}) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const args = ["-p", "say ok", "--model", "mock/mock-1", "--no-session"];
+    const args = ["-p", "say ok", "--model", "mock/mock-1", ...(opts.extraArgs ?? ["--no-session"])];
     for (const e of opts.extensions) args.push("-e", e);
     const child = spawn(process.execPath, [CLI!, ...args], {
       cwd: opts.cwd,
@@ -139,4 +148,76 @@ test("a WAF block page is reported short, and never retried", async (t) => {
   assert.match(output, /Request ID: a2c64e100ae6d331/);
   assert.doesNotMatch(output, /d09GMk9UVE8|base64/, "the embedded font must never be printed");
   assert.ok(output.length < 8_000, `expected a short report, got ${output.length} chars`);
+});
+
+// A first-attempt 403 on a session that already has usage used to fall through to
+// compaction. The mock window is 8192 and reserveTokens is 16384, so ANY prior usage
+// trips the threshold; the summarizer then called the same blocked edge and retried
+// the raw HTML as if it were a 5xx. The post-run loop must stop before that call.
+function writeSessionWithUsage(dir: string, cwd: string): string {
+  const file = path.join(dir, "prior.jsonl");
+  const header = {
+    type: "session",
+    version: 3,
+    id: "waf-hang",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    cwd,
+  };
+  const user = {
+    type: "message",
+    id: "aaaaaaaa",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:01.000Z",
+    message: { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 1 },
+  };
+  const assistant = {
+    type: "message",
+    id: "bbbbbbbb",
+    parentId: "aaaaaaaa",
+    timestamp: "2026-01-01T00:00:02.000Z",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "hi" }],
+      api: "openai-completions",
+      provider: "mock",
+      model: "mock-1",
+      usage: {
+        input: 2000,
+        output: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2100,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: 2,
+    },
+  };
+  fs.writeFileSync(file, [header, user, assistant].map((e) => JSON.stringify(e)).join("\n") + "\n");
+  return file;
+}
+
+test("a WAF 403 on a session with prior usage does not hang in compaction", async (t) => {
+  assert.ok(CLI && fs.existsSync(CLI), "pi-coding-agent cli.js must be installed");
+  const { root, agentDir, proj } = scratch();
+  const edge = await startBlockingEdge();
+  t.after(async () => {
+    await edge.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const session = writeSessionWithUsage(root, proj);
+  const result = await runPrint({
+    cwd: proj,
+    agentDir,
+    extensions: [writeMockProvider(root, edge.port)],
+    extraArgs: ["--session", session],
+    timeoutMs: 20_000,
+  });
+  const output = `${result.stdout}${result.stderr}`;
+
+  assert.notEqual(result.code, 0, "a blocked turn must fail");
+  assert.equal(edge.requests(), 1, `expected one attempt (no compaction), the edge saw ${edge.requests()}`);
+  assert.match(output, /403/);
+  assert.doesNotMatch(output, /d09GMk9UVE8|base64/, "the embedded font must never be printed");
 });

@@ -68,7 +68,7 @@ index 4600b23..075ecae 100644
  export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
  export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index ce8a9a2..c52ea80 100644
+index ce8a9a2..b7b339e 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 @@ -38,6 +38,70 @@ import { createLocalBashOperations } from "./tools/bash.js";
@@ -174,7 +174,7 @@ index ce8a9a2..c52ea80 100644
          // Emit to extensions first
          await this._emitExtensionEvent(event);
          // Notify all listeners
-@@ -772,6 +854,15 @@ export class AgentSession {
+@@ -772,6 +854,25 @@ export class AgentSession {
                  finalError: msg.errorMessage,
              });
              this._retryAttempt = 0;
@@ -187,10 +187,20 @@ index ce8a9a2..c52ea80 100644
 +            // on a persistently-failing provider/tool. Context-overflow errors never
 +            // reach this branch (_isRetryableError → false), so compaction is untouched.
 +            return false;
++        }
++        // Privateer patch: a first-attempt hard 4xx (a WAF 403, a 401, a 404) is also
++        // terminal. Stock Pi still falls through to compaction here because _retryAttempt
++        // is 0, and _checkCompaction will summarise a session that already has usage.
++        // That summary is another LLM call to the SAME blocked endpoint; retryAssistantCall
++        // classifies the raw HTML body as transient (it contains "500"/"502"), so the
++        // agent looks hung — retrying a compaction that can never succeed — until the
++        // summarizer budget burns. Context overflow never matches isHardHttpFailure.
++        if (msg.stopReason === "error" && isHardHttpFailure(msg.errorMessage)) {
++            return false;
          }
          if (await this._checkCompaction(msg)) {
              return true;
-@@ -852,6 +943,14 @@ export class AgentSession {
+@@ -852,6 +953,14 @@ export class AgentSession {
              if (!hasConfiguredAuth) {
                  const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
                  if (isOAuth) {
@@ -205,7 +215,7 @@ index ce8a9a2..c52ea80 100644
                      throw new Error(`Authentication failed for "${this.model.provider}". ` +
                          `Credentials may have expired or network is unavailable. ` +
                          `Run '/login ${this.model.provider}' to re-authenticate.`);
-@@ -2084,6 +2183,27 @@ export class AgentSession {
+@@ -2084,6 +2193,27 @@ export class AgentSession {
          // Context overflow is handled by compaction, not retry.
          if (isContextOverflow(message, this.model?.contextWindow ?? 0))
              return false;
@@ -1052,17 +1062,19 @@ index 6f7ed6a..b0ed0ae 100644
      getResourcePattern(item) {
          const scope = item.metadata.scope;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
-index 1d9f046..2a1fba8 100644
+index 1d9f046..c0326e3 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
-@@ -1,5 +1,5 @@
+@@ -1,7 +1,6 @@
  import { isAbsolute, relative, resolve, sep } from "node:path";
 -import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 +import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
  import { areExperimentalFeaturesEnabled } from "../../../core/experimental.js";
- import { addUsageToTotals, createUsageTotals } from "../../../core/usage-totals.js";
+-import { addUsageToTotals, createUsageTotals } from "../../../core/usage-totals.js";
  import { theme } from "../theme/theme.js";
-@@ -14,6 +14,43 @@ function sanitizeStatusText(text) {
+ /**
+  * Sanitize text for display in a single-line status.
+@@ -14,6 +13,43 @@ function sanitizeStatusText(text) {
          .replace(/ +/g, " ")
          .trim();
  }
@@ -1106,7 +1118,182 @@ index 1d9f046..2a1fba8 100644
  /**
   * Format token counts for compact footer display.
   */
-@@ -212,9 +249,9 @@ export class FooterComponent {
+@@ -41,8 +77,11 @@ export function formatCwdForFooter(cwd, home) {
+     return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
+ }
+ /**
+- * Footer component that shows pwd, token stats, and context usage.
+- * Computes token/context stats from session, gets git branch and extension statuses from provider.
++ * Footer component that shows pwd (with git branch) and the active model.
++ *
++ * Privateer trimmed this: upstream also drew a second row of cumulative token
++ * counters, cache-hit rate, cost and a context gauge. Gets git branch and
++ * extension statuses from provider.
+  */
+ export class FooterComponent {
+     autoCompactEnabled = true;
+@@ -74,29 +113,9 @@ export class FooterComponent {
+     }
+     render(width) {
+         const state = this.session.state;
+-        // Calculate cumulative usage from ALL session entries (not just post-compaction messages)
+-        const usageTotals = createUsageTotals();
+-        let latestCacheHitRate;
+-        for (const entry of this.session.sessionManager.getEntries()) {
+-            if (entry.type === "message" && entry.message.role === "assistant") {
+-                addUsageToTotals(usageTotals, entry.message.usage);
+-                const latestPromptTokens = entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
+-                latestCacheHitRate =
+-                    latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
+-            }
+-            else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
+-                addUsageToTotals(usageTotals, entry.message.usage);
+-            }
+-            else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+-                addUsageToTotals(usageTotals, entry.usage);
+-            }
+-        }
+-        // Calculate context usage from session (handles compaction correctly).
+-        // After compaction, tokens are unknown until the next LLM response.
+-        const contextUsage = this.session.getContextUsage();
+-        const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
+-        const contextPercentValue = contextUsage?.percent ?? 0;
+-        const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
++        // Privateer: no token counters, cache-hit rate, cost or context gauge in the
++        // footer — so the accumulation that fed them is gone too. Upstream walked EVERY
++        // session entry on EVERY render to build numbers we no longer draw.
+         // Replace home directory with ~
+         let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
+         // Add git branch if available
+@@ -109,56 +128,24 @@ export class FooterComponent {
+         if (sessionName) {
+             pwd = `${pwd} • ${sessionName}`;
+         }
+-        // Build stats line
+-        const statsParts = [];
+-        if (usageTotals.input)
+-            statsParts.push(`↑${formatTokens(usageTotals.input)}`);
+-        if (usageTotals.output)
+-            statsParts.push(`↓${formatTokens(usageTotals.output)}`);
+-        if (usageTotals.cacheRead)
+-            statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
+-        if (usageTotals.cacheWrite)
+-            statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
+-        if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
+-            statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+-        }
+-        // Kimi Coding is subscription-backed despite using API-key authentication.
+-        const usingSubscription = state.model
+-            ? state.model.provider === "kimi-coding" || this.session.modelRuntime.isUsingSubscription(state.model.provider)
+-            : false;
+-        if (usageTotals.cost || usingSubscription) {
+-            const costStr = `$${usageTotals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
+-            statsParts.push(costStr);
+-        }
+-        // Colorize context percentage based on usage
+-        let contextPercentStr;
+-        const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
+-        const contextPercentDisplay = contextPercent === "?"
+-            ? `?/${formatTokens(contextWindow)}${autoIndicator}`
+-            : `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+-        if (contextPercentValue > 90) {
+-            contextPercentStr = theme.fg("error", contextPercentDisplay);
+-        }
+-        else if (contextPercentValue > 70) {
+-            contextPercentStr = theme.fg("warning", contextPercentDisplay);
+-        }
+-        else {
+-            contextPercentStr = contextPercentDisplay;
+-        }
+-        statsParts.push(contextPercentStr);
+-        if (areExperimentalFeaturesEnabled()) {
+-            statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
+-        }
+-        let statsLeft = statsParts.join(" ");
++        // Privateer: ONE footer row — the working directory on the left, the model on
++        // the right. Upstream spent a second row on cumulative token counters, cache-hit
++        // rate and cost; those are session trivia that never change what you do next, and
++        // they made the busiest part of the screen the least useful. The `xp` flag stays:
++        // it warns that experimental features are live, which is not trivia.
++        const experimentalFlag = areExperimentalFeaturesEnabled()
++            ? ` ${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`
++            : "";
++        let left = pwd + experimentalFlag;
+         // Add model name on the right side, plus thinking level if model supports it
+         const modelName = state.model?.id || "no-model";
+-        let statsLeftWidth = visibleWidth(statsLeft);
+-        // If statsLeft is too wide, truncate it
+-        if (statsLeftWidth > width) {
+-            statsLeft = truncateToWidth(statsLeft, width, "...");
+-            statsLeftWidth = visibleWidth(statsLeft);
++        let leftWidth = visibleWidth(left);
++        // If the left side is too wide, truncate it
++        if (leftWidth > width) {
++            left = truncateToWidth(left, width, "...");
++            leftWidth = visibleWidth(left);
+         }
+-        // Calculate available space for padding (minimum 2 spaces between stats and model)
++        // Calculate available space for padding (minimum 2 spaces between cwd and model)
+         const minPadding = 2;
+         // Add thinking level indicator if model supports reasoning
+         let rightSideWithoutProvider = modelName;
+@@ -171,50 +158,48 @@ export class FooterComponent {
+         let rightSide = rightSideWithoutProvider;
+         if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
+             rightSide = `(${state.model.provider}) ${rightSideWithoutProvider}`;
+-            if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
++            if (leftWidth + minPadding + visibleWidth(rightSide) > width) {
+                 // Too wide, fall back
+                 rightSide = rightSideWithoutProvider;
+             }
+         }
+         const rightSideWidth = visibleWidth(rightSide);
+-        const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+-        let statsLine;
++        const totalNeeded = leftWidth + minPadding + rightSideWidth;
++        let footerLine;
+         if (totalNeeded <= width) {
+             // Both fit - add padding to right-align model
+-            const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
+-            statsLine = statsLeft + padding + rightSide;
++            const padding = " ".repeat(width - leftWidth - rightSideWidth);
++            footerLine = left + padding + rightSide;
+         }
+         else {
+             // Need to truncate right side
+-            const availableForRight = width - statsLeftWidth - minPadding;
++            const availableForRight = width - leftWidth - minPadding;
+             if (availableForRight > 0) {
+                 const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
+                 const truncatedRightWidth = visibleWidth(truncatedRight);
+-                const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
+-                statsLine = statsLeft + padding + truncatedRight;
++                const padding = " ".repeat(Math.max(0, width - leftWidth - truncatedRightWidth));
++                footerLine = left + padding + truncatedRight;
+             }
+             else {
+                 // Not enough space for right side at all
+-                statsLine = statsLeft;
++                footerLine = left;
+             }
+         }
+-        // Apply dim to each part separately. statsLeft may contain color codes (for context %)
+-        // that end with a reset, which would clear an outer dim wrapper. So we dim the parts
+-        // before and after the colored section independently.
+-        const dimStatsLeft = theme.fg("dim", statsLeft);
+-        const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
+-        const dimRemainder = theme.fg("dim", remainder);
+-        const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+-        const lines = [pwdLine, dimStatsLeft + dimRemainder];
++        // Apply dim to each part separately. `left` may carry the bold/warning-coloured
++        // xp flag, whose reset would clear an outer dim wrapper. So dim the parts before
++        // and after the coloured section independently.
++        const dimLeft = theme.fg("dim", left);
++        const remainder = footerLine.slice(left.length); // padding + rightSide
++        const lines = [dimLeft + theme.fg("dim", remainder)];
+         // Add extension statuses on a single line, sorted by key alphabetically
+         const extensionStatuses = this.footerData.getExtensionStatuses();
+         if (extensionStatuses.size > 0) {
              const sortedStatuses = Array.from(extensionStatuses.entries())
                  .sort(([a], [b]) => a.localeCompare(b))
                  .map(([, text]) => sanitizeStatusText(text));
@@ -1119,6 +1306,97 @@ index 1d9f046..2a1fba8 100644
          }
          return lines;
      }
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
+index 3f93cc6..bbe2c10 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
+@@ -1,8 +1,35 @@
+-import { Box, Container, getCapabilities, Image, Spacer, Text } from "@earendil-works/pi-tui";
++import { Box, Container, getCapabilities, Image, Spacer, visibleWidth, Text } from "@earendil-works/pi-tui";
+ import { createAllToolDefinitions } from "../../../core/tools/index.js";
+ import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.js";
+ import { convertToPng } from "../../../utils/image-convert.js";
+ import { theme } from "../theme/theme.js";
++/**
++ * Privateer: mark a failed tool call inline on its title line.
++ *
++ * Upstream's ONLY failure signal is the full-width red `toolErrorBg` wash behind
++ * the whole block. We flatten those washes (see dark.json / light.json) because
++ * large blocks of colour read as noise — but flattening the error one alone would
++ * make a failure indistinguishable from a success, which is a real regression.
++ *
++ * So we put the signal back where it costs nothing: a red glyph prefixed to the
++ * first line of whatever the tool's own renderCall produced. Wrapping the CALL
++ * component (not the Box) means Box still owns padding and width, and the marker
++ * works for every tool without touching seven per-tool renderers. Subsequent
++ * lines get a blank hanging indent so the title stays visually aligned.
++ */
++function markCallErrored(component, marker) {
++    const markerWidth = visibleWidth(marker);
++    const indent = " ".repeat(markerWidth);
++    return {
++        render(width) {
++            const lines = component.render(Math.max(1, width - markerWidth));
++            return lines.map((line, i) => (i === 0 ? marker + line : indent + line));
++        },
++        invalidate() {
++            component.invalidate?.();
++        },
++    };
++}
+ export class ToolExecutionComponent extends Container {
+     contentBox;
+     contentText;
+@@ -106,6 +133,13 @@ export class ToolExecutionComponent extends Container {
+     createCallFallback() {
+         return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
+     }
++    /** Privateer: red-flag a failed call, pass a pending/succeeded one straight through. */
++    decorateCall(component) {
++        if (!this.result?.isError || this.isPartial) {
++            return component;
++        }
++        return markCallErrored(component, theme.fg("error", "\u2717 "));
++    }
+     createResultFallback() {
+         const output = this.getTextOutput();
+         if (!output) {
+@@ -218,19 +252,22 @@ export class ToolExecutionComponent extends Container {
+             renderContainer.clear();
+             const callRenderer = this.getCallRenderer();
+             if (!callRenderer) {
+-                renderContainer.addChild(this.createCallFallback());
++                renderContainer.addChild(this.decorateCall(this.createCallFallback()));
+                 hasContent = true;
+             }
+             else {
+                 try {
+                     const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
++                    // Store the RAW component: it comes back as `lastComponent` on the
++                    // next render and the tool's renderer calls its own methods on it,
++                    // so handing it a wrapper would break every stateful renderer.
+                     this.callRendererComponent = component;
+-                    renderContainer.addChild(component);
++                    renderContainer.addChild(this.decorateCall(component));
+                     hasContent = true;
+                 }
+                 catch {
+                     this.callRendererComponent = undefined;
+-                    renderContainer.addChild(this.createCallFallback());
++                    renderContainer.addChild(this.decorateCall(this.createCallFallback()));
+                     hasContent = true;
+                 }
+             }
+@@ -302,7 +339,8 @@ export class ToolExecutionComponent extends Container {
+         return getRenderedTextOutput(this.result, this.showImages);
+     }
+     formatToolExecution() {
+-        let text = theme.fg("toolTitle", theme.bold(this.toolName));
++        const errorMark = this.result?.isError && !this.isPartial ? theme.fg("error", "\u2717 ") : "";
++        let text = errorMark + theme.fg("toolTitle", theme.bold(this.toolName));
+         const content = JSON.stringify(this.args, null, 2);
+         if (content) {
+             text += `\n\n${content}`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 index 42e655d..d00bec9 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
@@ -1269,6 +1547,40 @@ index 42e655d..d00bec9 100644
      }
      async getUserInput() {
          const queuedInput = this.pendingUserInputs.shift();
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
+index 9db9cbd..b370180 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
+@@ -39,9 +39,9 @@
+ 		"customMessageBg": "customMsgBg",
+ 		"customMessageText": "text",
+ 		"customMessageLabel": "#9575cd",
+-		"toolPendingBg": "toolPendingBg",
+-		"toolSuccessBg": "toolSuccessBg",
+-		"toolErrorBg": "toolErrorBg",
++		"toolPendingBg": "",
++		"toolSuccessBg": "",
++		"toolErrorBg": "",
+ 		"toolTitle": "text",
+ 		"toolOutput": "gray",
+ 
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
+index 74ef3d1..709a21d 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
+@@ -38,9 +38,9 @@
+ 		"customMessageBg": "customMsgBg",
+ 		"customMessageText": "text",
+ 		"customMessageLabel": "#7e57c2",
+-		"toolPendingBg": "toolPendingBg",
+-		"toolSuccessBg": "toolSuccessBg",
+-		"toolErrorBg": "toolErrorBg",
++		"toolPendingBg": "",
++		"toolSuccessBg": "",
++		"toolErrorBg": "",
+ 		"toolTitle": "text",
+ 		"toolOutput": "mediumGray",
+ 
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
 index 4230b18..f47e80f 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js

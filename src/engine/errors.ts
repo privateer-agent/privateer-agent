@@ -134,6 +134,13 @@ export function isAccountCapCode(code: string | null | undefined): boolean {
 // patches/@earendil-works+pi-coding-agent+*.patch, which mirrors these two helpers):
 // squeeze the page down to the line a person can act on, and let the STATUS decide
 // retryability rather than a substring of the body.
+//
+// A first-attempt hard 4xx is also terminal for the post-run loop. Stock Pi still
+// falls through to compaction when _retryAttempt is 0, and a session that already
+// has usage will summarise — another LLM call to the same blocked endpoint. The
+// summarizer retries on the raw HTML (it contains "500"/"502"), so the agent looks
+// hung until that budget burns. The patch returns false from _handlePostAgentRun
+// before _checkCompaction when isHardHttpFailure matches.
 
 /** Hard cap on an error message we display, persist, or classify. */
 export const MAX_ERROR_CHARS = 2_000;

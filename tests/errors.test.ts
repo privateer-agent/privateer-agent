@@ -107,6 +107,9 @@ test("hard 4xx statuses are never retryable, whatever the body says", () => {
   assert.equal(isHardHttpFailure("403 Forbidden: blocked"), true); // pi-messages shape
   assert.equal(isHardHttpFailure("400 bad request"), true);
   assert.equal(isHardHttpFailure("404 no such model"), true);
+  // After compactProviderError the status is still first, so the post-run loop can
+  // skip compaction instead of summarising against the same blocked endpoint.
+  assert.equal(isHardHttpFailure(compactProviderError(BLOCK_PAGE)), true);
 });
 
 test("statuses that can clear on their own are left to Pi's classifier", () => {
