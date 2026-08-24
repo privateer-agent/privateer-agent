@@ -64,18 +64,20 @@ test("relay file tools factory registers both directions against the given bridg
   let sent: unknown = null;
   let saved: unknown = null;
   let charted: unknown = null;
+  let filed: unknown = null;
   const bridge = {
     isConnected: () => true,
     sendFile: async (file: unknown) => { sent = file; return { ok: true }; },
     saveCargoRemote: async (req: unknown) => { saved = req; return { ok: true as const, cargoId: "c1", title: "Notes", storageType: "cloud" }; },
     chartOpRemote: async (req: unknown) => { charted = req; return { ok: true as const, op: "list" as const, charts: [] }; },
+    saveToLibraryRemote: async (req: unknown) => { filed = req; return { ok: true as const, shelf: "document" as const, storageType: "cloud" as const, name: "Notes.md", bytes: 13 }; },
   };
   const registered = new Map<string, any>();
   makeRelayFileTools(bridge, store)({ registerTool: (t: any) => registered.set(t.name, t) });
 
   assert.deepEqual([...registered.keys()].sort(), [
     "create_chart", "edit_chart", "list_charts", "read_chart",
-    "save_attachment", "save_cargo", "send_file_to_client",
+    "save_attachment", "save_cargo", "save_to_library", "send_file_to_client",
   ]);
 
   // save_cargo rides with the pair and must be bound to the SAME bridge — the whole
@@ -93,6 +95,24 @@ test("relay file tools factory registers both directions against the given bridg
   const listRes: any = await registered.get("list_charts").execute("t", {});
   assert.match(listRes.content[0].text, /No charts yet/);
   assert.deepEqual(charted, { op: "list" });
+
+  // save_to_library rides here for save_cargo's exact reason (a connected app, not
+  // merely a signed-in account) and must be bound to the same bridge. Two things
+  // worth pinning beyond the binding: the tool sends a `name` the model chose rather
+  // than the path's basename, and it repeats back the storage the APP reported —
+  // it never picks cloud or local itself.
+  const docPath = "/private/tmp/claude-501/pv-relayfile-lib.md";
+  writeFileSync(docPath, "# Notes\n\nbody");
+  const libRes: any = await registered
+    .get("save_to_library")
+    .execute("t", { path: docPath, name: "Notes" }, undefined, undefined, {});
+  assert.match(libRes.content[0].text, /Saved "Notes\.md" to the Library under Documents/);
+  assert.match(libRes.content[0].text, /cloud storage/);
+  // A name with no extension borrows the source file's, so the app can still tell
+  // what kind of file it is — the shelf is chosen from the NAME, not the path.
+  assert.equal((filed as any)?.name, "Notes.md");
+  assert.equal((filed as any)?.mediaType, "text/markdown");
+  rmSync(docPath, { force: true });
 
   // …and the send tool talks to THAT bridge, not some other session's.
   const path = "/private/tmp/claude-501/pv-relayfile-test.txt";

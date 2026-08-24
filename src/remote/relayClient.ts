@@ -23,6 +23,13 @@ import { MOAT_SHIMS, reservedNames } from "../config/moatManifest.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import { CARGO_CHUNK_CHARS, type CargoSaveRequest, type CargoSaveResult } from "./cargoSave.ts";
+import {
+  LIBRARY_CHUNK_CHARS,
+  LIBRARY_SHELVES,
+  type LibraryShelf,
+  type LibrarySaveRequest,
+  type LibrarySaveResult,
+} from "./librarySave.ts";
 import { parseChartResult, type ChartOpRequest, type ChartOpResult } from "./chartOps.ts";
 
 // Display label for THIS running terminal. Deliberately NON-PII: we do NOT send
@@ -149,6 +156,13 @@ export interface RelayCallbacks {
   // chart_request simply never answers, which the bridge's bounded wait turns into a
   // clean "this app can't do charts yet" rather than a wedged tool call.
   onChartResult?: (id: string, result: ChartOpResult) => void;
+  // The app finished a CLI-initiated Library save (the id from requestLibrarySave):
+  // it classified the file, encrypted it under the account master key and filed it on
+  // the matching shelf — or refused. Optional for the same reason the two above are: a
+  // controller too old to understand library_begin simply never answers, which the
+  // bridge's bounded wait turns into a clean "this app can't save files yet" rather
+  // than a wedged tool call.
+  onLibrarySaved?: (id: string, result: LibrarySaveResult) => void;
   // The app's composer is autocompleting an `@file` mention — reply with the cwd
   // files/dirs matching `query` (a sendFileMatches frame, keyed by the same id).
   // Read-only; resolution of the picked path still happens on the prompt turn.
@@ -698,6 +712,11 @@ export class RelayClient {
       cargoId?: string;
       storageType?: string;
       reason?: string;
+      // library_saved (the app's verdict on a save_to_library round trip). `name`
+      // and `size` above are reused by file_begin, which is fine — every field on
+      // this type is optional and validated per case.
+      shelf?: string;
+      bytes?: number;
       // chart_result (the app's answer to a chart op). Left `unknown` on purpose —
       // it has four shapes and parseChartResult is what decides which one arrived.
       result?: unknown;
@@ -774,6 +793,37 @@ export class RelayClient {
               }
             : { ok: false, reason: typeof frame.reason === "string" && frame.reason ? frame.reason : "the app refused the save without giving a reason" };
         this.cb.onCargoSaved?.(frame.id, result);
+        break;
+      }
+      // The app's verdict on a Library save. Re-typed off the wire rather than
+      // trusted, for cargo_saved's reason and one more of its own: `shelf` and
+      // `storageType` are the two things the model REPEATS TO THE USER about where
+      // their file went, so a malformed frame must not be able to make it claim a
+      // file is in the cloud when it is on the device, or on a shelf it isn't on.
+      // Neither is defaulted — an unrecognised value collapses the whole frame to a
+      // refusal, because "saved, somewhere" is worse than "didn't save".
+      case "library_saved": {
+        if (typeof frame.id !== "string" || !frame.id) break;
+        const shelfOk =
+          typeof frame.shelf === "string" && (LIBRARY_SHELVES as readonly string[]).includes(frame.shelf);
+        const storageOk = frame.storageType === "local" || frame.storageType === "cloud";
+        const result: LibrarySaveResult =
+          frame.ok === true && shelfOk && storageOk
+            ? {
+                ok: true,
+                shelf: frame.shelf as LibraryShelf,
+                storageType: frame.storageType as "cloud" | "local",
+                name: typeof frame.name === "string" ? frame.name : "",
+                bytes: typeof frame.bytes === "number" && Number.isFinite(frame.bytes) ? frame.bytes : 0,
+              }
+            : {
+                ok: false,
+                reason:
+                  typeof frame.reason === "string" && frame.reason
+                    ? frame.reason
+                    : "the app refused the save without giving a reason",
+              };
+        this.cb.onLibrarySaved?.(frame.id, result);
         break;
       }
       // The app's answer to a chart op. Re-typed rather than trusted, for the same
@@ -1455,6 +1505,42 @@ export class RelayClient {
       this.rawSend({ type: "cargo_chunk", id, seq, data: req.content.slice(off, off + CARGO_CHUNK_CHARS) });
     }
     this.rawSend({ type: "cargo_end", id });
+  }
+
+  // Ask the app to save a file into the account's Library: it classifies the file,
+  // encrypts under the account master key (which this process does not have — see
+  // librarySave.ts) and files it on the matching shelf, then answers with a
+  // library_saved keyed by `id`.
+  //
+  // Chunked like sendFile and requestCargoSave, and for the relay's reason rather
+  // than the payload's: a frame caps at 256 KB and a file may be 25 MB. Ordering is
+  // the WS's, so the app can reject a seq gap as a dropped transfer rather than
+  // silently filing a truncated file — which for binary media means a row that opens
+  // to a broken image the user finds weeks later.
+  //
+  // Yields between frames of a multi-chunk send for sendFile's reason: a 25 MB file
+  // is ~140 frames, and pushing them in one synchronous burst starves the event loop
+  // for the whole transfer, including the heartbeat that keeps this socket up.
+  //
+  // NOT run through `safe()`. It redacts secrets, and redacting inside a file is
+  // corruption — a PNG with `[redacted]` spliced into its pixel data is not an
+  // image. Same call sendFile makes about its bytes; the tool decides what is safe
+  // to send.
+  async requestLibrarySave(id: string, req: LibrarySaveRequest): Promise<void> {
+    this.flushDeltas(); // land the save in order relative to buffered text
+    this.rawSend({
+      type: "library_begin",
+      id,
+      name: clip(req.name, 200),
+      mediaType: req.mediaType,
+      size: req.size,
+      note: req.note ? clip(req.note, 500) : undefined,
+    });
+    for (let off = 0, seq = 0; off < req.base64.length; off += LIBRARY_CHUNK_CHARS, seq++) {
+      this.rawSend({ type: "library_chunk", id, seq, data: req.base64.slice(off, off + LIBRARY_CHUNK_CHARS) });
+      if (req.base64.length > LIBRARY_CHUNK_CHARS) await new Promise((r) => setImmediate(r));
+    }
+    this.rawSend({ type: "library_end", id });
   }
 
   // Ask the app to run a chart operation: it decrypts to read, encrypts to write, and

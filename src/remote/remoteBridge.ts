@@ -16,6 +16,7 @@ import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/modeGate.ts";
 import type { RelayCallbacks } from "./relayClient.ts";
 import type { CargoSaveRequest, CargoSaveResult } from "./cargoSave.ts";
+import type { LibrarySaveRequest, LibrarySaveResult } from "./librarySave.ts";
 import type { ChartOpRequest, ChartOpResult } from "./chartOps.ts";
 
 // How much of a driven turn's reply we hold for possible outbox delivery. The
@@ -35,6 +36,14 @@ const cargoSaveTimeoutMs = (): number => Number(process.env.PRIVATEER_CARGO_TIME
 // device first, so a chart of a dozen cards over a phone link is several seconds of real
 // work, not a round trip.
 const chartOpTimeoutMs = (): number => Number(process.env.PRIVATEER_CHART_TIMEOUT_MS) || 60_000;
+
+// How long the app gets to file a Library save. Longer than the two above, and the
+// difference is real work rather than slack: those move a document and a few cards,
+// this moves up to 25 MB across the relay and then puts it through an encrypt and an
+// S3 upload on the other side. A phone on a mobile connection can spend a minute on
+// that legitimately, and timing out on a save that then succeeds is the worst
+// outcome — the model tells the user it failed while the file is in their library.
+const librarySaveTimeoutMs = (): number => Number(process.env.PRIVATEER_LIBRARY_TIMEOUT_MS) || 180_000;
 
 // The outbound surface the bridge needs; RelayClient implements all of it.
 export interface RelayLike {
@@ -56,6 +65,9 @@ export interface RelayLike {
   sendSkills(payload: SkillsPayload): void;
   requestCargoSave(id: string, req: CargoSaveRequest): void;
   requestChartOp(id: string, req: ChartOpRequest): void;
+  // Async, unlike its two siblings: a multi-megabyte send yields between frames so it
+  // can't starve the event loop, so the transport has a promise to hand back.
+  requestLibrarySave(id: string, req: LibrarySaveRequest): Promise<void>;
 }
 
 // The installed-extensions snapshot relayed to the app's extensions manager.
@@ -158,6 +170,7 @@ export class RemoteBridge {
   private readonly pendingInputs = new Map<string, (v: string | null) => void>();
   private readonly pendingCargo = new Map<string, (r: CargoSaveResult) => void>();
   private readonly pendingCharts = new Map<string, (r: ChartOpResult) => void>();
+  private readonly pendingLibrary = new Map<string, (r: LibrarySaveResult) => void>();
   private pendingAttachments: RemoteAttachment[] = [];
   // The driven turn in flight, kept only so it can be delivered to the outbox if it
   // turns out nobody was watching (see settleTurn). Bounded: the outbox truncates at
@@ -251,6 +264,10 @@ export class RemoteBridge {
     },
     onCargoSaved: (id, result) => {
       const resolve = this.pendingCargo.get(id);
+      if (resolve) resolve(result);
+    },
+    onLibrarySaved: (id, result) => {
+      const resolve = this.pendingLibrary.get(id);
       if (resolve) resolve(result);
     },
     onChartResult: (id, result) => {
@@ -480,6 +497,53 @@ export class RemoteBridge {
     });
   };
 
+  // Hand a file to the app to classify, encrypt and file in the user's Library (the
+  // save_to_library tool), and wait for its verdict. Structurally the twin of
+  // saveCargoRemote — the app owns the master key, so this process cannot file
+  // anything itself — with two differences worth stating, because both change what a
+  // failure means:
+  //
+  //  - The send is AWAITED. requestLibrarySave yields between frames so a 25 MB
+  //    transfer can't starve the event loop, so unlike the cargo path the frames are
+  //    not all on the wire by the time we start waiting. A send that throws (the
+  //    socket died mid-transfer) settles as a refusal rather than leaving the tool
+  //    waiting out the full deadline for an answer to a message that never arrived.
+  //  - The deadline is longer (see librarySaveTimeoutMs). Timing out early here is
+  //    the expensive mistake: the app may still be uploading, and the model would
+  //    tell the user their file didn't save while it lands in their library.
+  saveToLibraryRemote = (req: LibrarySaveRequest, signal?: AbortSignal): Promise<LibrarySaveResult> => {
+    if (!this.relay) return Promise.resolve({ ok: false, reason: "remote access is not enabled — run /remote-access on and drive this terminal from the Privateer app" });
+    if (!this.relay.isConnected()) return Promise.resolve({ ok: false, reason: "the relay is not connected" });
+    if (this.relay.hasController && !this.relay.hasController()) {
+      return Promise.resolve({ ok: false, reason: "the Privateer app is not attached to this terminal — only the app holds the key that encrypts a file, so open it and attach before saving" });
+    }
+    const id = randomUUID();
+    return new Promise<LibrarySaveResult>((resolve) => {
+      const settle = (r: LibrarySaveResult) => {
+        if (!this.pendingLibrary.has(id)) return; // already settled (abort raced the reply)
+        this.pendingLibrary.delete(id);
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(r);
+      };
+      const onAbort = () => settle({ ok: false, reason: "the turn was interrupted before the app confirmed the save" });
+      const deadline = librarySaveTimeoutMs();
+      const timer = setTimeout(
+        () => settle({ ok: false, reason: `the app did not answer within ${Math.round(deadline / 1000)}s — it may be an older version that cannot save files from a terminal, or the upload is still running` }),
+        deadline,
+      );
+      timer.unref?.();
+      this.pendingLibrary.set(id, settle);
+      if (signal) {
+        if (signal.aborted) return onAbort();
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      void this.relay!.requestLibrarySave(id, req).catch((e) =>
+        settle({ ok: false, reason: `the transfer failed before the app could file it: ${(e as Error)?.message || "connection lost"}` }),
+      );
+    });
+  };
+
   // Run a chart operation on the app and wait for its answer. Structurally the twin of
   // saveCargoRemote — the app owns the master key, so reading a card and writing one are
   // both round trips — with one difference worth stating: this is the only place the CLI
@@ -545,5 +609,14 @@ export class RemoteBridge {
       resolve({ ok: false, reason: "the app disconnected before answering — some of the change may already have been applied; open the chart in the app to see what landed before trying again" });
     }
     this.pendingCharts.clear();
+    // A Library save whose controller vanished mid-flight gets the same honest
+    // "unknown" wording as a cargo save, and the stakes are the same shape: the app
+    // may have encrypted and filed the file before its socket dropped. Telling the
+    // model it failed invites a retry that leaves the user with the same picture in
+    // their library twice, under the same name, with no way to tell which is which.
+    for (const resolve of this.pendingLibrary.values()) {
+      resolve({ ok: false, reason: "the app disconnected before confirming the save — it may or may not have filed the file; check the library in the app before saving again" });
+    }
+    this.pendingLibrary.clear();
   }
 }
