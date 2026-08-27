@@ -6,12 +6,19 @@ import { join, extname } from "node:path";
 // scratch dir keyed by the "#n" reference the model sees, so the save_attachment tool
 // can write one back out to a real path on demand. Ported/adapted from tree-cli
 // (which persisted paste/drop bytes); here the source is inbound relay attachments.
+//
+// A DESKTOP attachment arrives as a path instead of bytes — the app and this agent
+// share a disk, so there is nothing to transfer and nothing to stage. Such an entry
+// simply points at the file where it already lives; `owned` is what tells the two
+// apart, so cleanup() removes only what we wrote. That is also why the desktop
+// composer has no attachment size cap: a 4 GB video costs one string here.
 
 export interface StoredAttachment {
   n: number;
-  path: string; // absolute scratch-file path holding the decoded bytes
+  path: string; // absolute path holding the bytes — our scratch file, or the user's own file
   mediaType: string;
   name: string; // original filename from the app
+  owned: boolean; // did WE write this file? false for a desktop path hand-off
 }
 
 export class AttachmentStore {
@@ -26,13 +33,24 @@ export class AttachmentStore {
     return this.dir;
   }
 
-  // Persist an inbound attachment's bytes, assign it the next ref number, and return
-  // the stored record (its ref + scratch path).
-  register(file: { name: string; mediaType: string; base64: string }): StoredAttachment {
+  // Register an inbound attachment under the next ref number and return the stored
+  // record. Bytes are staged into the scratch dir; a `path` (desktop) is adopted
+  // as-is — copying a file the agent can already open would be pure waste, and for
+  // the large files this path exists to carry, waste measured in gigabytes.
+  register(file: { name: string; mediaType: string; base64?: string; path?: string }): StoredAttachment {
     const n = this.nextN++;
+    if (file.path) {
+      const stored: StoredAttachment = {
+        n, path: file.path, mediaType: file.mediaType, name: file.name, owned: false,
+      };
+      this.byN.set(n, stored);
+      return stored;
+    }
     const path = join(this.ensureDir(), `att-${n}${extname(file.name) || ""}`);
-    writeFileSync(path, Buffer.from(file.base64, "base64"));
-    const stored: StoredAttachment = { n, path, mediaType: file.mediaType, name: file.name };
+    writeFileSync(path, Buffer.from(file.base64 ?? "", "base64"));
+    const stored: StoredAttachment = {
+      n, path, mediaType: file.mediaType, name: file.name, owned: true,
+    };
     this.byN.set(n, stored);
     return stored;
   }

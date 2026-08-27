@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { AttachmentStore } from "../src/util/attachmentStore.ts";
 import { makeSaveAttachmentTool } from "../src/tools/saveAttachment.ts";
 import { RemoteBridge } from "../src/remote/remoteBridge.ts";
@@ -18,6 +18,41 @@ test("AttachmentStore assigns ascending refs and persists bytes", () => {
   assert.equal(store.get(2)?.name, "doc.pdf");
   assert.equal(store.get(9), undefined);
   store.cleanup();
+});
+
+// The desktop hand-off: app and agent share a disk, so an attachment arrives as a PATH
+// and the store must adopt it where it lies rather than staging a copy. That is what
+// removes the size cap from the desktop composer, so the two things worth pinning are
+// that no copy is made, and that cleanup() — which wipes our whole scratch dir — cannot
+// take the user's own file with it.
+test("AttachmentStore adopts a path attachment without copying, and never deletes it", async () => {
+  const dir = "/private/tmp/claude-501/pv-att-path";
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const src = `${dir}/movie.mp4`;
+  writeFileSync(src, "REALBYTES");
+
+  const store = new AttachmentStore();
+  const a = store.register({ name: "movie.mp4", mediaType: "video/mp4", path: src });
+  assert.equal(a.n, 1);
+  assert.equal(a.owned, false);
+  assert.equal(a.path, src, "adopted in place — no scratch copy");
+
+  // A byte-carrying attachment alongside it still stages normally and IS ours.
+  const b = store.register({ name: "note.txt", mediaType: "text/plain", base64: b64("hi") });
+  assert.equal(b.owned, true);
+  assert.notEqual(b.path, src);
+
+  // save_attachment copies the adopted file out like any other ref.
+  const out = `${dir}/copied.mp4`;
+  const res: any = await makeSaveAttachmentTool(store).execute("t", { ref: 1, path: out }, undefined, undefined, {});
+  assert.match(res.content[0].text, /Saved attachment #1/);
+  assert.equal(readFileSync(out, "utf8"), "REALBYTES");
+
+  store.cleanup();
+  assert.ok(existsSync(src), "cleanup must not delete a file the user already had");
+  assert.ok(!existsSync(b.path), "…but it does take the bytes we staged");
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("save_attachment writes a stored attachment to disk", async () => {

@@ -112,7 +112,12 @@ export interface InputRequest {
 export interface RemoteAttachment {
   name: string;
   mediaType: string;
-  base64: string;
+  // Exactly one of these. `base64` is the cloud relay's shape: the app is on another
+  // machine, so the bytes are chunked across. `path` is the desktop's: app and agent
+  // share a disk (IpcRelay), so the file is named rather than moved — which is why a
+  // desktop attachment has no size cap. Both are consumed by AttachmentStore.register.
+  base64?: string;
+  path?: string;
 }
 
 export interface RemoteBridgeConfig {

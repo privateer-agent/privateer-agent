@@ -254,8 +254,9 @@ export interface RelayCallbacks {
   // STRICT mode (it executes a graph — non-idempotent, like task_spawn).
   onWorkflowsRun?: (idOrName: string, sig?: string, ts?: number) => void;
   // A file finished transferring from the app (reassembled from chunks). Held to
-  // ride along with the next remote prompt.
-  onAttachment: (file: { name: string; mediaType: string; base64: string }) => void;
+  // ride along with the next remote prompt. `path` instead of `base64` is the desktop
+  // loopback's shape only — see RemoteAttachment; nothing on this WebSocket sets it.
+  onAttachment: (file: { name: string; mediaType: string; base64?: string; path?: string }) => void;
   // Surface a one-line status/notice in the TUI.
   onStatus?: (text: string) => void;
   // The relay socket closed (controller no longer reachable until reconnect).

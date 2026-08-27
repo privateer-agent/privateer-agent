@@ -4,7 +4,7 @@
 // extension gates the tool_call, classified as a write against the destination path).
 
 import { Type } from "typebox";
-import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, copyFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { AttachmentStore } from "../util/attachmentStore.ts";
 
@@ -42,9 +42,13 @@ export function makeSaveAttachmentTool(store: AttachmentStore) {
       const cwd = ctx?.cwd ?? process.cwd();
       const abs = isAbsolute(params.path) ? params.path : resolve(cwd, params.path);
       mkdirSync(dirname(abs), { recursive: true });
-      const bytes = readFileSync(entry.path);
-      writeFileSync(abs, bytes);
-      return text(`Saved attachment #${params.ref} (${entry.name}, ${entry.mediaType}) to ${params.path} (${bytes.length} bytes).`);
+      // copy rather than read-then-write: a desktop attachment is the user's own file
+      // at its own path (AttachmentStore adopts it instead of staging a copy), and
+      // those have no size cap — reading a 4 GB video into the heap to write it back
+      // out would be the one place the uncapped path could still fall over.
+      copyFileSync(entry.path, abs);
+      const size = statSync(abs).size;
+      return text(`Saved attachment #${params.ref} (${entry.name}, ${entry.mediaType}) to ${params.path} (${size} bytes).`);
     },
   };
 }
