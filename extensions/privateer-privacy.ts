@@ -24,19 +24,20 @@
 // display/resolution + routing list — posture and attestation are dispatcher-bound and
 // unaffected by the model set.
 import { registerAccountModels } from "../src/providers/account.ts";
+import { visionInput } from "../src/providers/vision.ts";
 import { privacyExtension } from "../src/config/privacyPolicy.ts";
 
-// Tinfoil's live chat models (inference.tinfoil.sh/v1/models), kimi-k2-6 first — the
-// launcher's default. Non-chat endpoints (embeddings, tts, whisper, websearch,
+// Tinfoil's live chat models (inference.tinfoil.sh/v1/models), gemma4-31b first — the
+// launcher's default, and the only one here that can see an image. Non-chat endpoints (embeddings, tts, whisper, websearch,
 // doc-upload) are intentionally omitted. Refresh from the live catalog if Tinfoil adds
 // models; this static list just needs to cover what we default to and commonly pick.
 const TINFOIL_MODELS = [
+  "gemma4-31b",
   "kimi-k2-6",
   "glm-5-2",
   "deepseek-v4-pro",
   "gpt-oss-120b",
   "gpt-oss-safeguard-120b",
-  "gemma4-31b",
   "llama3-3-70b",
 ];
 
@@ -45,7 +46,10 @@ function tinfoilModel(id: string) {
     id,
     name: id,
     reasoning: false,
-    input: ["text"] as ("text" | "image")[],
+    // Tinfoil ids are bare here (`gemma4-31b`), so scope it before asking — the
+    // allowlist is written against full `provider/model` ids. Getting this wrong is
+    // not cosmetic: `input` is what Pi checks before it will send an image at all.
+    input: visionInput(`tinfoil/${id}`),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
     maxTokens: 4096,

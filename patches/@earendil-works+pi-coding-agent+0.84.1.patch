@@ -68,10 +68,10 @@ index 4600b23..075ecae 100644
  export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
  export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index ce8a9a2..b7b339e 100644
+index ce8a9a2..679e584 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -38,6 +38,70 @@ import { createLocalBashOperations } from "./tools/bash.js";
+@@ -38,6 +38,111 @@ import { createLocalBashOperations } from "./tools/bash.js";
  import { createAllToolDefinitions } from "./tools/index.js";
  import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
  import { addUsageToTotals, createUsageTotals } from "./usage-totals.js";
@@ -139,10 +139,60 @@ index ce8a9a2..b7b339e 100644
 +    const status = Number(m[1]);
 +    return status >= 400 && status < 500 && !PV_TRANSIENT_CLIENT_STATUS.has(status);
 +}
++// Privateer patch: throttle handling. Mirrors isThrottleFailure / retryAfterMs /
++// retryDelayMs in src/engine/errors.ts — see the incident note there.
++export function isThrottleFailure(text) {
++    return /^\s*429\b/.test(typeof text === "string" ? text : "");
++}
++const PV_MAX_RETRY_DELAY_MS = 60_000;
++const PV_RETRY_AFTER_PATTERNS = [
++    /retry-after(?:-ms)?["'\s:=]+(\d+(?:\.\d+)?)/i,
++    /(?:retry|try) again in (\d+(?:\.\d+)?)\s*(m?s|seconds?|minutes?)/i,
++    /retry after (\d+(?:\.\d+)?)\s*(m?s|seconds?|minutes?)/i,
++];
++export function retryAfterMs(text) {
++    const s = typeof text === "string" ? text : "";
++    for (const re of PV_RETRY_AFTER_PATTERNS) {
++        const m = re.exec(s);
++        if (!m)
++            continue;
++        const value = Number.parseFloat(m[1]);
++        if (!Number.isFinite(value) || value <= 0)
++            continue;
++        const unit = (m[2] ?? "").toLowerCase();
++        const ms = unit === "ms" || /retry-after-ms/i.test(m[0])
++            ? value
++            : unit.startsWith("m") && unit !== "ms"
++                ? value * 60_000
++                : value * 1000;
++        return Math.min(Math.max(Math.round(ms), 1_000), PV_MAX_RETRY_DELAY_MS);
++    }
++    return null;
++}
++// A server-stated delay wins outright — it is the only number here that is a fact.
++// The jitter is the point of the rest: without it every parallel request that tripped
++// the same limit wakes at the identical millisecond and trips it again.
++export function retryDelayMs(errorText, attempt, baseDelayMs) {
++    const stated = retryAfterMs(errorText);
++    if (stated != null)
++        return stated;
++    const n = Math.max(1, Math.floor(attempt));
++    const backoff = Math.min(baseDelayMs * 2 ** (n - 1), PV_MAX_RETRY_DELAY_MS);
++    return Math.round(backoff * (1 - Math.random() * 0.25));
++}
  /**
   * Parse a skill block from message text.
   * Returns null if the text doesn't contain a skill block.
-@@ -186,6 +250,14 @@ export class AgentSession {
+@@ -102,6 +207,8 @@ export class AgentSession {
+     // Retry state
+     _retryAbortController = undefined;
+     _retryAttempt = 0;
++    // Privateer patch: when the provider last exhausted the retry budget on a 429.
++    _pvThrottledAt = 0;
+     // Bash execution state
+     _bashAbortControllers = new Set();
+     _pendingBashMessages = [];
+@@ -186,6 +293,14 @@ export class AgentSession {
          }
          const isOAuth = this._modelRuntime.isUsingOAuth(model.provider);
          if (isOAuth) {
@@ -157,7 +207,7 @@ index ce8a9a2..b7b339e 100644
              throw new Error(`Authentication failed for "${model.provider}". ` +
                  `Credentials may have expired or network is unavailable. ` +
                  `Run '/login ${model.provider}' to re-authenticate.`);
-@@ -360,6 +432,16 @@ export class AgentSession {
+@@ -360,6 +475,16 @@ export class AgentSession {
                  }
              }
          }
@@ -174,10 +224,18 @@ index ce8a9a2..b7b339e 100644
          // Emit to extensions first
          await this._emitExtensionEvent(event);
          // Notify all listeners
-@@ -772,6 +854,25 @@ export class AgentSession {
+@@ -772,6 +897,33 @@ export class AgentSession {
                  finalError: msg.errorMessage,
              });
              this._retryAttempt = 0;
++            // Privateer patch: remember that the endpoint is throttling us. The
++            // pre-prompt compaction in prompt() is an LLM call to this same endpoint,
++            // and firing it now just spends the summarizer budget on another 429 —
++            // which is what answered the user's next message with "Auto-compaction
++            // cancelled" instead of a reply. See the guard in prompt().
++            if (isThrottleFailure(msg.errorMessage)) {
++                this._pvThrottledAt = Date.now();
++            }
 +            // Privateer patch: a transient error that survived the full retry budget
 +            // is terminal. Ending the turn here (instead of falling through to
 +            // compaction / queued-message continuation) prevents the agent loop from
@@ -200,7 +258,7 @@ index ce8a9a2..b7b339e 100644
          }
          if (await this._checkCompaction(msg)) {
              return true;
-@@ -852,6 +953,14 @@ export class AgentSession {
+@@ -852,6 +1004,14 @@ export class AgentSession {
              if (!hasConfiguredAuth) {
                  const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
                  if (isOAuth) {
@@ -215,7 +273,22 @@ index ce8a9a2..b7b339e 100644
                      throw new Error(`Authentication failed for "${this.model.provider}". ` +
                          `Credentials may have expired or network is unavailable. ` +
                          `Run '/login ${this.model.provider}' to re-authenticate.`);
-@@ -2084,6 +2193,27 @@ export class AgentSession {
+@@ -861,7 +1021,13 @@ export class AgentSession {
+             // Check if we need to compact before sending (catches aborted responses).
+             // The user's new prompt is sent below, so do not call agent.continue() here.
+             const lastAssistant = this._findLastAssistantMessage();
+-            if (lastAssistant) {
++            // Privateer patch: skip this while the provider is still throttling us.
++            // Compaction here is another LLM call to the endpoint that just spent our
++            // whole retry budget on 429s; it cannot succeed, and its failure is reported
++            // as "Auto-compaction cancelled" — burying the user's actual prompt. One
++            // rate-limit window of patience, then we try again as normal. The context is
++            // not lost: the next turn re-checks compaction once the window has passed.
++            if (lastAssistant && Date.now() - this._pvThrottledAt >= PV_MAX_RETRY_DELAY_MS) {
+                 await this._checkCompaction(lastAssistant, false);
+             }
+             // Build messages array (custom message if any, then user message)
+@@ -2084,6 +2250,27 @@ export class AgentSession {
          // Context overflow is handled by compaction, not retry.
          if (isContextOverflow(message, this.model?.contextWindow ?? 0))
              return false;
@@ -243,6 +316,19 @@ index ce8a9a2..b7b339e 100644
          return isRetryableAssistantError(message);
      }
      /**
+@@ -2129,7 +2316,11 @@ export class AgentSession {
+             this._retryAttempt--;
+             return false;
+         }
+-        const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
++        // Privateer patch: honour a server-stated `retry-after` and jitter the fallback.
++        // Stock Pi's fixed 2s/4s/8s ladder spends its whole budget inside a rate-limit
++        // window it was never long enough to outlast, and fires every parallel retry at
++        // the same instant. See retryDelayMs above.
++        const delayMs = retryDelayMs(message.errorMessage, this._retryAttempt, settings.baseDelayMs);
+         this._emit({
+             type: "auto_retry_start",
+             attempt: this._retryAttempt,
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
 index 197bccc..bc9ac3f 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-guidance.js
@@ -681,7 +767,7 @@ index 97af6cd..74d5d52 100644
          }
          const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
-index cb06c10..930a0de 100644
+index cb06c10..41fb90c 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
 @@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
@@ -822,6 +908,23 @@ index cb06c10..930a0de 100644
          const dir = dirname(path);
          let release;
          try {
+@@ -568,7 +672,15 @@ export class SettingsManager {
+     getProviderRetrySettings() {
+         return {
+             timeoutMs: this.settings.retry?.provider?.timeoutMs,
+-            maxRetries: this.settings.retry?.provider?.maxRetries,
++            // Privateer patch: give the provider-level retry a real default. pi-ai's
++            // retryProviderRequest is the only layer that reads `retry-after` and jitters,
++            // but it takes `options.maxRetries ?? 0` and stock Pi hands it `undefined` — so
++            // it ran ZERO retries and every throttle fell through to the session-level loop
++            // (3 attempts, fixed 2s/4s/8s, no retry-after), which cannot outlast a 60s rate
++            // limit window. A bare `429` from the account edge exhausted the budget in ~14s.
++            // 2 here is deliberately small: it is a *per-attempt* budget that nests inside
++            // the session retry, and each of its waits already honours the server's number.
++            maxRetries: this.settings.retry?.provider?.maxRetries ?? 2,
+             maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
+         };
+     }
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
 index 4e7e784..7383a2b 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
@@ -1307,7 +1410,7 @@ index 1d9f046..c0326e3 100644
          return lines;
      }
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
-index 3f93cc6..bbe2c10 100644
+index 3f93cc6..50a2a99 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
 @@ -1,8 +1,35 @@
@@ -1347,7 +1450,23 @@ index 3f93cc6..bbe2c10 100644
  export class ToolExecutionComponent extends Container {
      contentBox;
      contentText;
-@@ -106,6 +133,13 @@ export class ToolExecutionComponent extends Container {
+@@ -43,8 +70,13 @@ export class ToolExecutionComponent extends Container {
+         // Always create all shell variants. contentBox is used for default renderer-based composition.
+         // selfRenderContainer is used when the tool renders its own framing.
+         // contentText is reserved for generic fallback rendering when no tool definition exists.
+-        this.contentBox = new Box(1, 1, (text) => theme.bg("toolPendingBg", text));
+-        this.contentText = new Text("", 1, 1, (text) => theme.bg("toolPendingBg", text));
++        // Privateer: paddingY is 0 because we flatten the tool-box washes (dark.json /
++        // light.json). With no background to fill, upstream's paddingY=1 reads as a blank
++        // line above AND below every call, stacking with the Spacer(1) into three empty
++        // rows between consecutive tools. 0 leaves exactly the one Spacer row, which also
++        // matches what the self-render path above emits (a single lines.push("")).
++        this.contentBox = new Box(1, 0, (text) => theme.bg("toolPendingBg", text));
++        this.contentText = new Text("", 1, 0, (text) => theme.bg("toolPendingBg", text));
+         this.selfRenderContainer = new Container();
+         if (this.hasRendererDefinition()) {
+             this.addChild(this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox);
+@@ -106,6 +138,13 @@ export class ToolExecutionComponent extends Container {
      createCallFallback() {
          return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
      }
@@ -1361,7 +1480,7 @@ index 3f93cc6..bbe2c10 100644
      createResultFallback() {
          const output = this.getTextOutput();
          if (!output) {
-@@ -218,19 +252,22 @@ export class ToolExecutionComponent extends Container {
+@@ -218,19 +257,22 @@ export class ToolExecutionComponent extends Container {
              renderContainer.clear();
              const callRenderer = this.getCallRenderer();
              if (!callRenderer) {
@@ -1387,7 +1506,7 @@ index 3f93cc6..bbe2c10 100644
                      hasContent = true;
                  }
              }
-@@ -302,7 +339,8 @@ export class ToolExecutionComponent extends Container {
+@@ -302,7 +344,8 @@ export class ToolExecutionComponent extends Container {
          return getRenderedTextOutput(this.result, this.showImages);
      }
      formatToolExecution() {
@@ -1398,7 +1517,7 @@ index 3f93cc6..bbe2c10 100644
          if (content) {
              text += `\n\n${content}`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index 42e655d..d00bec9 100644
+index 42e655d..606c7cc 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 @@ -10,7 +10,7 @@ import * as TuiLayouts from "@earendil-works/pi-tui";
@@ -1424,7 +1543,62 @@ index 42e655d..d00bec9 100644
      if (!sessionManager.usesDefaultSessionDir()) {
          args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
      }
-@@ -405,9 +410,15 @@ export class InteractiveMode {
+@@ -207,6 +212,54 @@ export function createInteractiveTuiReference(getTui) {
+         getPrototypeOf: () => Reflect.getPrototypeOf(getTui()),
+     });
+ }
++// Privateer patch: describe an error we only have the TEXT of. Mirrors
++// describeErrorText in src/engine/errors.ts — see the incident note there.
++const PV_RETRY_AFTER_PATTERNS = [
++    /retry-after(?:-ms)?["'\s:=]+(\d+(?:\.\d+)?)/i,
++    /(?:retry|try) again in (\d+(?:\.\d+)?)\s*(m?s|seconds?|minutes?)/i,
++    /retry after (\d+(?:\.\d+)?)\s*(m?s|seconds?|minutes?)/i,
++];
++function pvRetryAfterMs(text) {
++    const s = typeof text === "string" ? text : "";
++    for (const re of PV_RETRY_AFTER_PATTERNS) {
++        const m = re.exec(s);
++        if (!m)
++            continue;
++        const value = Number.parseFloat(m[1]);
++        if (!Number.isFinite(value) || value <= 0)
++            continue;
++        const unit = (m[2] ?? "").toLowerCase();
++        const ms = unit === "ms" || /retry-after-ms/i.test(m[0])
++            ? value
++            : unit.startsWith("m") && unit !== "ms"
++                ? value * 60_000
++                : value * 1000;
++        return Math.min(Math.max(Math.round(ms), 1_000), 60_000);
++    }
++    return null;
++}
++function pvDescribeErrorText(text) {
++    const s = typeof text === "string" ? text : "";
++    const status = Number(/^\s*(\d{3})\b/.exec(s)?.[1] ?? NaN);
++    if (!Number.isFinite(status))
++        return null;
++    if (status === 429) {
++        const stated = pvRetryAfterMs(s);
++        return {
++            message: "Rate limited (429).",
++            hint: stated
++                ? `The provider asked for ${Math.ceil(stated / 1000)}s. Wait that long and send it again.`
++                : "Wait a moment and send it again — or run /model to switch to another provider.",
++        };
++    }
++    if (status === 401 || status === 403)
++        return { message: s, hint: "Check your credentials — run /login to re-authenticate." };
++    if (status === 404)
++        return { message: s, hint: "Check the model id — run /model to switch." };
++    if (status >= 500)
++        return { message: s, hint: "Usually transient — retry shortly." };
++    return null;
++}
+ export class InteractiveMode {
+     runtimeHost;
+     renderer;
+@@ -405,9 +458,15 @@ export class InteractiveMode {
      }
      getBuiltInCommandConflictDiagnostics(extensionRunner) {
          const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
@@ -1441,7 +1615,7 @@ index 42e655d..d00bec9 100644
              .map((command) => ({
              type: "warning",
              message: command.invocationName === command.name
-@@ -754,20 +765,18 @@ export class InteractiveMode {
+@@ -754,20 +813,18 @@ export class InteractiveMode {
                  this.showNewVersionNotification(newRelease);
              }
          });
@@ -1474,7 +1648,7 @@ index 42e655d..d00bec9 100644
          // Check tmux keyboard setup asynchronously
          this.checkTmuxKeyboardSetup().then((warning) => {
              if (warning) {
-@@ -2310,7 +2319,17 @@ export class InteractiveMode {
+@@ -2310,7 +2367,17 @@ export class InteractiveMode {
              if (text === "/model" || text.startsWith("/model ")) {
                  const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -1493,7 +1667,7 @@ index 42e655d..d00bec9 100644
                  return;
              }
              if (text === "/export" || text.startsWith("/export ")) {
-@@ -2376,12 +2395,42 @@ export class InteractiveMode {
+@@ -2376,12 +2443,42 @@ export class InteractiveMode {
              if (text === "/login" || text.startsWith("/login ")) {
                  const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -1538,7 +1712,7 @@ index 42e655d..d00bec9 100644
                  return;
              }
              if (text === "/new") {
-@@ -3024,7 +3073,7 @@ export class InteractiveMode {
+@@ -3024,7 +3121,7 @@ export class InteractiveMode {
          if (this.chatContainer.children.length > 0) {
              this.chatContainer.addChild(new Spacer(1));
          }
@@ -1547,6 +1721,25 @@ index 42e655d..d00bec9 100644
      }
      async getUserInput() {
          const queuedInput = this.pendingUserInputs.shift();
+@@ -3363,7 +3460,17 @@ export class InteractiveMode {
+     }
+     showError(errorMessage) {
+         this.chatContainer.addChild(new Spacer(1));
+-        this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), this.outputPad, 0));
++        // Privateer patch: by the time an error reaches here it is only a string — the
++        // structured fields describeError() reads are long gone, so the user was shown
++        // the SDK's own words ("429 status code (no body)"), which say nothing about
++        // what to do. The status is still readable at the front of that string; recover
++        // it and say what describeError would. Mirrors describeErrorText in
++        // src/engine/errors.ts. Anything without a leading status prints unchanged.
++        const described = pvDescribeErrorText(errorMessage);
++        this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${described?.message ?? errorMessage}`), this.outputPad, 0));
++        if (described?.hint) {
++            this.chatContainer.addChild(new Text(theme.fg("muted", described.hint), this.outputPad, 0));
++        }
+         this.ui.requestRender();
+     }
+     showWarning(warningMessage) {
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
 index 9db9cbd..b370180 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json

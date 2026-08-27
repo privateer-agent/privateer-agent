@@ -47,6 +47,7 @@ export const MEDIA_TOOL_NAMES = [
   "generate_image",
   "generate_video",
   "generate_model",
+  "generate_sprite",
   "generate_speech",
   "generate_music",
   "generate_sfx",
@@ -63,6 +64,12 @@ const VIDEO_POLL_INTERVAL_MS = 5_000;
 // id is reported on timeout so the caller can resume the poll rather than pay
 // for a second generation.
 const MESH_POLL_TIMEOUT_MS = Number(process.env.PRIVATEER_MESH_TIMEOUT_MS) || 10 * 60_000;
+// A sprite job renders one clip per BILLED facing, sequentially, so an eight-way
+// set waits on five video generations rather than one. The ceiling is
+// correspondingly generous; as with video, the job id is reported on timeout so
+// the caller can resume the poll rather than pay for another run.
+const SPRITE_POLL_TIMEOUT_MS = Number(process.env.PRIVATEER_SPRITE_TIMEOUT_MS) || 25 * 60_000;
+const SPRITE_POLL_INTERVAL_MS = 6_000;
 const MESH_POLL_INTERVAL_MS = 5_000;
 // Four reference views at 8 MB each would be ~43 MB of base64 — past the
 // server's own body limit, so the request would be refused by a JSON parser with
@@ -1036,6 +1043,297 @@ export const mediaCapabilitiesToolDefinition = {
   },
 };
 
+interface SpriteSubmitResponse {
+  id?: string;
+  status?: string;
+  billed_facings?: number;
+  mirrored_facings?: number;
+  animations?: number;
+  message?: string;
+}
+
+interface SpriteStatusResponse {
+  id?: string;
+  status?: string;
+  zip_base64?: string;
+  bytes?: number;
+  sheet?: { width: number; height: number; columns: number; rows: number; frame_width: number; frame_height: number };
+  animations?: { name: string; direction: string; origin: string }[];
+  res_path?: string;
+  key_residue?: number;
+  error?: { message?: string };
+  message?: string;
+}
+
+/**
+ * Unpack the bundle into a directory.
+ *
+ * A hand-rolled reader rather than a dependency, and it is about thirty lines
+ * because the archive is STORED — Privateer writes no compressed entries (the
+ * payload is already PNG, so deflating it twice buys nothing), which means every
+ * entry is a header followed by its bytes verbatim.
+ *
+ * ZIP-SLIP: entry names come off the wire, so each resolved path is checked to
+ * be inside the destination before anything is written. A `..` segment here
+ * would let a generated archive write anywhere the agent can reach, which on an
+ * unattended run is the user's whole machine.
+ */
+export function extractStoredZip(zip: Buffer, destDir: string): string[] {
+  const written: string[] = [];
+  const root = resolve(destDir);
+  let at = 0;
+
+  while (at + 30 <= zip.length && zip.readUInt32LE(at) === 0x04034b50) {
+    const method = zip.readUInt16LE(at + 8);
+    const size = zip.readUInt32LE(at + 18);
+    const nameLen = zip.readUInt16LE(at + 26);
+    const extraLen = zip.readUInt16LE(at + 28);
+    const name = zip.toString("utf8", at + 30, at + 30 + nameLen);
+    const dataAt = at + 30 + nameLen + extraLen;
+
+    if (method !== 0) throw new Error(`archive entry "${name}" is compressed; only stored entries are expected`);
+    if (dataAt + size > zip.length) throw new Error(`archive entry "${name}" is truncated`);
+
+    const target = resolve(root, name);
+    if (target !== root && !target.startsWith(root + "/")) {
+      throw new Error(`archive entry "${name}" escapes the destination directory`);
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, zip.subarray(dataAt, dataAt + size));
+    written.push(name);
+
+    at = dataAt + size;
+  }
+
+  if (!written.length) throw new Error("the archive contained no files");
+  return written;
+}
+
+/**
+ * Guess the res:// path from where the files are being written.
+ *
+ * The .tres refers to its sheet by an absolute res:// path, so getting it wrong
+ * means the caller opens Godot and edits a line by hand. In the overwhelmingly
+ * common case the agent is running AT the project root, so the directory
+ * relative to cwd IS the res:// path — deriving it is right far more often than
+ * a fixed default would be. Returns undefined when the target is outside cwd,
+ * where the guess would be worse than letting the server default.
+ */
+export function guessResPath(cwd: string, dir: string): string | undefined {
+  const target = resolve(abs(cwd, dir));
+  const root = resolve(cwd);
+  if (target === root || !target.startsWith(root + "/")) return undefined;
+  return `res://${target.slice(root.length + 1).split("\\").join("/")}/`;
+}
+
+export const generateSpriteToolDefinition = {
+  name: "generate_sprite",
+  label: "Generate Sprite Animation",
+  description:
+    "Generate a 2D SPRITE ANIMATION for a game engine — a packed sprite sheet, the individual frame " +
+    "PNGs, and a Godot 4 SpriteFrames .tres resource — from ONE picture of a character plus a " +
+    "description of how it moves. The files are written straight into your project directory, so an " +
+    "AnimatedSprite2D can use them without any further conversion. There is no text-to-sprite here: " +
+    "generate or find the character art first (generate_image works), look at it, and pass that path " +
+    "as `image` — every facing is derived from that one picture, which is what stops the character " +
+    "changing between frames.\n" +
+    "HOW IT IS BILLED, because it is not one generation: the motion is rendered as a short video per " +
+    "FACING and then sampled into frames. `directions: 'one'` costs one video generation, 'four' " +
+    "costs THREE, and 'eight' costs FIVE — the left-facing animations are mirrored from the " +
+    "right-facing ones rather than rendered, which is why eight animations cost five clips and not " +
+    "eight. Each clip is charged at the account's video rate, so an eight-way set is genuinely " +
+    "expensive; say the total to the user before batching characters.\n" +
+    "It takes several minutes (the clips render sequentially) and this tool waits. Frame count, cell " +
+    "size and frame rate are chosen here and cost nothing extra. AVAILABILITY: this needs a video " +
+    "decoder on the Privateer API and some deployments do not have one — call media_capabilities and " +
+    "check `sprites.available` before spending, or you will get a clear refusal instead of a sheet. " +
+    "PRIVACY: video and image models have no zero-retention option, so this is gated the way 3D is — " +
+    "a ZDR account must have enabled non-ZDR media.",
+  parameters: Type.Object({
+    image: Type.String({
+      description:
+        "Path to ONE picture of the character, ideally full-body, centred and facing the viewer. " +
+        "Every other facing is generated as an edit of this image, so its framing sets the framing of " +
+        "the whole sheet.",
+    }),
+    prompt: Type.String({
+      description:
+        "How the character MOVES, not what it looks like — 'walking at a steady pace', 'swinging a " +
+        "sword overhead', 'idle, breathing'. The appearance comes from `image`; describing it again " +
+        "here only competes with the picture.",
+    }),
+    dir: Type.String({
+      description:
+        "Directory to write the sheet, frames and .tres into, relative to cwd or absolute " +
+        "(e.g. 'sprites/knight'). It is created if missing. When it sits inside cwd, the res:// path " +
+        "baked into the .tres is derived from it, so running at your Godot project root means the " +
+        "resource resolves with nothing to edit.",
+    }),
+    action: Type.Optional(
+      Type.String({
+        description:
+          "The animation-name stem, e.g. 'walk' — GDScript will play \"walk_down\", \"walk_left\" and so " +
+          "on. Defaults to 'anim'. Keep it lowercase and ASCII; it ends up in game code.",
+      }),
+    ),
+    directions: Type.Optional(
+      Type.String({
+        description:
+          "'one' (default, one animation, ONE clip billed), 'four' (down/right/up/left, THREE billed) " +
+          "or 'eight' (adds the diagonals, FIVE billed). Four is the usual choice for a top-down or " +
+          "2.5D character; eight only if the game actually turns that finely.",
+      }),
+    ),
+    frames: Type.Optional(
+      Type.Number({
+        description:
+          "Frames per animation, 2-24 (default 8). Sampled out of the rendered clip, so this costs " +
+          "nothing extra and can be chosen for the look: 8 is a classic walk cycle, 12+ is smoother " +
+          "and makes a larger sheet.",
+      }),
+    ),
+    frame_size: Type.Optional(
+      Type.Number({
+        description:
+          "Cell size in pixels, 8-512 (default 64). Frames are downscaled with nearest-neighbour, so " +
+          "pixel art stays crisp. Pick the size the game actually draws at.",
+      }),
+    ),
+    fps: Type.Optional(
+      Type.Number({ description: "Playback rate written into the resource, 1-120 (default 12)." }),
+    ),
+    loop: Type.Optional(
+      Type.Boolean({ description: "Whether the animations loop (default true)." }),
+    ),
+    name: Type.Optional(
+      Type.String({ description: "Name for the sprite; sets the file names. Defaults to `action`." }),
+    ),
+    res_path: Type.Optional(
+      Type.String({
+        description:
+          "Override the res:// folder the .tres points at, e.g. 'res://art/mobs/'. Only needed when " +
+          "`dir` is not inside your Godot project root — otherwise it is derived from `dir`.",
+      }),
+    ),
+    model: Type.Optional(
+      Type.String({ description: "Video model id to render the motion with. Omit for the account default." }),
+    ),
+  }),
+  async execute(
+    _toolCallId: string,
+    params: {
+      image: string; prompt: string; dir: string; action?: string; directions?: string;
+      frames?: number; frame_size?: number; fps?: number; loop?: boolean;
+      name?: string; res_path?: string; model?: string;
+    },
+    signal?: AbortSignal,
+    _onUpdate?: unknown,
+    ctx?: { cwd?: string },
+  ) {
+    const cwd = ctx?.cwd ?? process.cwd();
+    if (!params.image) return text("Error: image is required — sprite generation derives every facing from one picture.");
+    if (!params.prompt?.trim()) return text("Error: prompt is required — describe how the character moves.");
+    if (!params.dir) return text("Error: dir is required — say where to write the sheet and the .tres.");
+
+    let seed: { data: string; mimeType: string };
+    try {
+      seed = readInputImage(cwd, params.image);
+    } catch (e) {
+      return text(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const submitted = await callAccount<SpriteSubmitResponse>("/api/agent/media/sprites", {
+      method: "POST",
+      signal,
+      body: {
+        image: seed.data,
+        prompt: params.prompt,
+        ...(params.action ? { action: params.action } : {}),
+        ...(params.name ? { name: params.name } : {}),
+        ...(params.directions ? { directions: params.directions } : {}),
+        ...(params.frames != null ? { frames: params.frames } : {}),
+        ...(params.frame_size != null ? { frame_size: params.frame_size } : {}),
+        ...(params.fps != null ? { fps: params.fps } : {}),
+        ...(params.loop != null ? { loop: params.loop } : {}),
+        // The caller's own res:// wins; otherwise derive it from where the files
+        // are going, which is right whenever the agent runs at the project root.
+        ...(params.res_path
+          ? { res_path: params.res_path }
+          : (() => {
+            const guessed = guessResPath(cwd, params.dir);
+            return guessed ? { res_path: guessed } : {};
+          })()),
+        ...(params.model ? { model: params.model } : {}),
+      },
+    });
+    if (!submitted.ok) return text(`Sprite generation failed: ${submitted.message}`);
+    const jobId = submitted.data.id;
+    if (!jobId) return text("Sprite generation failed: Privateer did not return a job id.");
+
+    const billed = submitted.data.billed_facings;
+    const deadline = Date.now() + SPRITE_POLL_TIMEOUT_MS;
+    // The clips are charged as they land, so an abandoned poll still costs money —
+    // hence every exit below names the job id and says so plainly.
+    const cancelled = () =>
+      text(`Sprite job ${jobId} was submitted but the wait was cancelled. Its ${billed ?? "queued"} clip(s) are still rendering and will still be billed.`);
+
+    for (;;) {
+      if (signal?.aborted) return cancelled();
+      await sleep(SPRITE_POLL_INTERVAL_MS, signal);
+      if (signal?.aborted) return cancelled();
+
+      const poll = await callAccount<SpriteStatusResponse>(
+        `/api/agent/media/sprites/${encodeURIComponent(jobId)}`,
+        { method: "GET", signal },
+      );
+      if (!poll.ok) return text(`Sprite job ${jobId} could not be polled: ${poll.message}`);
+
+      const status = String(poll.data.status ?? "").toLowerCase();
+      if (status === "failed") {
+        return text(`Sprite generation failed: ${poll.data.error?.message ?? poll.data.message ?? "the provider reported a failure"}.`);
+      }
+      if (status === "completed") {
+        if (!poll.data.zip_base64) {
+          return text(`Sprite job ${jobId} already delivered its bytes on an earlier poll; they were not saved. Generate again if the files are missing.`);
+        }
+        const destination = abs(cwd, params.dir);
+        let written: string[];
+        try {
+          written = extractStoredZip(Buffer.from(poll.data.zip_base64, "base64"), destination);
+        } catch (e) {
+          return text(`Sprite job ${jobId} rendered but the bundle could not be unpacked: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        const tres = written.find((f) => f.endsWith(".tres"));
+        const anims = poll.data.animations ?? [];
+        const mirrored = anims.filter((a) => a.origin === "mirrored").length;
+        const sheet = poll.data.sheet;
+
+        const lines = [
+          `Generated sprite animation: ${written.length} files in ${destination}`,
+          sheet ? `Sheet ${sheet.width}x${sheet.height}px, ${sheet.frame_width}x${sheet.frame_height} cells, ${sheet.columns}x${sheet.rows} grid.` : "",
+          anims.length ? `Animations: ${anims.map((a) => a.name).join(", ")}${mirrored ? ` (${mirrored} mirrored, not billed)` : ""}.` : "",
+          tres ? `Set an AnimatedSprite2D's Sprite Frames to ${poll.data.res_path ?? "res://"}${tres.split("/").pop()}.` : "",
+          "Set the sheet's texture Filter to Nearest in the Import dock, or the pixel art imports blurry.",
+          // Surfaced rather than swallowed: the flat backdrop the clip was asked
+          // for is a prompt the model can ignore, and when it does the key leaves
+          // a rim. The caller can see it here instead of finding it in-game.
+          poll.data.key_residue != null && poll.data.key_residue > 0.08
+            ? `NOTE: the background did not key cleanly (residue ${poll.data.key_residue.toFixed(2)}) — the frames may have a fringe. Re-run, or clean them up before shipping.`
+            : "",
+        ].filter(Boolean);
+        return text(lines.join("\n"));
+      }
+      if (Date.now() > deadline) {
+        return text(
+          `Sprite job ${jobId} is still ${status || "running"} after ${Math.round(SPRITE_POLL_TIMEOUT_MS / 60000)} minutes. ` +
+            "It will still complete and still be billed; nothing was saved here.",
+        );
+      }
+    }
+  },
+};
+
 /**
  * Extension factory registering every account-backed media tool. Used by the surfaces
  * that build their session from an explicit `extensionFactories` list (harbor, channels,
@@ -1051,6 +1349,7 @@ export function makeMediaTools() {
     pi.registerTool?.(generateImageToolDefinition);
     pi.registerTool?.(generateVideoToolDefinition);
     pi.registerTool?.(generateModelToolDefinition);
+    pi.registerTool?.(generateSpriteToolDefinition);
     pi.registerTool?.(generateSpeechToolDefinition);
     pi.registerTool?.(generateMusicToolDefinition);
     pi.registerTool?.(generateSfxToolDefinition);

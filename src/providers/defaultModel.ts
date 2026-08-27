@@ -15,15 +15,16 @@ import { join } from "node:path";
 import { hasCredentials } from "../auth/privateer.ts";
 import { agentDir } from "../config/paths.ts";
 
-// A capable Tinfoil chat model, and Privateer's default everywhere. Tinfoil runs it
-// inside an attestable TEE (the serving enclave's quote is published and the live TLS
-// key is bound to it), which is the strongest privacy tier we offer — so a capable
-// model on that tier is what a privacy-first agent should boot on.
+// A capable MULTIMODAL Tinfoil chat model, and Privateer's default everywhere. Tinfoil
+// runs it inside an attestable TEE (the serving enclave's quote is published and the
+// live TLS key is bound to it), which is the strongest privacy tier we offer — so a
+// capable model on that tier is what a privacy-first agent should boot on.
 // One definition, three consumers: this resolver, providers/account.ts's seed catalog,
 // and bin/privateer-launch.mjs (which mirrors the id — keep them in step).
 //
-// This has moved twice. The history matters, because both moves were about the same
-// two axes — first-token latency and reasoning control — pulling in opposite directions:
+// This has moved three times. The history matters, because the first two moves were
+// about the same two axes — first-token latency and reasoning control — pulling in
+// opposite directions, and the third added a third axis that outranks both:
 //
 //   • until 2026-08-01 — glm-5-2.
 //   • 2026-08-01 → 2026-08-06 — kimi-k2-6, a LATENCY swap, not a capability one. Over
@@ -55,10 +56,41 @@ import { agentDir } from "../config/paths.ts";
 //     three that gives the user a working dial. It is a smaller model than GLM 5.2 and
 //     Kimi K2.6; that capability trade was made knowingly. It also serves from NEAR as
 //     well as Tinfoil — the only capable model here with two attested homes.
+//   • 2026-08-27 — gemma4-31b, on SIGHT. Every model above is text-only, and the
+//     default is what a signed-in user actually runs, so the agent could be pointed at
+//     a screenshot, a design mock or a sheet it had just generated and would answer
+//     about a picture it was never sent (Pi drops image blocks a model doesn't declare
+//     — see providers/vision.ts). "Reads what you show it" beats a reasoning dial on a
+//     tool whose whole job is looking at the user's work.
+//
+//     The candidate set is small: of the account catalog's confidential-compute
+//     models, only Gemma 4 (Tinfoil, NEAR and Phala all serve it) and
+//     near/Qwen/Qwen3-VL-30B-A3B-Instruct take images at all. Gemma 4 31B wins on the
+//     invariant below — it is in Tinfoil's own catalog, so the direct and subscription
+//     routes stay the SAME model, which Qwen3-VL (NEAR only) would have broken.
+//
+//     Two things this costs, both knowingly:
+//       - the reasoning dial. thinkingProfile() annotates gpt-oss and the GLM/Qwen
+//         chat-template family and nothing else, so Gemma registers `reasoning: false`
+//         — as would Qwen3-VL, whose `-Instruct` id is the non-thinking variant. No
+//         vision model in the confidential tier has a dial we have verified, so this
+//         was not a choice between sight and thinking control; there was no option
+//         with both.
+//       - size. 31B against gpt-oss-120b, continuing the trade the 2026-08-06 entry
+//         started.
+//
+//     NOT re-measured for latency: the daily message cap (25/day, free tier) refused
+//     every probe on 2026-08-27 with 429 DAILY_CAP_HIT, so the TTFT table above has no
+//     gemma4-31b row. It is the same enclave provider and transport as the two models
+//     that never stalled, which is the reason to expect it behaves like them and not
+//     like glm-5-2 — but that is an expectation, not a measurement. Run the probe when
+//     the cap allows and record the row here.
 //
 // Re-measure before moving this again. The stall behaviour is a property of a
 // provider's deployment, not of a model, and it has already changed under us twice.
-export const TINFOIL_MODEL_ID = "tinfoil/gpt-oss-120b";
+// And whatever replaces it must still accept images: acceptsImages() in
+// providers/vision.ts is the test, and defaultModel.test.ts asserts it.
+export const TINFOIL_MODEL_ID = "tinfoil/gemma4-31b";
 
 // Same model, reached two ways:
 //   - TINFOIL_DEFAULT_SPEC — direct to inference.tinfoil.sh with the user's own
@@ -175,8 +207,9 @@ export function resolveDefaultModel(opts: ResolveDefaultModelOptions = {}): stri
 // A terminal launched with a BYO key (or an explicit --model) is pinned to whatever it
 // resolved at launch; without an in-session switch a mid-session /login changes nothing
 // visible and the user is left wondering what signing in bought them. This resolves the
-// model sign-in should activate RIGHT AWAY: Tinfoil GLM 5.2, direct when a Tinfoil key
-// is present and over the subscription otherwise — no BYO key needed.
+// model sign-in should activate RIGHT AWAY: TINFOIL_MODEL_ID, direct when a Tinfoil key
+// is present and over the subscription otherwise — no BYO key needed. Being signed in
+// is what buys sight, so this is also the switch that makes images work mid-session.
 // PRIVATEER_MODEL still wins — a deliberate override is never stomped.
 // `saved: null` on purpose: this is the sign-in TARGET, and the target is always the
 // confidential model. Whether to actually move a session that sits on a deliberate

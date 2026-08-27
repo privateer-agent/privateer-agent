@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  ACCOUNT_DEFAULT_MODEL_ID,
   ACCOUNT_DEFAULT_SPEC,
   LEGACY_BYO_FALLBACK,
   TINFOIL_DEFAULT_SPEC,
@@ -20,6 +21,7 @@ import {
   resolveSignedInModel,
   savedPiDefaultSpec,
 } from "../src/providers/defaultModel.ts";
+import { acceptsImages, visionInput } from "../src/providers/vision.ts";
 import { agentDir } from "../src/config/paths.ts";
 
 function freshHome() {
@@ -92,8 +94,19 @@ test("the default is one Tinfoil model, however it's reached", () => {
   // Same model both ways — direct with a key, over the subscription without one.
   // Pinned to the literal on purpose: moving the default is a deliberate, measured
   // decision (see TINFOIL_MODEL_ID), not something a refactor should do quietly.
-  assert.equal(TINFOIL_DEFAULT_SPEC, "tinfoil/gpt-oss-120b");
-  assert.equal(ACCOUNT_DEFAULT_SPEC, "privateer/tinfoil/gpt-oss-120b");
+  assert.equal(TINFOIL_DEFAULT_SPEC, "tinfoil/gemma4-31b");
+  assert.equal(ACCOUNT_DEFAULT_SPEC, "privateer/tinfoil/gemma4-31b");
+});
+
+test("the signed-in default can see an image", () => {
+  // The whole point of the 2026-08-27 move. Pi strips image blocks from a request
+  // whose model doesn't declare the modality, silently — so a default that fails this
+  // means a user can show the agent a screenshot and be answered about nothing. Every
+  // route a signed-in terminal can land on has to pass, not just the account one.
+  for (const spec of [TINFOIL_DEFAULT_SPEC, ACCOUNT_DEFAULT_MODEL_ID, TINFOIL_MODEL_ID]) {
+    assert.ok(acceptsImages(spec), `${spec} must accept images`);
+  }
+  assert.deepEqual(visionInput(TINFOIL_MODEL_ID), ["text", "image"]);
 });
 
 test("resolveSignedInModel: Tinfoil when keyed, else the account channel", () => {
@@ -140,7 +153,7 @@ test("ensurePiDefaultModel: a Tinfoil key seeds the direct (client-attested) rou
     assert.equal(ensurePiDefaultModel(), TINFOIL_DEFAULT_SPEC);
     const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
     assert.equal(settings.defaultProvider, "tinfoil");
-    assert.equal(settings.defaultModel, "gpt-oss-120b");
+    assert.equal(settings.defaultModel, "gemma4-31b");
   } finally {
     delete process.env.TINFOIL_API_KEY;
   }

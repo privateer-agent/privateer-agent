@@ -175,6 +175,7 @@ const MEDIA_TOOLS = new Set([
   "generate_image",
   "generate_video",
   "generate_model",
+  "generate_sprite",
   "generate_speech",
   "generate_music",
   "generate_sfx",
@@ -199,6 +200,7 @@ export const BILLED_MEDIA_TOOLS: ReadonlySet<string> = new Set([
   "generate_image",
   "generate_video",
   "generate_model",
+  "generate_sprite",
   "generate_speech",
   "generate_music",
   "generate_sfx",
@@ -210,6 +212,11 @@ const MEDIA_TITLES: Record<string, string> = {
   // options, so the title says so out loud rather than leaving the human to
   // work it out from a JSON blob of flags.
   generate_model: "Generate a 3D model (billed; $0.14-$2.41 a mesh depending on the model)",
+  // The one whose price is a MULTIPLE rather than a rate: it renders a video per
+  // facing, so approving it can be approving five video generations at once. The
+  // title says the multiplier out loud, because "generate a sprite" reads like
+  // one cheap call and it is not.
+  generate_sprite: "Generate a sprite animation (billed; 1, 3 or 5 video generations depending on facings)",
   generate_speech: "Generate speech (billed to your Privateer account)",
   generate_music: "Generate music (billed; music prompts have no zero-retention option)",
   // Cheap per call and therefore the one most likely to be called twenty times in a
@@ -410,7 +417,13 @@ export function classifyToolCall(
     const outsideInputs = resolvedInputs.filter((a) => isOutsideScope(scope, a));
     const protectedInputs = resolvedInputs.filter((a) => isProtectedPath(a));
 
-    const outPath = str(obj.path ?? obj.output);
+    // `dir` is generate_sprite's output: it unpacks a whole bundle (sheet, frames
+    // and the .tres) into a DIRECTORY rather than writing one named file. Without
+    // it here the gate finds no output path and fails safe — which reads to the
+    // user as an unexplained denial on a tool that is in fact just writing where
+    // they asked. The directory is the right thing to show and to judge for
+    // scope: everything the tool writes lands inside it.
+    const outPath = str(obj.path ?? obj.output ?? obj.dir);
     // `probe` reads and writes nothing; so does any composition call with no output
     // (which the tool itself rejects). Gate those only when they touch a sensitive input.
     if (!outPath) {

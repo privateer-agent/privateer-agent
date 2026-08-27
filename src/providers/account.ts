@@ -28,6 +28,7 @@ import { globalDir } from "../config/paths.ts";
 import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
+import { visionInput } from "./vision.ts";
 import { piAuthStore } from "./piAuthStore.ts";
 import {
   sealedEnabled,
@@ -49,10 +50,11 @@ import type { PhalaEnclaveIdentity } from "./phalaSeal.ts";
 const DEFAULT_MODELS = [
   ACCOUNT_DEFAULT_MODEL_ID,
   ACCOUNT_NEAR_MODEL_ID,
-  // Both former defaults (see TINFOIL_MODEL_ID for the dates). They stay in the floor
-  // so a user who saved either as their own default still resolves it synchronously at
-  // launch, rather than falling through to "first model with configured auth" — the BYO
-  // dead end this seed list exists to prevent.
+  // All three former defaults (see TINFOIL_MODEL_ID for the dates). They stay in the
+  // floor so a user who saved any of them as their own default still resolves it
+  // synchronously at launch, rather than falling through to "first model with
+  // configured auth" — the BYO dead end this seed list exists to prevent.
+  "tinfoil/gpt-oss-120b",
   "tinfoil/kimi-k2-6",
   "tinfoil/glm-5-2",
   "anthropic/claude-opus-5",
@@ -78,7 +80,10 @@ function seedModel(id: string) {
     // reasoning + how to steer it, for the enclave models where we verified the
     // control shape live; `reasoning: false` (Pi's "not a thinking model") for the rest.
     ...(thinkingProfile(id) ?? { reasoning: false as const }),
-    input: ["text"] as ("text" | "image")[],
+    // Honest modalities. This was hardcoded to text for the whole catalog, which made
+    // Pi strip every image from every account request — including the ones `read`
+    // attaches when the user points at a screenshot. See providers/vision.ts.
+    input: visionInput(id),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
     maxTokens: 16384,

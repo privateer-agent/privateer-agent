@@ -348,3 +348,133 @@ export function describeError(err: unknown): DescribedError {
   // arrives, so it goes through the compactor first.
   return out({ message: compactProviderError(text) });
 }
+
+// ── Throttles: waiting the right amount, and only once ───────────────────────
+//
+// The incident this exists for: the account channel's edge answered a burst of
+// turns with a bare `429` — no body, no JSON, just the status. Two retry layers
+// exist and the wrong one was live. pi-ai's `retryProviderRequest` is the good
+// one (it reads `retry-after`, jitters, caps at 60s) but it takes `maxRetries ??
+// 0` and Pi's settings gave it no default, so it ran ZERO retries. All the
+// patience came from the session-level loop: 3 attempts at 2s/4s/8s, no
+// `retry-after`, no jitter — ~14 seconds against a window that is conventionally
+// 60. Exhaustion was arithmetic, not bad luck. Then the pre-prompt compaction
+// fired the summarizer into the same throttled endpoint and died there too, so
+// the user's next message was answered with "Auto-compaction cancelled".
+//
+// The fix is three-part and mirrored into the Pi patch: give the provider layer a
+// real retry budget, make the session layer's backoff honour a server-stated
+// delay and jitter, and don't summarise into an endpoint that just throttled us.
+
+/** A throttle can clear on its own — but only after the server's stated window. */
+export function isThrottleFailure(text: string | null | undefined): boolean {
+  return /^\s*429\b/.test(typeof text === "string" ? text : "");
+}
+
+/** Longest we will sit on a single backoff. Past this the user deserves the turn back. */
+export const MAX_RETRY_DELAY_MS = 60_000;
+
+// A bare 429 carries nothing, but a provider that bothers to explain itself puts the
+// number in the text one of a few ways. Read it where it is offered; guess otherwise.
+const RETRY_AFTER_PATTERNS = [
+  /retry-after(?:-ms)?["'\s:=]+(\d+(?:\.\d+)?)/i,
+  /(?:retry|try) again in (\d+(?:\.\d+)?)\s*(m?s|seconds?|minutes?)/i,
+  /retry after (\d+(?:\.\d+)?)\s*(m?s|seconds?|minutes?)/i,
+];
+
+/**
+ * The server's requested delay in ms, or null when it did not state one.
+ *
+ * `retry-after` is seconds by convention and `retry-after-ms` is milliseconds; a
+ * prose "try again in 30 seconds" carries its own unit. Values are clamped rather
+ * than rejected — a provider asking for an hour gets our ceiling, not a crash.
+ */
+export function retryAfterMs(text: string | null | undefined): number | null {
+  const s = typeof text === "string" ? text : "";
+  for (const re of RETRY_AFTER_PATTERNS) {
+    const m = re.exec(s);
+    if (!m) continue;
+    const value = Number.parseFloat(m[1]);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const unit = (m[2] ?? "").toLowerCase();
+    const ms =
+      unit === "ms" || /retry-after-ms/i.test(m[0])
+        ? value
+        : unit.startsWith("m") && unit !== "ms"
+          ? value * 60_000
+          : value * 1000;
+    return Math.min(Math.max(Math.round(ms), 1_000), MAX_RETRY_DELAY_MS);
+  }
+  return null;
+}
+
+/**
+ * How long the session-level retry should wait before attempt `attempt` (1-based).
+ *
+ * A server-stated delay wins outright — it is the only number here that is a fact.
+ * Otherwise back off exponentially from `baseDelayMs`, capped, and then jitter DOWN
+ * by up to 25%. The jitter is the point of the exercise: without it every parallel
+ * request that tripped the same limit wakes at the identical millisecond and trips
+ * it again, which is how one throttled turn becomes a throttled session.
+ *
+ * `rand` is injectable so the schedule can be asserted in a test.
+ */
+export function retryDelayMs(
+  errorText: string | null | undefined,
+  attempt: number,
+  baseDelayMs: number,
+  rand: () => number = Math.random,
+): number {
+  const stated = retryAfterMs(errorText);
+  if (stated != null) return stated;
+  const n = Math.max(1, Math.floor(attempt));
+  const backoff = Math.min(baseDelayMs * 2 ** (n - 1), MAX_RETRY_DELAY_MS);
+  return Math.round(backoff * (1 - rand() * 0.25));
+}
+
+/**
+ * Describe an error we only have the TEXT of, for the one place that has nothing else.
+ *
+ * `describeError` above reads structured fields off the error object; by the time a
+ * message reaches the TUI's `showError` those are gone and all that survives is a
+ * string the SDK built status-first ("429 status code (no body)"). That string is
+ * what the user was shown six times during the incident. Recover the status from it
+ * and say the same thing `describeError` would. Returns null when there is no leading
+ * status to read, so ordinary messages print unchanged.
+ */
+export function describeErrorText(text: string | null | undefined): DescribedError | null {
+  const s = typeof text === "string" ? text : "";
+  const status = Number(/^\s*(\d{3})\b/.exec(s)?.[1] ?? NaN);
+  if (!Number.isFinite(status)) return null;
+
+  if (status === 429) {
+    const stated = retryAfterMs(s);
+    return {
+      message: redactText(`Rate limited (429).`),
+      hint: stated
+        ? `The provider asked for ${Math.ceil(stated / 1000)}s. Wait that long and send it again.`
+        : "Wait a moment and send it again — or run /model to switch to another provider.",
+      retryable: true,
+    };
+  }
+  if (status === 401 || status === 403) {
+    return {
+      message: redactText(compactProviderError(s)),
+      hint: "Check your credentials — run /login to re-authenticate.",
+    };
+  }
+  if (status === 404) {
+    return {
+      message: redactText(compactProviderError(s)),
+      hint: "Check the model id — run /model to switch.",
+    };
+  }
+  if (status >= 500) {
+    return {
+      message: redactText(compactProviderError(s)),
+      hint: "Usually transient — retry shortly.",
+      retryable: true,
+    };
+  }
+  return null;
+}

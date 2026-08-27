@@ -9,12 +9,15 @@ import {
   generateImageToolDefinition,
   generateVideoToolDefinition,
   generateModelToolDefinition,
+  generateSpriteToolDefinition,
   generateSpeechToolDefinition,
   generateMusicToolDefinition,
   generateSfxToolDefinition,
   mediaCapabilitiesToolDefinition,
   describeModel3d,
   describeSfx,
+  extractStoredZip,
+  guessResPath,
 } from "../src/tools/media.ts";
 import {
   COMPOSE_TOOL_NAMES,
@@ -55,6 +58,7 @@ test("the exported tool-name lists match the registered definitions", () => {
       generateImageToolDefinition,
       generateVideoToolDefinition,
       generateModelToolDefinition,
+      generateSpriteToolDefinition,
       generateSpeechToolDefinition,
       generateMusicToolDefinition,
       generateSfxToolDefinition,
@@ -959,4 +963,128 @@ test("wrapLines breaks over-long lines and keeps authored ones", () => {
   assert.equal(wrapLines("kept\nbreaks", 100), "kept\nbreaks", "a subtitler who split a line meant it");
   // A single word longer than the limit has nowhere to break, and must not be dropped.
   assert.equal(wrapLines("Llanfairpwllgwyngyll", 8), "Llanfairpwllgwyngyll");
+});
+
+
+// ── generate_sprite ──────────────────────────────────────────────────────────
+// The bundle arrives as an archive and is unpacked into the user's project, so
+// the reader is the security-relevant part: entry names come off the wire, and a
+// `..` segment would let a generated archive write anywhere the agent can reach.
+
+/** Lay out a STORE-only zip, the shape Privateer's writer produces. */
+function storedZip(entries: { name: string; body: string }[]): Buffer {
+  const parts: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = Buffer.from(e.name, "utf8");
+    const data = Buffer.from(e.body, "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(0, 8); // stored
+    local.writeUInt32LE(0, 14); // crc, unchecked by the reader
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    parts.push(local, name, data);
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0);
+    cd.writeUInt16LE(name.length, 28);
+    cd.writeUInt32LE(offset, 42);
+    central.push(cd, name);
+    offset += 30 + name.length + data.length;
+  }
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  return Buffer.concat([...parts, ...central, eocd]);
+}
+
+test("extractStoredZip unpacks a bundle into the project directory", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sprite-"));
+  try {
+    const written = extractStoredZip(
+      storedZip([
+        { name: "hero/hero_sheet.png", body: "PNG" },
+        { name: "hero/hero.tres", body: "[gd_resource]" },
+        { name: "hero/frames/walk_down_00.png", body: "F0" },
+      ]),
+      dir,
+    );
+    assert.equal(written.length, 3);
+    // Nested paths must survive as FOLDERS — a flattened bundle would put the
+    // frames beside the sheet and break the layout the README describes.
+    assert.ok(existsSync(join(dir, "hero", "frames", "walk_down_00.png")));
+    assert.ok(existsSync(join(dir, "hero", "hero.tres")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("extractStoredZip refuses an entry that escapes the destination", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sprite-"));
+  try {
+    assert.throws(
+      () => extractStoredZip(storedZip([{ name: "../escaped.txt", body: "x" }]), dir),
+      /escapes the destination/,
+      "zip-slip must be refused, not resolved",
+    );
+    assert.ok(!existsSync(join(dir, "..", "escaped.txt")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("extractStoredZip refuses a compressed entry rather than writing garbage", () => {
+  const zip = storedZip([{ name: "a.txt", body: "x" }]);
+  zip.writeUInt16LE(8, 8); // method: deflate
+  const dir = mkdtempSync(join(tmpdir(), "sprite-"));
+  try {
+    assert.throws(() => extractStoredZip(zip, dir), /compressed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("guessResPath derives the res:// path from where the files are going", () => {
+  // The .tres names its sheet by an absolute res:// path, so a wrong guess means
+  // the user hand-edits a line in Godot. Deriving it from cwd is right whenever
+  // the agent runs at the project root, which is the overwhelmingly common case.
+  assert.equal(guessResPath("/proj", "sprites/knight"), "res://sprites/knight/");
+  assert.equal(guessResPath("/proj", "/proj/art/mobs"), "res://art/mobs/");
+  // Outside cwd there is nothing to derive from, and a guess would be worse than
+  // letting the server default.
+  assert.equal(guessResPath("/proj", "/tmp/elsewhere"), undefined);
+  assert.equal(guessResPath("/proj", "."), undefined);
+});
+
+test("generate_sprite is a billed write judged against its output directory", () => {
+  // It writes to `dir`, not `path`. Without classify knowing that, the gate finds
+  // no output and fails safe — which reads as an unexplained denial on a tool
+  // that is only writing where the user asked.
+  const decision = classifyToolCall(
+    "generate_sprite",
+    { image: "art/knight.png", prompt: "walking", dir: "sprites/knight", directions: "four" },
+    { cwd: "/proj" },
+  );
+  assert.equal(decision?.kind, "write");
+  assert.equal(decision?.path, "/proj/sprites/knight");
+  assert.equal(decision?.outside, false);
+  // Always ask: approving this can be approving five video generations at once.
+  assert.equal(decision?.alwaysAsk, true);
+  assert.match(String(decision?.title), /billed/i);
+});
+
+test("generate_sprite outside the working directory is flagged as such", () => {
+  const decision = classifyToolCall(
+    "generate_sprite",
+    { image: "art/knight.png", prompt: "walking", dir: "/elsewhere/sprites" },
+    { cwd: "/proj" },
+  );
+  assert.equal(decision?.outside, true);
+  assert.match(String(decision?.title), /outside working directory/);
 });
