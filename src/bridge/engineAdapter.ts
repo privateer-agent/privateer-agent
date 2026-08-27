@@ -20,6 +20,8 @@ import {
   type EngineEvent,
   type UsageTotals,
 } from "../engine/events.ts";
+import { describeErrorText } from "../engine/errors.ts";
+import { redactText } from "../util/redact.ts";
 
 // Minimal structural view of the Pi session events we read. Kept loose (not the
 // full Pi union) so this module type-checks without pinning to Pi's internals;
@@ -108,16 +110,41 @@ export function createEngineEventAdapter() {
             ];
 
       case "turn_end": {
-        const turn = normUsage((ev.message as any)?.usage);
+        const msg = ev.message as any;
+        const turn = normUsage(msg?.usage);
         sessionTotal = addUsage(sessionTotal, turn);
         const finishReason =
-          (ev.finishReason as string) ??
-          ((ev.message as any)?.stopReason as string) ??
-          "stop";
-        return [
-          { type: "usage", usage: sessionTotal, turn },
-          { type: "finish", usage: sessionTotal, finishReason },
-        ];
+          (ev.finishReason as string) ?? (msg?.stopReason as string) ?? "stop";
+        const out: EngineEvent[] = [{ type: "usage", usage: sessionTotal, turn }];
+        // A FAILED turn ends here, not by throwing — and this is the only place the
+        // app can learn it failed.
+        //
+        // Pi reports a dead model call as an assistant message with
+        // `stopReason: "error"` and an `errorMessage`; `prompt()` then resolves
+        // NORMALLY, so the desktop's runTurn catch never fires. Our own pi patch
+        // widened that path deliberately (a hard 4xx, and a 429 that outlived the
+        // retry budget, both end the turn instead of re-entering the agent loop),
+        // which is right for the CLI — its TUI reads the assistant message and
+        // prints describeErrorText. The app reads EngineEvents, and this adapter
+        // used to drop `errorMessage` on the floor: the turn arrived as a bare
+        // `finish`, which RemoteDriveContext closes as a green ✓ "done". A signed-in
+        // user whose first turn 401'd or hit their cap saw a tick and no words.
+        //
+        // So say it. Same wording the terminal gets, ahead of the finish so the feed
+        // reads in order, and redacted either way because an unrecognised body goes
+        // out verbatim.
+        if (msg?.stopReason === "error") {
+          const raw = typeof msg.errorMessage === "string" ? msg.errorMessage : "";
+          const described = describeErrorText(raw);
+          out.push({
+            type: "error",
+            error: described?.message ?? redactText(raw || "The model call failed."),
+            ...(described?.hint ? { hint: described.hint } : {}),
+            ...(described?.retryable != null ? { retryable: described.retryable } : {}),
+          });
+        }
+        out.push({ type: "finish", usage: sessionTotal, finishReason });
+        return out;
       }
 
       // Compaction: Pi collapses history to free context. TODO(verify) field
@@ -146,8 +173,14 @@ export function createEngineEventAdapter() {
           },
         ];
 
-      // Terminal error surfaced at the end of an agent run. TODO(verify) shape;
-      // Phase 1 re-points errors/errors.ts (describeError) here.
+      // Terminal error surfaced at the end of an agent run.
+      //
+      // ⚠️ Pi 0.84's `agent_end` is `{ messages, willRetry }` — there is NO `error`
+      // field, so this branch has been returning [] for every run since the 0.84
+      // refactor. It is kept (harmless, and other Pi versions have carried one)
+      // but it is NOT the error path: a failed model call arrives on `turn_end`
+      // above, which is where the real mapping lives. Do not "restore" error
+      // reporting here and delete it there.
       case "agent_end": {
         const err = (ev as any).error;
         if (!err) return [];
