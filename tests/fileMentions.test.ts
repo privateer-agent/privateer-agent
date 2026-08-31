@@ -137,6 +137,118 @@ test("searchFiles refuses to escape cwd", async () => {
   }
 });
 
+test("searchFiles reaches files in any subdirectory by a name fragment (project-wide)", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    mkdirSync(join(cwd, "screens", "deep"), { recursive: true });
+    writeFileSync(join(cwd, "screens", "deep", "RemoteSessionScreen.tsx"), "");
+    writeFileSync(join(cwd, "screens", "deep", "remoteNotes.md"), "");
+    const hits = await searchFiles("remo", cwd);
+    assert.ok(hits.some((m) => m.path === "screens/deep/RemoteSessionScreen.tsx"), "fragment must reach nested files");
+    assert.ok(hits.some((m) => m.path === "screens/deep/remoteNotes.md"));
+    // A name that STARTS with the fragment outranks a deeper one that merely
+    // carries it ("sessions.md" starts with "sess"; the screen file only contains it).
+    mkdirSync(join(cwd, "screens", "deep", "notes"));
+    writeFileSync(join(cwd, "screens", "deep", "notes", "sessions.md"), "");
+    const sess = await searchFiles("sess", cwd);
+    assert.equal(sess[0].path, "screens/deep/notes/sessions.md");
+    assert.ok(sess.some((m) => m.path === "screens/deep/RemoteSessionScreen.tsx"));
+    // Case-insensitive.
+    assert.ok((await searchFiles("REMO", cwd)).some((m) => m.path === "screens/deep/RemoteSessionScreen.tsx"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("searchFiles dir-qualified fragment matches whole paths (and its own dir first)", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    mkdirSync(join(cwd, "src", "util"), { recursive: true });
+    writeFileSync(join(cwd, "src", "util", "cache.ts"), "");
+    const hits = await searchFiles("src/ut", cwd);
+    assert.equal(hits[0].path, "src/util/", "the exact drill-down child ranks first");
+    assert.ok(hits.some((m) => m.path === "src/util/cache.ts"), "the path match is included");
+    // Even a one-char basename works when the query is dir-qualified — the whole-path
+    // match is precise, unlike a bare single-char fragment ("src/u" ⊂ "src/util/...").
+    assert.ok((await searchFiles("src/u", cwd)).some((m) => m.path === "src/util/cache.ts"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("searchFiles one-char bare fragment stays drill-down only (no whole-tree noise)", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    mkdirSync(join(cwd, "screens"));
+    writeFileSync(join(cwd, "screens", "a.tsx"), "");
+    // No root child starts with "a", and a whole-tree sweep for one character would
+    // be all noise — so nothing, rather than every file containing an "a".
+    assert.deepEqual(await searchFiles("a", cwd), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("searchFiles walk prunes node_modules and .git, and never follows symlinked dirs", async () => {
+  const { cwd, cleanup } = scratch();
+  const outside = scratch();
+  try {
+    mkdirSync(join(cwd, "node_modules", "left-pad"), { recursive: true });
+    mkdirSync(join(cwd, ".git"));
+    mkdirSync(join(cwd, "real"));
+    writeFileSync(join(cwd, "node_modules", "left-pad", "index.js"), "");
+    writeFileSync(join(outside.cwd, "leak.ts"), "SECRET");
+    symlinkSync(outside.cwd, join(cwd, "real", "out"));
+    // Only ignored entries carry "index"; the leak only sits behind a symlinked dir.
+    assert.deepEqual(await searchFiles("index", cwd), []);
+    assert.deepEqual(await searchFiles("leak", cwd), []);
+  } finally {
+    cleanup();
+    outside.cleanup();
+  }
+});
+
+test("searchFiles walk honors .gitignore (root, nested, and globs)", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    mkdirSync(join(cwd, "pods", "Stripe"), { recursive: true });
+    mkdirSync(join(cwd, "src", "vendor"), { recursive: true });
+    writeFileSync(join(cwd, "pods", "Stripe", "Huge.swift"), "");
+    writeFileSync(join(cwd, "src", "vendor", "gen.ts"), "");
+    writeFileSync(join(cwd, "src", "app.ts"), "");
+    // Root ignore: any dir named pods/ anywhere (this is what keeps a vendor tree
+    // from eating the walk's budget before real source is reached).
+    writeFileSync(join(cwd, ".gitignore"), "# deps\npods/\n");
+    // Nested ignore: scoped to its own dir only.
+    writeFileSync(join(cwd, "src", ".gitignore"), "vendor/\n");
+    assert.deepEqual(await searchFiles("huge", cwd), [], "gitignored tree is pruned from the sweep");
+    assert.deepEqual(await searchFiles("gen", cwd), [], "nested gitignore scopes to its dir");
+    assert.deepEqual(await searchFiles("app.ts", cwd), [{ path: "src/app.ts", isDir: false }]);
+    // Glob forms still prune: an anchored path and a single-segment wildcard.
+    writeFileSync(join(cwd, "src", "secrets.key"), "");
+    writeFileSync(join(cwd, ".gitignore"), "pods/\n*.key\n");
+    assert.deepEqual(await searchFiles("secrets", cwd), []);
+    // Tier-1 drill-down is NOT gitignore-filtered: naming a dir lists it, exactly.
+    assert.deepEqual((await searchFiles("pods/", cwd)).map((m) => m.path), ["pods/Stripe/"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("searchFiles bare @ browses the whole tree, shallow-first", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    mkdirSync(join(cwd, "src"));
+    writeFileSync(join(cwd, "a.ts"), "");
+    writeFileSync(join(cwd, "src", "deep.ts"), "");
+    const paths = (await searchFiles("", cwd)).map((m) => m.path);
+    assert.ok(paths.includes("src/deep.ts"), "a bare @ reaches subdirectory files");
+    assert.ok(paths.indexOf("a.ts") < paths.indexOf("src/deep.ts"), "root entries come before depth-2 ones");
+  } finally {
+    cleanup();
+  }
+});
+
 test("completeMention returns full-line completions for a trailing @token", async () => {
   const { cwd, cleanup } = scratch();
   try {

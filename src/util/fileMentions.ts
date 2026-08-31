@@ -167,14 +167,159 @@ export interface FileMatch {
 }
 
 // Directory entries we never surface as suggestions (noise / not project files).
+// Pruned from BOTH the single-level listing and the project-wide walk — .git and
+// node_modules are where a repo keeps its hundred thousand entries, and a walk that
+// descended into them would spend its whole budget before reaching real source.
 const IGNORE_DIRS = new Set([".git", "node_modules", ".DS_Store"]);
+
+// Bounds for the project-wide walk behind @-search. A source tree with vendor trees
+// pruned (see the .gitignore note below) is a few thousand entries; these caps exist
+// so a pathological tree can never turn one keystroke into a disk storm. Whichever
+// bound trips first ends the walk — the matches gathered up to that point are ranked
+// and returned, so the degrade is "fewer suggestions", never a hang.
+const WALK_MAX_ENTRIES = 20_000;
+const WALK_MAX_MS = 250;
+const WALK_MAX_POOL = 2_000;
+
+// ── .gitignore pruning for the walk ──────────────────────────────
+// IGNORE_DIRS alone can't keep the walk inside real source: a repo's heaviest trees
+// are often NOT named node_modules — ios/Pods here, android/build, dist, web-build,
+// .expo elsewhere. If the walk descended into those, a 20k-entry budget could die in
+// one vendor checkout before reaching the first source file (that exact starvation
+// is why `@en.json` found nothing while `@screens/…` worked). Every fuzzy finder
+// answers this the same way: honor .gitignore. So the walk reads one at EVERY level
+// (a nested .gitignore scopes its own subtree — that's what makes ios/.gitignore
+// prune Pods), bounded to the common grammar: comments, blank lines, `dir/`,
+// anchored `/path`, mid-slash paths, and `*`/`?`/`**` globs. Negations (`!…`) are
+// deliberately skipped — full git precedence order is not worth it here, and
+// over-ignoring only hides a suggestion (exact drill-down and resolution at submit
+// still reach anything).
+interface GitPattern { re: RegExp; dirOnly: boolean; anchored: boolean }
+interface GitScope { rel: string; pats: GitPattern[]; parent: GitScope | null }
+
+/** Common-grammar .gitignore glob → regex source. Doublestar spans levels at the
+ *  three git-defined positions (start of pattern, end, embedded between slashes);
+ *  star and question mark never cross a segment. */
+function globToRegex(pat: string): string {
+  let s = pat;
+  if (s.startsWith("**/")) s = "\u0000" + s.slice(3);
+  s = s.replace(/\/\*\*\//g, "/\u0000");
+  if (s.endsWith("/**")) s = s.slice(0, -2) + "\u0001";
+  s = s.replace(/\*\*/g, "*"); // any leftover ** behaves like *
+  s = s.split("").map((ch) => {
+    if (ch === "*") return "[^/]*";
+    if (ch === "?") return "[^/]";
+    if ("\\.+^${}()|[]".includes(ch)) return "\\" + ch;
+    return ch;
+  }).join("");
+  return s.replace(/\u0000/g, "(?:[^/]*/)*").replace(/\u0001/g, ".*");
+}
+
+function compileGitignore(text: string): GitPattern[] {
+  const out: GitPattern[] = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith("!")) continue;
+    let pat = line;
+    const dirOnly = pat.endsWith("/");
+    if (dirOnly) pat = pat.slice(0, -1);
+    let anchored = pat.startsWith("/");
+    if (anchored) pat = pat.slice(1);
+    if (!anchored && pat.includes("/")) anchored = true; // a mid-slash pattern is rooted, per git
+    if (!pat || pat === "*") continue; // "*" would empty the sweep; treat as noise
+    out.push({ re: new RegExp(`^${globToRegex(pat)}$`), dirOnly, anchored });
+  }
+  return out;
+}
+
+async function readGitignore(dirAbs: string): Promise<GitPattern[] | null> {
+  try {
+    return compileGitignore(await readFile(join(dirAbs, ".gitignore"), "utf-8"));
+  } catch {
+    return null; // none here — the common case
+  }
+}
+
+/** Is `rel` (cwd-relative) ruled out by any scope in the chain? Each scope's
+ *  patterns are tested against the path relative to ITS dir; a non-anchored
+ *  pattern matches the entry's own name at any depth. */
+function isIgnoredByGitignore(rel: string, isDir: boolean, scope: GitScope | null): boolean {
+  for (let s = scope; s; s = s.parent) {
+    const relToScope = s.rel ? rel.slice(s.rel.length + 1) : rel;
+    const base = relToScope.slice(relToScope.lastIndexOf("/") + 1);
+    for (const p of s.pats) {
+      if (p.dirOnly && !isDir) continue;
+      if (p.anchored ? p.re.test(relToScope) : p.re.test(base)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Depth-first walk of cwd's subtree, collecting every file and directory as a
+ * cwd-relative FileMatch (dirs carry a trailing "/"). IGNORE_DIRS is pruned,
+ * .gitignore rules prune vendor/build trees (see the block above), symlinks are
+ * listed but NEVER followed (loop + escape), and dotfiles are hidden unless
+ * `showHidden`. Bounded by the caps above — see the note on them.
+ */
+async function walkProject(cwd: string, showHidden: boolean): Promise<FileMatch[]> {
+  const pool: FileMatch[] = [];
+  const deadline = Date.now() + WALK_MAX_MS;
+  const rootPats = await readGitignore(cwd);
+  const rootScope: GitScope | null = rootPats ? { rel: "", pats: rootPats, parent: null } : null;
+  // An explicit stack rather than recursion: a deep tree can't overflow anything,
+  // and the budget checks have one natural place (the loop head). Each pending dir
+  // carries the gitignore scope chain in force beneath it, as an immutable
+  // parent-linked list — no push/pop bookkeeping to drift out of sync.
+  const pending: Array<{ abs: string; rel: string; scope: GitScope | null }> = [{ abs: cwd, rel: "", scope: rootScope }];
+  let visited = 0;
+  while (pending.length > 0) {
+    if (visited >= WALK_MAX_ENTRIES || pool.length >= WALK_MAX_POOL || Date.now() > deadline) break;
+    const dir = pending.pop()!;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(dir.abs, { withFileTypes: true });
+    } catch {
+      continue; // unreadable (permissions / vanished) — skip, like a listing would
+    }
+    // Sorted so the pool order — and therefore any rank tie — is deterministic.
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    // A .gitignore in THIS dir scopes everything below it.
+    const innerPats = await readGitignore(dir.abs);
+    const scope: GitScope | null = innerPats ? { rel: dir.rel, pats: innerPats, parent: dir.scope } : dir.scope;
+    for (const e of entries) {
+      if (visited >= WALK_MAX_ENTRIES || pool.length >= WALK_MAX_POOL) break;
+      visited++;
+      if (IGNORE_DIRS.has(e.name)) continue;
+      if (e.name.startsWith(".") && !showHidden) continue;
+      const isDir = e.isDirectory();
+      const rel = dir.rel ? `${dir.rel}/${e.name}` : e.name;
+      if (isIgnoredByGitignore(rel, isDir, scope)) continue;
+      pool.push({ path: isDir ? `${rel}/` : rel, isDir });
+      // Real subdirectories only — a symlink to a dir is surfaced as a dir pick
+      // (drill-down resolves it safely) but never walked.
+      if (isDir && !e.isSymbolicLink()) pending.push({ abs: join(dir.abs, e.name), rel, scope });
+    }
+  }
+  return pool;
+}
 
 /**
  * List up to `limit` files/dirs inside cwd whose path matches `query` — the text the
- * user typed after `@`. A query with a trailing "/" (or ending at a real dir) lists
- * that directory's contents; otherwise it prefix-matches the basename within the
- * query's parent dir. Case-insensitive. CWD-constrained: a query that escapes cwd
- * returns nothing.
+ * user typed after `@`. Two tiers:
+ *
+ *   1. Drill-down (exact): the query's own directory, its children filtered by the
+ *      basename prefix. `@src/` lists src/; `@src/ut` names src/utils/ first. A
+ *      trailing "/" means "I'm browsing HERE" and returns only this tier.
+ *   2. Project-wide (fuzzy): the rest of the subtree, at any depth, honoring
+ *      .gitignore so vendor/build trees never crowd out — or starve the budget
+ *      before — real source. A bare fragment (`@remo`) matches any file/dir NAME
+ *      containing it — wherever it lives — and a dir-qualified one (`@src/ut`)
+ *      matches whole paths carrying it. Skipped for a one-character fragment, where
+ *      a whole-tree sweep is all noise; the drill-down answer is the right one there.
+ *
+ * Case-insensitive. CWD-constrained: a query that escapes cwd returns nothing, and
+ * the walk never leaves the subtree — so no path outside the project can leak.
  */
 export async function searchFiles(query: string, cwd: string, limit = 50): Promise<FileMatch[]> {
   const q = query ?? "";
@@ -193,7 +338,7 @@ export async function searchFiles(query: string, cwd: string, limit = 50): Promi
   try {
     entries = await readdir(scanAbs, { withFileTypes: true });
   } catch {
-    return [];
+    entries = []; // the dir may not exist — tier 2 below can still search the tree
   }
   const pfx = prefix.toLowerCase();
   const matches: FileMatch[] = [];
@@ -208,6 +353,44 @@ export async function searchFiles(query: string, cwd: string, limit = 50): Promi
   }
   // Directories first, then alphabetical — the natural drill-down order.
   matches.sort((a, b) => (a.isDir === b.isDir ? a.path.localeCompare(b.path) : a.isDir ? -1 : 1));
+
+  // Tier 2 — the project-wide reach. Off when browsing a dir outright ("src/"), when
+  // tier 1 already filled the page, and for a 1-char bare fragment (all noise). A
+  // dir-qualified fragment is exempt from the length gate: its match is a whole-path
+  // substring, which is already precise at any length ("src/a" hits src/app.ts).
+  const dirQualified = dirPart !== ".";
+  if (!endsWithSlash && matches.length < limit && (prefix.length === 0 || prefix.length >= 2 || dirQualified)) {
+    const pool = await walkProject(cwd, prefix.startsWith("."));
+    const ql = q.toLowerCase();
+    const seen = new Set(matches.map((m) => m.path));
+    const scored: Array<{ m: FileMatch; starts: boolean; depth: number }> = [];
+    for (const m of pool) {
+      if (seen.has(m.path)) continue;
+      seen.add(m.path);
+      const bare = m.path.endsWith("/") ? m.path.slice(0, -1) : m.path;
+      const name = basename(bare).toLowerCase();
+      if (prefix) {
+        // A dir-qualified query matches against the whole path ("src/ut" hits
+        // src/util/cache.ts, and also another package's src/…); a bare fragment
+        // matches the entry's own name, wherever it sits in the tree.
+        const hit = dirQualified ? m.path.toLowerCase().includes(ql) : name.includes(pfx);
+        if (!hit) continue;
+      }
+      scored.push({ m, starts: prefix ? name.startsWith(pfx) : false, depth: bare.split("/").length });
+    }
+    // Relevance: a name that STARTS with the fragment outranks one that merely
+    // carries it, then shallower over deeper, then alphabetical. Bare `@` (no
+    // fragment) sorts purely shallow-first — a browsable, explorer-style listing.
+    scored.sort((a, b) =>
+      a.starts !== b.starts ? (a.starts ? -1 : 1)
+      : a.depth !== b.depth ? a.depth - b.depth
+      : a.m.path.localeCompare(b.m.path),
+    );
+    for (const s of scored) {
+      if (matches.length >= limit) break;
+      matches.push(s.m);
+    }
+  }
   return matches;
 }
 

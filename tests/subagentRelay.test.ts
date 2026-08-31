@@ -68,6 +68,13 @@ test("relayAskToApp maps select/input to their bridge calls", async () => {
 });
 
 test("makeChildGateAsk forwards to the parent and maps allow", async () => {
+  // Clear any inherited channel FIRST: when this suite runs from inside a live
+  // privateer session (agent-spawned shell, routine, …), SUBAGENT_CHANNEL_ENV points
+  // at that session's live relay dir. startParentApprovalRelay deliberately honors an
+  // inherited dir (nested-session safety), so without this the test's relay attaches
+  // to the host's channel, the host's watcher races ours and answers the child's
+  // request fail-closed (deny) — an "env-dependent flake", not a timing one.
+  delete process.env[SUBAGENT_CHANNEL_ENV];
   const dir = freshDir();
   const b = fakeBridge();
   const relay = startParentApprovalRelay(b);
@@ -86,6 +93,7 @@ test("makeChildGateAsk forwards to the parent and maps allow", async () => {
 });
 
 test("makeChildGateAsk denies when the parent denies", async () => {
+  delete process.env[SUBAGENT_CHANNEL_ENV]; // isolate from a host session's live relay (see above)
   const b = fakeBridge({ remoteAsk: async () => "deny" });
   const relay = startParentApprovalRelay(b);
   try {
@@ -102,6 +110,7 @@ test("makeChildGateAsk denies when the parent denies", async () => {
 test("child gate ask never returns 'always'", async () => {
   // Even if a (buggy) parent answered allow, the child maps only to allow/deny — it
   // must never mutate the human's allowlist/mode.
+  delete process.env[SUBAGENT_CHANNEL_ENV]; // isolate from a host session's live relay (see above)
   const b = fakeBridge();
   const relay = startParentApprovalRelay(b);
   try {
@@ -116,6 +125,7 @@ test("child gate ask never returns 'always'", async () => {
 });
 
 test("an undriven bridge fails closed (deny) even with a watcher", async () => {
+  delete process.env[SUBAGENT_CHANNEL_ENV]; // isolate from a host session's live relay (see above)
   const b = fakeBridge({ isConnected: () => false, remoteAsk: async () => "deny" });
   const relay = startParentApprovalRelay(b);
   try {
