@@ -1,6 +1,6 @@
 {
   "name": "privateer-agent",
-  "version": "0.12.27",
+  "version": "0.12.28",
   "description": "Privacy-first terminal coding agent — bring your own model across 20 providers (Anthropic, OpenAI, OpenRouter, Google, local Ollama…). Safe-by-default permissions, MCP, sub-agents, workflows, and verifiable TEE inference. Built on the Pi toolkit.",
   "type": "module",
   "license": "MIT",
@@ -69,9 +69,9 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.84.1",
-    "@earendil-works/pi-coding-agent": "0.84.1",
-    "@earendil-works/pi-tui": "0.84.1",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
     "@juicesharp/rpiv-ask-user-question": "2.2.0",
     "@juicesharp/rpiv-web-tools": "1.20.0",
     "@noble/ciphers": "2.2.0",
@@ -80,6 +80,7 @@
     "@phala/dcap-qvl": "0.5.2",
     "@zed-industries/agent-client-protocol": "0.4.5",
     "patch-package": "8.0.1",
+    "pi-background-tasks": "2.4.2",
     "pi-mcp-adapter": "2.11.0",
     "pi-privacy": "0.13.0",
     "pi-subagents": "0.34.0",

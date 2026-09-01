@@ -1,28 +1,31 @@
 {
   "$comment": "The one list of extensions Privateer ships. Read by bin/privateer-launch.mjs (shim install, dependency-free, pre-patch) and src/config/moatManifest.ts (RESERVED + profile composition). JSON so both a plain .mjs and the TS side can read it without a build step. See moatManifest.ts for the field contract.",
-  "shims": [
-    { "name": "privateer-brand", "entry": "extensions/privateer-brand.ts", "note": "banner, ⚓ badge, /signin /signout" },
-    { "name": "privateer-context", "entry": "extensions/privateer-context.ts", "note": "PRIVATEER.md context + /init" },
-    { "name": "privateer-gate", "entry": "extensions/privateer-gate.ts", "note": "the permission gate (moat)" },
-    { "name": "privateer-account", "entry": "extensions/privateer-account.ts", "note": "account inference provider" },
-    { "name": "privateer-models", "entry": "extensions/privateer-models.ts", "note": "/models picker w/ privacy shields" },
-    { "name": "privateer-posture", "entry": "extensions/privateer-posture.ts", "note": "live attestation shield" },
-    { "name": "privateer-tools", "entry": "extensions/privateer-tools.ts", "note": "Privateer tool pack" },
-    { "name": "privateer-privacy", "entry": "extensions/privateer-privacy.ts", "note": "pi-privacy + account tier resolver" },
-    { "name": "privateer-connect", "entry": "extensions/privateer-connect.ts", "note": "/connect — MCP connector manager" },
-    { "name": "privateer-media", "entry": "extensions/privateer-media.ts", "note": "image/video/speech/music + ffmpeg compose" },
-    { "name": "privateer-desktop", "entry": "extensions/privateer-desktop.ts", "note": "/desktop — open the Privateer desktop app" },
-    { "name": "privateer-hints", "entry": "extensions/privateer-hints.ts", "note": "rotating tips in the working line + /hints" },
-    { "name": "privateer-update", "entry": "extensions/privateer-update.ts", "note": "tool pack updates in place — banner flag + /update" },
-    { "name": "privateer-speak", "entry": "extensions/privateer-speak.ts", "note": "spoken responses (/speak) + voice input (/talk) — pi-speak + confidential account TTS/STT" },
-    { "name": "privateer-web", "entry": "extensions/privateer-web.ts", "note": "web_search/web_fetch — account search when signed in, else the user's own provider (rpiv-web-tools)" },
-    { "name": "rpiv-ask-user-question", "dep": ["@juicesharp/rpiv-ask-user-question", "index.ts"], "note": "ask_user_question" },
-    { "name": "pi-mcp-adapter", "dep": ["pi-mcp-adapter", "index.ts"], "note": "MCP servers as first-class tools" },
-    { "name": "pi-subagents", "dep": ["pi-subagents", "src", "extension", "index.ts"], "note": "bounded parallel sub-agents" }
-  ],
-  "retired": ["pi-privacy", "pi-web-access", "pi-hypa", "rpiv-web-tools"],
   "reservedAliases": [
     "@juicesharp/rpiv-web-tools",
-    "@juicesharp/rpiv-ask-user-question"
+    "@juicesharp/rpiv-ask-user-question",
+    "background-tasks"
+  ],
+  "retired": ["pi-privacy", "pi-web-access", "pi-hypa", "rpiv-web-tools"],
+  "shims": [
+    { "entry": "extensions/privateer-brand.ts", "name": "privateer-brand", "note": "banner, ⚓ badge, /signin /signout" },
+    { "entry": "extensions/privateer-context.ts", "name": "privateer-context", "note": "PRIVATEER.md context + /init" },
+    { "entry": "extensions/privateer-gate.ts", "name": "privateer-gate", "note": "the permission gate (moat)" },
+    { "entry": "extensions/privateer-account.ts", "name": "privateer-account", "note": "account inference provider" },
+    { "entry": "extensions/privateer-models.ts", "name": "privateer-models", "note": "/models picker w/ privacy shields" },
+    { "entry": "extensions/privateer-posture.ts", "name": "privateer-posture", "note": "live attestation shield" },
+    { "entry": "extensions/privateer-tools.ts", "name": "privateer-tools", "note": "Privateer tool pack" },
+    { "entry": "extensions/privateer-privacy.ts", "name": "privateer-privacy", "note": "pi-privacy + account tier resolver" },
+    { "entry": "extensions/privateer-connect.ts", "name": "privateer-connect", "note": "/connect — MCP connector manager" },
+    { "entry": "extensions/privateer-media.ts", "name": "privateer-media", "note": "image/video/speech/music + ffmpeg compose" },
+    { "entry": "extensions/privateer-desktop.ts", "name": "privateer-desktop", "note": "/desktop — open the Privateer desktop app" },
+    { "entry": "extensions/privateer-hints.ts", "name": "privateer-hints", "note": "rotating tips in the working line + /hints" },
+    { "entry": "extensions/privateer-update.ts", "name": "privateer-update", "note": "tool pack updates in place — banner flag + /update" },
+    { "entry": "extensions/privateer-speak.ts", "name": "privateer-speak", "note": "spoken responses (/speak) + voice input (/talk) — pi-speak + confidential account TTS/STT" },
+    { "entry": "extensions/privateer-web.ts", "name": "privateer-web", "note": "web_search/web_fetch — account search when signed in, else the user's own provider (rpiv-web-tools)" },
+    { "dep": ["@juicesharp/rpiv-ask-user-question", "index.ts"], "name": "rpiv-ask-user-question", "note": "ask_user_question" },
+    { "dep": ["pi-mcp-adapter", "index.ts"], "name": "pi-mcp-adapter", "note": "MCP servers as first-class tools" },
+    { "dep": ["pi-subagents", "src", "extension", "index.ts"], "name": "pi-subagents", "note": "bounded parallel sub-agents" },
+    { "dep": ["pi-background-tasks", "extensions", "anthropic-attribution.ts"], "name": "anthropic-attribution", "note": "Anthropic OAuth attribution and prompt sanitization" },
+    { "dep": ["pi-background-tasks", "extensions", "background-tasks.ts"], "name": "pi-background-tasks", "note": "durable background tasks, delegated agents, and fusion" }
   ]
 }

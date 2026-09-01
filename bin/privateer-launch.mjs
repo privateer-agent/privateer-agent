@@ -64,6 +64,38 @@ function sweepLegacyShims() {
   }
 }
 
+// Pi's shell tools spill oversized command output to `$TMPDIR/pi-{bash,powershell,
+// output}-<hex>.log` and hand the model the path — a good design, with no other half:
+// NOTHING in Pi ever deletes them. Two `grep -rn` calls that wandered into node_modules
+// left 630MB of minified JS in one developer's tmpdir, inside a 640MB/22-file pile that
+// had been accumulating for weeks. macOS clears /var/folders only on its own schedule
+// and Linux distros vary, so on a long-lived machine this is simply a leak.
+//
+// A day is the useful window: the path is only ever quoted into a live session, so a log
+// outlives its usefulness the moment that session ends. Silent and best-effort — the acp
+// branch's stdout is a JSON-RPC stream, and a tmpdir we can't read is not a launch
+// problem. Name-matched before stat so the common case is one readdir.
+const BASH_LOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const BASH_LOG_RE = /^pi-(?:bash|powershell|output)-[0-9a-f]{16}\.log$/;
+
+function sweepBashLogs() {
+  try {
+    const dir = os.tmpdir();
+    const cutoff = Date.now() - BASH_LOG_MAX_AGE_MS;
+    for (const name of fs.readdirSync(dir)) {
+      if (!BASH_LOG_RE.test(name)) continue;
+      const file = path.join(dir, name);
+      try {
+        if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true });
+      } catch {
+        /* raced with another session, or not ours to delete — either way, skip it. */
+      }
+    }
+  } catch {
+    /* unreadable tmpdir; the logs stay. */
+  }
+}
+
 // --- bundle detection ------------------------------------------------------
 // A self-contained bundle ships its own pinned Node at "$REPO/node[.exe]" plus a
 // BUNDLE_INFO.json marker (built by scripts/build-bundle.mjs). When present we use
@@ -279,6 +311,7 @@ if (sub === "update") {
 // `daemon` is a hidden back-compat alias for the pre-rename command name.
 else if (sub === "harbor" || sub === "daemon") {
   sweepLegacyShims(); // a harbor-only machine upgrades too — see the function's note
+  sweepBashLogs();
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
   // A resident background process, stopped by launchd/systemd/scripts with a plain
   // `kill` — which reaches only this launcher. See runToCompletion.
@@ -304,6 +337,7 @@ else if (sub === "verify") {
 // stray stdout line breaks the JSON-RPC stream and the host disconnects.
 else if (sub === "acp") {
   sweepLegacyShims(); // silent: only ever removes files
+  sweepBashLogs(); // silent too
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
   // Long-lived and driven over stdio by an editor, which stops it by terminating
   // the process rather than by a keystroke. Same leak, same fix.
@@ -329,6 +363,7 @@ else {
   // to drop one, and clear out any shim an older release left behind.
   fs.mkdirSync(EXT_DIR, { recursive: true });
   sweepLegacyShims();
+  sweepBashLogs();
 
   // Resolve every moat entry point to an absolute path, to be passed to Pi as `-e`.
   // Dependencies resolve by walking the node_modules chain, NOT as REPO/node_modules: npm
