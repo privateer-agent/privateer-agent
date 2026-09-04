@@ -93,6 +93,15 @@ export function discoverContextFiles(cwd: string = process.cwd()): ContextFile[]
 // A unique sentinel opening the injected block, so before_agent_start can no-op if the
 // block is already present in the chained system prompt (defensive against re-entrancy).
 export const CONTEXT_BLOCK_MARKER = "<!-- privateer:PRIVATEER.md -->";
+export const RUNTIME_GUIDELINES_MARKER = "<!-- privateer:runtime-guidelines -->";
+
+export function runtimeGuidelinesBlock(): string {
+  return `\n\n${RUNTIME_GUIDELINES_MARKER}\n<environment_guidelines>
+- Node.js environment: Node.js (v22+) is guaranteed to be available in Privateer. Prefer \`node -e "..."\` or small Node.js scripts for quick scripting, calculations, or JSON processing instead of assuming \`python\` or \`python3\` is installed.
+- Search fallback: If \`rg\` (ripgrep) is missing or returns "command not found", fall back to standard POSIX \`grep -rn <pattern> <path>\` or \`find <path>\`.
+- Missing system dependencies: If an essential external tool (e.g. \`git\`, \`python\`, \`rg\`) is missing and needed, check its presence (\`command -v <tool>\`), explain clearly what is missing, and offer to install it using the host package manager (e.g. \`brew install\`, \`xcode-select --install\`, \`winget install\`, \`apt install\`) upon user approval.
+</environment_guidelines>\n`;
+}
 
 // Format the discovered files into a system-prompt fragment using the same framing Pi
 // applies to AGENTS.md (see core/system-prompt.js), so the model can't tell the two

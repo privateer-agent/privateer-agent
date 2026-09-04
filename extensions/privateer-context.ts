@@ -13,7 +13,14 @@
 // advertises /init. After /init we emit the shared context-changed signal so that line
 // refreshes at once. See src/context.ts for the discovery/formatting details.
 
-import { contextBlock, writeTemplate, emitContextChanged, CONTEXT_BLOCK_MARKER } from "../src/context.ts";
+import {
+  contextBlock,
+  writeTemplate,
+  emitContextChanged,
+  CONTEXT_BLOCK_MARKER,
+  RUNTIME_GUIDELINES_MARKER,
+  runtimeGuidelinesBlock,
+} from "../src/context.ts";
 
 // Honor Pi's own "disable context files" switch, so --no-context-files / -nc silences
 // PRIVATEER.md too (not just AGENTS.md/CLAUDE.md) — otherwise the flag would half-work.
@@ -25,13 +32,16 @@ export default function privateerContext(pi: any): void {
   // and chained across before_agent_start handlers, so appending here is idempotent for
   // the turn; the marker guard makes it a no-op if an earlier handler already added it.
   pi.on("before_agent_start", (event: any) => {
-    if (CONTEXT_FILES_DISABLED) return;
-    const cwd = event?.systemPromptOptions?.cwd ?? process.cwd();
-    const base: string = event?.systemPrompt ?? "";
-    if (base.includes(CONTEXT_BLOCK_MARKER)) return; // already injected this chain
-    const block = contextBlock(cwd);
-    if (!block) return; // no PRIVATEER.md anywhere — leave the prompt untouched
-    return { systemPrompt: base + block };
+    let prompt: string = event?.systemPrompt ?? "";
+    if (!prompt.includes(RUNTIME_GUIDELINES_MARKER)) {
+      prompt += runtimeGuidelinesBlock();
+    }
+    if (!CONTEXT_FILES_DISABLED && !prompt.includes(CONTEXT_BLOCK_MARKER)) {
+      const cwd = event?.systemPromptOptions?.cwd ?? process.cwd();
+      const block = contextBlock(cwd);
+      if (block) prompt += block;
+    }
+    return { systemPrompt: prompt };
   });
 
   // /init — scaffold a PRIVATEER.md in the working directory. Never clobbers an existing
