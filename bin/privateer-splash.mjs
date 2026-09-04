@@ -38,6 +38,8 @@
 //
 // The wave is drawn on STDERR; stdout belongs to the TUI's canvas.
 
+import { spawnSync } from "node:child_process";
+import path from "node:path";
 import { Worker } from "node:worker_threads";
 
 const enabled =
@@ -45,6 +47,20 @@ const enabled =
   process.stderr.isTTY &&
   !process.env.PRIVATEER_NO_SPLASH &&
   !process.env.CI;
+
+// On Windows, ensure the console output code page is UTF-8 (65001) before the worker
+// thread starts drawing. If privateer was launched via npm/npx or direct node rather
+// than privateer.cmd, the console might still be on OEM CP437.
+if (enabled && process.platform === "win32") {
+  try {
+    const chcp = process.env.SystemRoot
+      ? path.join(process.env.SystemRoot, "System32", "chcp.com")
+      : "chcp.com";
+    spawnSync(chcp, ["65001"], { stdio: "ignore", windowsHide: true });
+  } catch {
+    /* best effort */
+  }
+}
 
 // Bytes of stdout after TUI.start() that mean "this is the first frame, not a control
 // sequence". Everything Pi writes between raw mode and the frame is short (the paste
@@ -72,7 +88,8 @@ if (enabled) {
 
   // Room for "  ⚓ " + wave + message + elapsed, clamped so a narrow terminal doesn't
   // wrap (a wrapped line survives our `\r\x1b[K` erase only on its last row).
-  const width = Math.max(12, Math.min(28, (err.columns || 80) - 34));
+  const cols = err.columns && err.columns > 0 ? err.columns : 80;
+  const width = Math.max(6, Math.min(28, cols - 34));
 
   // The worker source is plain logic with no escape sequences of its own — every ANSI
   // string is handed over in workerData, so nothing here has to survive two rounds of

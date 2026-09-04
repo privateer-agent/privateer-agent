@@ -11,6 +11,7 @@
 // to "deny".
 
 import { randomUUID } from "node:crypto";
+import { noQuarterActive, setNoQuarter } from "../permissions/noQuarter.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/modeGate.ts";
@@ -169,7 +170,7 @@ export interface RemoteBridgeConfig {
 export class RemoteBridge {
   private relay?: RelayLike;
   private remote = false;
-  private noQuarter = false;
+  private noQuarter = noQuarterActive();
   private readonly pending = new Map<string, (d: AskOutcome) => void>();
   private readonly pendingSelects = new Map<string, (v: string | null) => void>();
   private readonly pendingInputs = new Map<string, (v: string | null) => void>();
@@ -282,9 +283,15 @@ export class RemoteBridge {
     onFilesSearch: (id, query) => this.cfg.onFilesSearch?.(id, query),
     onNoQuarter: (on) => {
       this.noQuarter = on;
+      setNoQuarter(on);
       this.relay?.sendNoQuarter(on); // echo the ack back so the app's toggle syncs
     },
-    onControllerAttached: () => this.cfg.onControllerAttached?.(),
+    onControllerAttached: () => {
+      if (this.noQuarter || noQuarterActive()) {
+        this.relay?.sendNoQuarter(true);
+      }
+      this.cfg.onControllerAttached?.();
+    },
     // The app left while we're still running. Same posture as a dropped socket: stop
     // treating the turn as remote (the gate must not wait on a controller that isn't
     // there) and fail every pending approval closed. The turn itself keeps going —
@@ -310,7 +317,7 @@ export class RemoteBridge {
   // ── gate hooks (passed into the GateController) ─────────────────────────────
 
   getRemote = (): boolean => this.remote;
-  getNoQuarter = (): boolean => this.noQuarter;
+  getNoQuarter = (): boolean => this.noQuarter || noQuarterActive();
 
   // The gate's remote approver: relay the request to the app and await its
   // allow/deny. Fail closed if no controller, on abort, or on disconnect. (The gate

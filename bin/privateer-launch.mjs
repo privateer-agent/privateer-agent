@@ -35,6 +35,21 @@ const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
 const REPO = path.resolve(HERE, "..");
 const isWin = process.platform === "win32";
 
+// On Windows, ensure the console output code page is UTF-8 (65001).
+// Without this, raw UTF-8 writes to stdout/stderr (such as fs.writeSync(2, ...) in the
+// boot splash worker) are decoded through the OEM code page (CP437/850), turning
+// Unicode wave blocks and emojis into 3-byte mojibake that wraps and floods the console.
+if (isWin) {
+  try {
+    const chcp = process.env.SystemRoot
+      ? path.join(process.env.SystemRoot, "System32", "chcp.com")
+      : "chcp.com";
+    spawnSync(chcp, ["65001"], { stdio: "ignore", windowsHide: true });
+  } catch {
+    /* best effort */
+  }
+}
+
 const PRIVATEER_HOME = process.env.PRIVATEER_HOME || path.join(os.homedir(), ".privateer");
 const ENV_FILE = path.join(REPO, ".env"); // dev-only; a real install has none
 const AGENT_DIR = path.join(PRIVATEER_HOME, "agent");

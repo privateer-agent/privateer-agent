@@ -64,3 +64,26 @@ test("splash: no terminal, no output", () => {
   );
   assert.equal(out, "hello");
 });
+
+test("splash: Windows consoles are switched to UTF-8 code page 65001", () => {
+  // On Windows / PowerShell, raw fd 2 writes (fs.writeSync(2, ...)) use the console's
+  // active Output Code Page. If left on OEM CP437, Unicode wave blocks and emojis turn
+  // into 3-byte mojibake sequences that wrap across lines and flood the terminal.
+  const cmdSrc = readFileSync(join(BIN, "privateer.cmd"), "utf8");
+  assert.match(cmdSrc, /chcp\s+65001/, "privateer.cmd must switch console to UTF-8");
+
+  const launchSrc = readFileSync(join(BIN, "privateer-launch.mjs"), "utf8");
+  assert.match(
+    launchSrc,
+    /chcp.*\[["']65001["']\]/,
+    "privateer-launch.mjs must set console code page 65001 on Windows",
+  );
+
+  const splashSrc = readFileSync(SPLASH, "utf8");
+  assert.match(
+    splashSrc,
+    /chcp.*\[["']65001["']\]/,
+    "privateer-splash.mjs must set console code page 65001 on Windows",
+  );
+});
+

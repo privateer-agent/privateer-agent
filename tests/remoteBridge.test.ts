@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RemoteBridge, type RelayLike } from "../src/remote/remoteBridge.ts";
 import { decideToolCall, type GateController } from "../src/ext/permissionGate.ts";
+import { noQuarterActive, setNoQuarter } from "../src/permissions/noQuarter.ts";
 import type { PermissionRequest } from "../src/permissions/gate.ts";
 import type { EngineEvent } from "../src/engine/events.ts";
 
@@ -89,12 +90,18 @@ test("forwardEvent sends up through the relay", () => {
 });
 
 test("no_quarter toggles state and echoes the ack", () => {
+  setNoQuarter(false);
   const bridge = new RemoteBridge({ onPrompt: () => {} });
   const relay = makeFakeRelay();
   bridge.attachRelay(relay);
   bridge.callbacks.onNoQuarter(true);
   assert.equal(bridge.getNoQuarter(), true);
+  assert.equal(noQuarterActive(), true);
   assert.deepEqual(relay.noQuarter, [true]);
+  bridge.callbacks.onNoQuarter(false);
+  assert.equal(bridge.getNoQuarter(), false);
+  assert.equal(noQuarterActive(), false);
+  assert.deepEqual(relay.noQuarter, [true, false]);
 });
 
 test("remoteAsk fails closed with no connected controller", async () => {
