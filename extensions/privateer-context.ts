@@ -23,24 +23,38 @@ import {
 } from "../src/context.ts";
 
 // Honor Pi's own "disable context files" switch, so --no-context-files / -nc silences
-// PRIVATEER.md too (not just AGENTS.md/CLAUDE.md) — otherwise the flag would half-work.
+// everything this extension injects, not just PRIVATEER.md — otherwise the flag would
+// half-work. A user who asks for a bare prompt gets a bare prompt.
 const CONTEXT_FILES_DISABLED =
   process.argv.includes("--no-context-files") || process.argv.includes("-nc");
 
 export default function privateerContext(pi: any): void {
-  // Inject PRIVATEER.md into every turn's system prompt. The prompt is rebuilt per turn
-  // and chained across before_agent_start handlers, so appending here is idempotent for
-  // the turn; the marker guard makes it a no-op if an earlier handler already added it.
+  // Inject the runtime guidelines + PRIVATEER.md into every turn's system prompt. The
+  // prompt is rebuilt per turn and chained across before_agent_start handlers, so
+  // appending here is idempotent for the turn; each marker guard makes its own block a
+  // no-op if an earlier handler already added it.
+  //
+  // ONLY EVER APPEND, AND ONLY RETURN WHEN WE ADDED SOMETHING. Pi chains these handlers
+  // and a returned `systemPrompt` REPLACES what the chain has built so far, so both
+  // halves matter:
+  //
+  //   • A host that doesn't populate `event.systemPrompt` must not be handed a prompt
+  //     synthesised from "" — that gives back our two blocks as the ENTIRE system prompt
+  //     and silently drops the real one. `typeof base !== "string"` is what separates
+  //     "here is a prompt to chain onto" (possibly empty, legitimate) from "no field".
+  //   • When both markers are already present (a re-entrant chain) we have nothing to
+  //     contribute, and undefined leaves what is there alone.
   pi.on("before_agent_start", (event: any) => {
-    let prompt: string = event?.systemPrompt ?? "";
-    if (!prompt.includes(RUNTIME_GUIDELINES_MARKER)) {
-      prompt += runtimeGuidelinesBlock();
-    }
-    if (!CONTEXT_FILES_DISABLED && !prompt.includes(CONTEXT_BLOCK_MARKER)) {
+    if (CONTEXT_FILES_DISABLED) return;
+    const base = event?.systemPrompt;
+    if (typeof base !== "string") return;
+    let prompt = base;
+    if (!prompt.includes(RUNTIME_GUIDELINES_MARKER)) prompt += runtimeGuidelinesBlock();
+    if (!prompt.includes(CONTEXT_BLOCK_MARKER)) {
       const cwd = event?.systemPromptOptions?.cwd ?? process.cwd();
-      const block = contextBlock(cwd);
-      if (block) prompt += block;
+      prompt += contextBlock(cwd); // "" when there is no PRIVATEER.md anywhere
     }
+    if (prompt === base) return; // nothing to add — leave the chain alone
     return { systemPrompt: prompt };
   });
 
