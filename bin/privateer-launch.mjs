@@ -165,6 +165,35 @@ if (NO_QUARTER) {
   );
 }
 
+// `--allow-computer-control` — arm GUI control (screenshots, mouse, keyboard) for this
+// session. Stripped before Pi's cli.js sees it, exactly like --no-quarter above.
+//
+// A FLAG AND NOT A SETTING, deliberately. Screen control is the one capability that
+// reaches outside every other limit the gate enforces — a mouse can open a terminal and
+// type what the denylist would have caught — so it is armed per session, by the person
+// starting it, rather than left on in a config file from a week ago. Arming is not
+// approving: every action still prompts (permissions/mode.ts), and the tools do not
+// exist at all without this (config/computerControl.ts).
+const ALLOW_COMPUTER = args.some((a) => a === "--allow-computer-control");
+if (ALLOW_COMPUTER) {
+  for (let i = args.length - 1; i >= 0; i--) if (args[i] === "--allow-computer-control") args.splice(i, 1);
+  process.env.PRIVATEER_COMPUTER_CONTROL = "1";
+  process.stderr.write(
+    [
+      "",
+      "  ⚓ \x1b[1;33mScreen control armed\x1b[0m — this session may see your screen and move your mouse.",
+      "     Every action still asks first. It can reach anything you can: other apps, other windows,",
+      "     a browser you are signed into. Your OS will also ask for screen and accessibility permission.",
+      NO_QUARTER
+        ? "     \x1b[1;31mNo quarter is ALSO on — screen actions will run with NO prompt.\x1b[0m"
+        : "",
+      "",
+    ]
+      .filter(Boolean)
+      .join("\n") + "\n",
+  );
+}
+
 const sub = args[0];
 
 // `privateer --version` — report OUR version, not Pi's. Left to Pi's cli.js it would

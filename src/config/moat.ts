@@ -140,6 +140,21 @@ interface MoatCaps {
   web: false | "account" | "guarded";
   media: boolean;
   mcp: boolean;
+  /**
+   * GUI control — screenshots, mouse and keyboard (src/tools/computer.ts). A CEILING
+   * like web and media, and ANDed with computerControlArmed(), which is OFF unless a
+   * human has said otherwise.
+   *
+   * FALSE FOR EVERY UNATTENDED KIND, and this is the row least safe to flip. The four
+   * headless kinds run with nobody watching, and permissions/mode.ts answers "ask" for
+   * every computer action — so a harbor routine granted these tools would not run
+   * unattended, it would WEDGE on a relayed prompt nobody is there to answer. That is
+   * the benign reading. The other one is that a scheduled run is the least supervised
+   * thing we ship and prompt injection reaches it through its own inputs, which is not
+   * a combination to give a mouse to. Attended kinds only: the desktop window and the
+   * dev REPL, both with a human at the keyboard who can see what moved.
+   */
+  computer: boolean;
   /** PRIVATEER.md project context + /init (extensions/privateer-context.ts). */
   context?: boolean;
   /** The folder's own skills, contributed from ~/.privateer rather than the user's tree. */
@@ -157,12 +172,12 @@ interface MoatCaps {
 }
 
 const CAPABILITIES: Record<MoatKind, MoatCaps> = {
-  "harbor-session": { web: "account", media: true, mcp: true },
-  "live-task": { web: false, media: true, mcp: false },
-  channels: { web: "account", media: true, mcp: false },
-  acp: { web: "account", media: true, mcp: false },
-  repl: { web: false, media: true, mcp: false },
-  desktop: { web: "guarded", media: true, mcp: true, context: true, spawnSkills: true, privacyRepairs: true },
+  "harbor-session": { web: "account", media: true, mcp: true, computer: false },
+  "live-task": { web: false, media: true, mcp: false, computer: false },
+  channels: { web: "account", media: true, mcp: false, computer: false },
+  acp: { web: "account", media: true, mcp: false, computer: false },
+  repl: { web: false, media: true, mcp: false, computer: true },
+  desktop: { web: "guarded", media: true, mcp: true, computer: true, context: true, spawnSkills: true, privacyRepairs: true },
 };
 
 /**
@@ -307,6 +322,31 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   }
   const { makeComposeTools } = await import("../tools/videoCompose.ts");
   factories.push(makeComposeTools());
+
+  // GUI control. TWO conditions, and they answer different questions: `caps.computer`
+  // is whether this KIND of session may ever have it, `computerControlArmed()` is
+  // whether this MACHINE's owner has turned it on. Omitted as a factory rather than
+  // registered-and-denied for the reason the web block above gives — a tool that
+  // refuses every call teaches the model to keep trying, where an absent one makes it
+  // say it cannot do that and move on. Read here, at build time, and the desktop
+  // rebuilds its session when the switch changes (agentSession's setModel path), so a
+  // user who arms it does not have to restart to be believed.
+  if (caps.computer) {
+    const { computerControlArmed } = await import("./computerControl.ts");
+    if (computerControlArmed()) {
+      const { makeComputerTools } = await import("../tools/computer.ts");
+      const { ComputerPreviewSink } = await import("../computer/preview.ts");
+      // ONE sink, created here and handed to both halves: the tools write each capture
+      // into it, and the gate reads a preview out when it asks about a click. This is
+      // the only place that pairing can be made, because it is the only place that
+      // holds both the gate and the tool factory — and it has to be per session (the
+      // desktop runs one per window in one process), which is exactly what this
+      // function already is. See computer/preview.ts for what module state would cost.
+      const preview = new ComputerPreviewSink();
+      opts.gate.computerPreview = preview;
+      factories.push(makeComputerTools(preview));
+    }
+  }
 
   if (caps.mcp) {
     // Registers the tools from the shared agent/mcp.json — the same projection the app's

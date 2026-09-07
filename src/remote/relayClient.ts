@@ -1561,11 +1561,44 @@ export class RelayClient {
     this.rawSend({ type: "chart_request", id, req });
   }
 
+  // A preview larger than this is dropped, not truncated — see requestApproval. 512 KB
+  // of base64 is an order of magnitude above a 480px screenshot and still small enough
+  // that a phone on a slow link gets the dialog promptly.
+  private static readonly MAX_PREVIEW_B64 = 512 * 1024;
+
+  private static capPreview(preview: NonNullable<PermissionRequest["preview"]>): PermissionRequest["preview"] {
+    const data = preview.image?.data;
+    if (data && data.length > RelayClient.MAX_PREVIEW_B64) {
+      // Keep the marker coordinates: without the picture they render nothing, but they
+      // cost bytes in the low hundreds and a future renderer may want them.
+      const { image, ...rest } = preview;
+      return rest;
+    }
+    return preview;
+  }
+
   requestApproval(id: string, req: PermissionRequest): void {
     this.rawSend({
       type: "approval_request",
       id,
-      req: { tool: req.tool, kind: req.kind, title: req.title, detail: safe(req.detail, 4000), outside: !!req.outside },
+      req: {
+        tool: req.tool,
+        kind: req.kind,
+        title: req.title,
+        detail: safe(req.detail, 4000),
+        outside: !!req.outside,
+        // The picture a GUI approval is actually about (permissions/gate.ts,
+        // ApprovalPreview). NOT run through safe(): it is a PNG of the user's own
+        // screen, and a secret redactor over base64 would either do nothing or corrupt
+        // it — the same reasoning cargo and chart payloads already carry.
+        //
+        // Capped, and dropped rather than truncated when it is over. A truncated base64
+        // string is a broken image, which reads as the feature failing; no image at all
+        // is the text-only prompt every other kind has always had. The cap is generous
+        // against a 480px preview (~40 KB) so it should never fire — it exists because
+        // this is the one approval field whose size a remote helper controls.
+        ...(req.preview ? { preview: RelayClient.capPreview(req.preview) } : {}),
+      },
     });
   }
 

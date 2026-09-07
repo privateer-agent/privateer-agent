@@ -372,6 +372,98 @@ export function classifyToolCall(
     };
   }
 
+  // GUI control (src/tools/computer.ts). Kind "computer", which ./mode.ts never
+  // auto-approves in any mode — see the note there on why a coordinate is the one
+  // input nothing here can judge.
+  //
+  // THE PROMPT IS THE ENTIRE SAFETY MECHANISM, so the detail line has to be something a
+  // human can decide about. "Run computer_control {\"action\":\"click\",\"x\":812,...}"
+  // — which is what the unknown-tool branch at the bottom would produce — is not a
+  // decision, it is a dialog people learn to click through. So each action says what it
+  // will do in words, and typing says WHAT it will type: approving a keystroke without
+  // seeing it is approving nothing. (The desktop draws the target on the last
+  // screenshot beside this text; the CLI has only this line, which is why it carries
+  // the coordinates too.)
+  if (name === "computer_capabilities") {
+    return {
+      tool: toolName,
+      kind: "read",
+      title: "Check what screen control is available",
+      detail: "display sizes and which OS permissions are granted — reads no pixels and moves nothing",
+    };
+  }
+  if (name === "screen_capture") {
+    const display = str(obj.display);
+    return {
+      tool: toolName,
+      kind: "computer",
+      title: "Take a screenshot",
+      detail:
+        `${display ? `display ${display}` : "the primary display"} — everything visible on it, ` +
+        "including any window, message or document in front, is sent to the model",
+    };
+  }
+  if (name === "computer_control") {
+    const action = str(obj.action);
+    const at = obj.x != null && obj.y != null ? ` at ${str(obj.x)},${str(obj.y)}` : "";
+    const where = str(obj.display) ? ` on display ${str(obj.display)}` : "";
+    switch (action) {
+      case "type":
+        return {
+          tool: toolName,
+          kind: "computer",
+          title: "Type on the keyboard",
+          // Verbatim and unclipped: a truncated string is one whose tail nobody approved.
+          detail: `types into whatever has focus: ${JSON.stringify(str(obj.text))}`,
+        };
+      case "key":
+        return {
+          tool: toolName,
+          kind: "computer",
+          title: "Press a key combination",
+          detail: `${str(obj.keys) || "(none)"} — sent to whatever has focus`,
+        };
+      case "wait":
+        return {
+          tool: toolName,
+          kind: "computer",
+          title: "Wait",
+          detail: `${str(obj.ms) || "0"}ms — touches nothing`,
+        };
+      case "drag":
+        return {
+          tool: toolName,
+          kind: "computer",
+          title: "Drag the mouse",
+          detail: `from ${str(obj.x)},${str(obj.y)} to ${str(obj.to_x)},${str(obj.to_y)}${where}`,
+        };
+      case "scroll":
+        return {
+          tool: toolName,
+          kind: "computer",
+          title: "Scroll",
+          detail: `${str(obj.scroll_y) || "0"} vertical, ${str(obj.scroll_x) || "0"} horizontal${at}${where}`,
+        };
+      case "move":
+        return { tool: toolName, kind: "computer", title: "Move the mouse", detail: `to${at || " an unspecified point"}${where}` };
+      case "right_click":
+        return { tool: toolName, kind: "computer", title: "Right-click the mouse", detail: `${at.trim() || "an unspecified point"}${where}` };
+      case "double_click":
+        return { tool: toolName, kind: "computer", title: "Double-click the mouse", detail: `${at.trim() || "an unspecified point"}${where}` };
+      case "click":
+        return { tool: toolName, kind: "computer", title: "Click the mouse", detail: `${at.trim() || "an unspecified point"}${where}` };
+      default:
+        // An unrecognised action still gates — fail safe rather than fall through to a
+        // branch that might judge it more leniently.
+        return {
+          tool: toolName,
+          kind: "computer",
+          title: "Control the screen",
+          detail: `unrecognised action "${action}"${at}${where}`,
+        };
+    }
+  }
+
   // Media generation (src/tools/media.ts) and local composition (videoCompose.ts).
   //
   // Left to the unknown-tool branch at the bottom these classify as bash-kind, which

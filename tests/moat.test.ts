@@ -328,3 +328,67 @@ test("moat: guarded web without a hint is a build error, not a default", async (
     "a guarded kind must be made to supply its own sign-in message",
   );
 });
+
+// ─── Screen control ──────────────────────────────────────────────────────────
+//
+// GUI control is the one capability that reaches outside every other limit the moat
+// enforces: a mouse can open a terminal and type what permissions/danger.ts would have
+// caught, or click Allow on another application's dialog, and classify.ts sees only
+// {x, y}. So the two gates on it are worth pinning directly rather than by reading the
+// CAPABILITIES table — a well-meaning edit that adds `computer: true` to a headless row
+// would be invisible in review and catastrophic in production.
+//
+// Arming is forced ON in these tests. That is the point: the assertion is not "it is off
+// here", it is "even armed, an unattended kind cannot have it".
+function withArmed<T>(fn: () => Promise<T>): Promise<T> {
+  const key = "PRIVATEER_COMPUTER_CONTROL";
+  const original = process.env[key];
+  process.env[key] = "1";
+  return fn().finally(() => {
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  });
+}
+
+const COMPUTER_TOOLS = ["computer_capabilities", "screen_capture", "computer_control"];
+
+test("moat: no unattended kind gets screen control, even on an armed machine", async () => {
+  await withArmed(async () => {
+    // The four kinds that run with nobody watching. A harbor routine holding these would
+    // not run unattended — every computer action asks (permissions/mode.ts), so it would
+    // wedge on a prompt no one is there to answer — and a scheduled run is the least
+    // supervised thing we ship, reached by prompt injection through its own inputs.
+    for (const kind of ["harbor-session", "live-task", "channels", "acp"] as MoatKind[]) {
+      const tools = toolsFrom(await buildMoat({ kind, gate: stubGate(REPO) }));
+      for (const name of COMPUTER_TOOLS) {
+        assert.ok(!tools.includes(name), `${kind} must never register ${name}`);
+      }
+    }
+  });
+});
+
+test("moat: an attended kind gets screen control only once the machine is armed", async () => {
+  const opts = { kind: "desktop" as MoatKind, gate: stubGate(REPO), webHint: "sign in" };
+
+  const key = "PRIVATEER_COMPUTER_CONTROL";
+  const original = process.env[key];
+  try {
+    // Unarmed: the tools do not EXIST, rather than existing and being denied. A tool that
+    // refuses every call teaches the model to keep retrying; an absent one makes it say
+    // what the user would have to do (config/computerControl.ts).
+    delete process.env[key];
+    const disarmed = toolsFrom(await buildMoat(opts));
+    for (const name of COMPUTER_TOOLS) {
+      assert.ok(!disarmed.includes(name), `an unarmed machine must not register ${name}`);
+    }
+
+    process.env[key] = "1";
+    const armed = toolsFrom(await buildMoat(opts));
+    for (const name of COMPUTER_TOOLS) {
+      assert.ok(armed.includes(name), `an armed desktop session should have ${name}`);
+    }
+  } finally {
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  }
+});

@@ -49,6 +49,7 @@
   "files": [
     "bin",
     "src",
+    "native",
     "extensions",
     "skills",
     "patches",

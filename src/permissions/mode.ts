@@ -35,6 +35,16 @@ export function decideAuto(
   // always confirm too — also above bypass, so "skip permissions" can't fire them
   // blind.
   if (req.alwaysAsk) return "ask";
+  // GUI control always confirms, above bypass and above the "auto" posture that
+  // re-decides as bypass (modeGate.ts). Every other kind is auto-approvable because
+  // something here can inspect it — a path against the scope, a command against the
+  // denylist. A click has neither: {x, y} says nothing about whether it lands on
+  // "Save" or on "Erase disk", and the thing it clicks may be another application's
+  // permission dialog. Approving it therefore has to mean a human looked at the
+  // screenshot, which means asking every time. The one lever above this is the
+  // session-wide no-quarter bypass in ModeGate.request, and config/computerControl.ts
+  // says out loud what arming plus no-quarter adds up to.
+  if (req.kind === "computer") return "ask";
   if (mode === "bypass") return "allow";
   // Access outside the working directory always confirms (the user has to explicitly
   // allow leaving cwd), even under acceptEdits or the allowlist.

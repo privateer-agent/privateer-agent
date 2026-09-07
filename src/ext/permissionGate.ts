@@ -75,6 +75,17 @@ export interface GateController {
   redact?(text: string): string;
   // Hard ceiling on waiting for a decision before failing closed.
   approvalTimeoutMs?: number;
+  /**
+   * This session's screen-control preview sink (computer/preview.ts), when the session
+   * has screen control at all. Set by buildMoat, which creates the one object the
+   * computer tools write frames into and this reads them out of.
+   *
+   * It exists because a GUI approval is the one prompt that cannot be evaluated from
+   * words — see ApprovalPreview in permissions/gate.ts. Absent ⇒ computer approvals
+   * carry no picture and fall back to the text-only prompt, which is what every non-GUI
+   * kind has always been.
+   */
+  computerPreview?: { previewFor(toolName: string, input: unknown): import("../permissions/gate.ts").ApprovalPreview | undefined };
 }
 
 export interface GateBlock {
@@ -126,6 +137,20 @@ export async function decideToolCall(
     allowedOutsideRoots: ctrl.allowedOutsideRoots,
   });
   if (!req) return undefined; // no gate needed — read-only/in-scope/meta
+
+  // Attach the picture a GUI action is actually about. Done HERE rather than in
+  // classifyToolCall because the classifier is pure over {toolName, input} and has no
+  // route to a screenshot — see computer/preview.ts. Guarded on the kind so nothing
+  // else ever carries an image, and wrapped because a preview is a nicety: failing to
+  // build one must never fail the approval it was meant to illustrate.
+  if (req.kind === "computer" && ctrl.computerPreview) {
+    try {
+      const preview = ctrl.computerPreview.previewFor(toolName, input);
+      if (preview) req.preview = preview;
+    } catch {
+      /* no picture; the text-only prompt still stands */
+    }
+  }
 
   // Route the ask: a remote-driven turn goes to the relay approver (if wired),
   // otherwise the local UI. ModeGate decides *whether* to ask; this decides *who*.
