@@ -65,6 +65,7 @@ import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
 import { serializeBuild } from "./buildLock.ts";
 import { isHosted, publishRelayPub, webEnabled, mediaEnabled } from "../config/hosted.ts";
+import { relayExposureAllowed } from "../config/relayExposure.ts";
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
 import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
 import { COMPOSE_TOOL_NAMES } from "../tools/videoCompose.ts";
@@ -360,6 +361,13 @@ export class Harbor {
     // `relay` delivery — so the "Privateer Local Harbor" terminal is always reachable
     // from the app for management (including creating the very first routine).
     if (!hasCredentials()) return;
+    // …unless this machine says remote access is off. Checked HERE, beside the
+    // credential, because both are conditions on being reachable rather than on
+    // being useful: a harbor refused a socket still fires every routine on its
+    // schedule and still delivers results to the account outbox. Only the app's
+    // live management view goes away. Re-read each tick (see relayExposure.ts), so
+    // a shell that re-spawns us with a different answer is obeyed on the next one.
+    if (!relayExposureAllowed()) return;
     this.relay = new RelayClient(
       {
         onPrompt: () => {},
@@ -1286,6 +1294,18 @@ export class Harbor {
       // permanent state: tick() re-runs syncRelay(), so a harbor that came up signed
       // out connects on its own once you sign in. Reported as "connecting" because
       // that is what it now is.
+      //
+      // The machine switch is reported BEFORE the credential, and that order is the
+      // honest one: a machine with remote access off is not waiting on a login, and
+      // telling someone to sign in to fix a setting sends them to the wrong screen.
+      if (!relayExposureAllowed()) {
+        return {
+          termId,
+          connected: false,
+          reason: "disabled",
+          detail: "remote access is off for this computer — turn it on in the Privateer app",
+        };
+      }
       const signedIn = hasCredentials();
       return {
         termId,
