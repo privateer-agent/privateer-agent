@@ -87,3 +87,59 @@ test("splash: Windows consoles are switched to UTF-8 code page 65001", () => {
   );
 });
 
+test("splash: our own control sequences are written synchronously to fd 2", () => {
+  // On Windows a write to a TTY stream is ASYNCHRONOUS — process.stderr.write only queues
+  // the bytes for the event loop — and this whole file exists because Pi's boot never
+  // gives the event loop a turn. Through the stream, every erase would land after the
+  // output it was meant to clear, and the cursor restore on `exit` would never flush at
+  // all: a console left with wave fragments in front of the first frame and no cursor.
+  const src = readFileSync(SPLASH, "utf8");
+  assert.match(src, /function writeCtl\(/, "the splash must write control bytes itself");
+  assert.match(
+    src,
+    /fs\.writeSync\(2, buf, off\)/,
+    "writeCtl must go straight to fd 2, the same descriptor the drawing thread uses",
+  );
+  // The erase, the cursor restore and the EIO bail-out are the three writes that must not
+  // be queued. errWrite survives only as the passthrough for Pi's own stderr.
+  for (const seq of [String.raw`\r\x1b[K`, String.raw`\x1b[?25h`]) {
+    assert.ok(
+      src.includes(`writeCtl("${seq}")`),
+      `${seq} must be written with writeCtl, not through process.stderr`,
+    );
+  }
+  assert.equal(
+    src.match(/errWrite\(/g)?.length,
+    1,
+    "errWrite is called in exactly one place: passing Pi's own stderr through",
+  );
+});
+
+test("splash: legacy Windows consoles get glyphs their font actually has", () => {
+  // chcp 65001 settles the encoding, not the font. A plain cmd.exe/PowerShell window
+  // defaults to Lucida Console or a raster font, which carries the CP437 block elements
+  // (█ ▄ ▀ ░ ▒ ▓) and nothing else — the eighth-block ramp, ⚓ and … are all missing
+  // there, so the wave drew as a row of tofu that changed shape every frame.
+  const src = readFileSync(SPLASH, "utf8");
+  const legacy = src.match(/const legacyConsole =([\s\S]*?);\n/)?.[1];
+  assert.ok(legacy, "expected a legacyConsole detection block");
+  assert.match(legacy, /win32/, "the fallback is Windows-only");
+  for (const modern of ["WT_SESSION", "TERM_PROGRAM", "ConEmuANSI", "ANSICON", "TERM"]) {
+    assert.match(legacy, new RegExp(modern), `${modern} announces a console with a real font`);
+  }
+
+  const ramps = src.match(/const BLOCKS = legacyConsole \? "([^"]*)" : "([^"]*)"/);
+  assert.ok(ramps, "expected both ramps on one line");
+  const [, fallback, blocks] = ramps;
+  const chars = (s: string) => [...s.replace(/\\u([0-9a-f]{4})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))];
+  assert.equal(chars(fallback).length, 8, "the fallback must keep all eight levels");
+  assert.equal(chars(blocks).length, 8);
+  // U+2581..U+2587 are the ones Lucida Console lacks; U+2588 (full block) it has.
+  for (const ch of chars(fallback)) {
+    const cp = ch.codePointAt(0)!;
+    assert.ok(
+      cp === 0x20 || cp === 0x2588 || (cp >= 0x2591 && cp <= 0x2593),
+      `U+${cp.toString(16)} is not in CP437 — a legacy console cannot draw it`,
+    );
+  }
+});

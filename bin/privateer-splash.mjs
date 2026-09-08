@@ -37,8 +37,19 @@
 // never lands in front of real output.
 //
 // The wave is drawn on STDERR; stdout belongs to the TUI's canvas.
+//
+// WHY EVERY WRITE OF OURS IS fs.writeSync. On Windows a write to a TTY stream is
+// ASYNCHRONOUS — process.stderr.write only queues the bytes for the event loop — and the
+// whole point of this file is that Pi's boot never gives the event loop a turn. Through
+// process.stderr, every erase we issue during the wait would land after the output it was
+// meant to clear, and the cursor restore on `exit` would never flush at all: a Windows
+// console left with wave fragments in front of Pi's first frame and no cursor afterwards.
+// fs.writeSync goes straight to fd 2, which is also what the drawing thread uses, so the
+// two threads' output stays in the order it was issued. Pi's OWN stderr still goes
+// through the stream — that write belongs to the caller, return value and all.
 
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 
@@ -61,6 +72,32 @@ if (enabled && process.platform === "win32") {
     /* best effort */
   }
 }
+
+// WHICH GLYPHS THE CONSOLE CAN ACTUALLY DRAW. Code page 65001 above settles the ENCODING;
+// it says nothing about the FONT. Legacy conhost — a plain cmd.exe or PowerShell window,
+// which is still what `privateer` gets when it isn't launched from Windows Terminal —
+// defaults to Lucida Console or a raster font, and those cover exactly the CP437 block
+// elements (█ ▄ ▀ ░ ▒ ▓) and nothing else. The eighth-block ramp, the anchor and the
+// ellipsis are all absent there, so the "wave" drew as a row of tofu boxes that changed
+// shape every frame. Every modern host announces itself in the environment (Windows
+// Terminal, VS Code, ConEmu/ANSICON, anything mintty-ish that sets TERM), and on those the
+// eighth blocks are the better picture, so the fallback is only for the ones that don't.
+const legacyConsole =
+  process.platform === "win32" &&
+  !(
+    process.env.WT_SESSION ||
+    process.env.WT_PROFILE_ID ||
+    process.env.TERM_PROGRAM ||
+    process.env.ConEmuANSI ||
+    process.env.ANSICON ||
+    process.env.TERM
+  );
+
+// Eight levels either way, so the wave keeps its shape: height where the font has the
+// eighth blocks, density where it only has the CP437 shades.
+const BLOCKS = legacyConsole ? " \u2591\u2591\u2592\u2592\u2593\u2593\u2588" : "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
+const ANCHOR = legacyConsole ? "~" : "\u2693";
+const ELLIPSIS = legacyConsole ? "..." : "\u2026";
 
 // Bytes of stdout after TUI.start() that mean "this is the first frame, not a control
 // sequence". Everything Pi writes between raw mode and the frame is short (the paste
@@ -86,10 +123,17 @@ if (enabled) {
   const sab = new SharedArrayBuffer(4 * Int32Array.BYTES_PER_ELEMENT);
   const state = new Int32Array(sab);
 
-  // Room for "  ⚓ " + wave + message + elapsed, clamped so a narrow terminal doesn't
-  // wrap (a wrapped line survives our `\r\x1b[K` erase only on its last row).
+  // Room for "  ⚓ " + wave + " " + message + ellipsis + elapsed, clamped so a narrow
+  // terminal doesn't wrap (a wrapped line survives our `\r\x1b[K` erase only on its last
+  // row). The reserve is measured rather than guessed, because the pieces are no longer
+  // fixed: the anchor is TWO cells wherever ⚓ keeps its emoji presentation, one where it
+  // fell back to ASCII, and the ellipsis is one cell or three.
+  const MSGS = ["hoisting sail", "raising the colours"];
+  const anchorCells = ANCHOR === "\u2693" ? 2 : 1; // U+2693 carries emoji presentation
+  const reserve =
+    2 + anchorCells + 1 + 1 + Math.max(...MSGS.map((m) => m.length)) + ELLIPSIS.length + 5;
   const cols = err.columns && err.columns > 0 ? err.columns : 80;
-  const width = Math.max(6, Math.min(28, cols - 34));
+  const width = Math.max(6, Math.min(28, cols - reserve));
 
   // The worker source is plain logic with no escape sequences of its own — every ANSI
   // string is handed over in workerData, so nothing here has to survive two rounds of
@@ -122,7 +166,7 @@ if (enabled) {
       const secs = Math.round((Date.now() - t0) / 1000);
       const msg = w.msgs[Atomics.load(s, PHASE)];
       const age = secs >= 3 ? w.dim + " " + secs + "s" + w.off : "";
-      fs.writeSync(2, w.cr + "  " + w.anchor + " " + wave(frame++ * 0.35) + " " + w.dim + msg + "…" + w.off + age + w.clearEol);
+      fs.writeSync(2, w.cr + "  " + w.anchor + " " + wave(frame++ * 0.35) + " " + w.dim + msg + w.ellipsis + w.off + age + w.clearEol);
     }
 
     // Atomics.wait doubles as the sleep: an exact 80ms tick that the main thread can cut
@@ -146,9 +190,10 @@ if (enabled) {
         sab,
         width,
         hold: HOLD_MS,
-        blocks: "▁▂▃▄▅▆▇█",
-        msgs: ["hoisting sail", "raising the colours"],
-        anchor: "\x1b[38;5;69m⚓\x1b[0m",
+        blocks: BLOCKS,
+        msgs: MSGS,
+        ellipsis: ELLIPSIS,
+        anchor: `\x1b[38;5;69m${ANCHOR}\x1b[0m`,
         crest: "\x1b[38;5;109m",
         trough: "\x1b[38;5;67m",
         dim: "\x1b[2m",
@@ -176,8 +221,23 @@ if (enabled) {
     if (!Atomics.load(state, ACK)) Atomics.wait(state, ACK, 0, 50);
   }
 
+  // Our own control sequences, written straight to fd 2 and synchronously — see the note
+  // at the top of the file for why process.stderr will not do. A short write or an EAGAIN
+  // from a non-blocking tty is retried; anything else is swallowed, because a splash is
+  // never worth a crash.
+  function writeCtl(s) {
+    const buf = Buffer.from(s, "utf8");
+    for (let off = 0, tries = 0; off < buf.length && tries < 100; tries++) {
+      try {
+        off += fs.writeSync(2, buf, off);
+      } catch (e) {
+        if (e?.code !== "EAGAIN") return;
+      }
+    }
+  }
+
   function clearLine() {
-    if (Atomics.load(state, DREW)) errWrite("\r\x1b[K");
+    if (Atomics.load(state, DREW)) writeCtl("\r\x1b[K");
   }
 
   function stop() {
@@ -187,7 +247,7 @@ if (enabled) {
     clearLine();
     // Only give the cursor back if Pi hasn't deliberately hidden it — the TUI hides it
     // for the whole session and would never get the chance to hide it again.
-    if (Atomics.load(state, DREW) && !appHidCursor) errWrite("\x1b[?25h");
+    if (Atomics.load(state, DREW) && !appHidCursor) writeCtl("\x1b[?25h");
     process.stdout.write = outWrite;
     err.write = errWrite;
     worker.terminate();
@@ -246,10 +306,12 @@ if (enabled) {
       } catch (e) {
         if (e?.code !== "EIO") throw e;
         stop();
-        errWrite(
+        // writeCtl, not errWrite: process.exit() below does not flush a stream write that
+        // Windows has merely queued, and this message is the only thing the user gets.
+        writeCtl(
           [
             "",
-            "  ⚓ Privateer couldn't take the helm — this terminal stopped accepting keyboard",
+            `  ${ANCHOR} Privateer couldn't take the helm — this terminal stopped accepting keyboard`,
             "     control while the agent was still loading (setRawMode EIO).",
             "",
             "     That usually means the window, tab or ssh session it started in went away.",
