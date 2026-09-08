@@ -92,7 +92,7 @@ export async function runAcp(): Promise<void> {
   const { modelRegistryOf, piAuthStore } = await import("../providers/piAuthStore.ts");
   const { hasCredentials, acquireAccountCredential, revokeAccountSession } = await import("../auth/privateer.ts");
   const { webEnabled, mediaEnabled } = await import("../config/hosted.ts");
-  const { resolveDefaultModel } = await import("../providers/defaultModel.ts");
+  const { resolveDefaultModel, writePiDefaultModel } = await import("../providers/defaultModel.ts");
   const { agentDir, configPath } = await import("../config/paths.ts");
   const { PrivateerAcpAgent, askOverAcp } = await import("./server.ts");
   type AcpSession = import("./server.ts").AcpSession;
@@ -333,6 +333,11 @@ export async function runAcp(): Promise<void> {
         await ensureAccountArmed(next.provider);
         await session.setModel(next);
         currentProvider = next.provider;
+        // The host's model dropdown (session/set_model) is the user choosing, so it
+        // becomes the default the next launch resolves — the desktop app and a fresh
+        // terminal are meant to agree on which model you're on. Pi won't write it for
+        // us: nothing here passes `persist`. See writePiDefaultModel.
+        writePiDefaultModel(`${next.provider}/${next.id}`);
       },
       async prompt(text, events, signal) {
         holder.events = events;

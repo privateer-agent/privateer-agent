@@ -615,6 +615,13 @@ export default function privateerBrand(pi: any): void {
         ctx?.ui?.notify?.(`Signed in. Run /models to pick a model — ${spec} isn't loaded yet.`, "warning");
         return;
       }
+      // Not persisted, on purpose. Every DELIBERATE switch now writes itself into Pi's
+      // settings.json (see writePiDefaultModel in providers/defaultModel.ts), but this
+      // one is ours, not the user's — we move them onto the confidential model because
+      // they signed in. Writing it would pin a BYO-keyed user to `privateer/…` for
+      // good, and hand them a model with no credential the day they log out. The check
+      // above already stays off a saved pick; this leaves the unsaved case resolving
+      // fresh every launch, which is what it did before signing in.
       for (let attempt = 0; attempt < 4; attempt++) {
         try {
           const ok = await pi.setModel(model);

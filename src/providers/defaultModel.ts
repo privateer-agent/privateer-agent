@@ -140,12 +140,21 @@ export interface ResolveDefaultModelOptions {
   saved?: string | null;
 }
 
-// The user's own persisted model pick: Pi writes defaultProvider + defaultModel to
-// agentDir()/settings.json on EVERY interactive switch (AgentSession.setModel →
-// setDefaultModelAndProvider — both the built-in selector and pi-privacy's /models
-// picker land there). That makes it the strongest non-env signal of deliberate
-// intent we have, so resolveDefaultModel ranks it right after PRIVATEER_MODEL.
-// Returns "provider/id", or null when either half is missing.
+// The user's own persisted model pick, read from agentDir()/settings.json. It is the
+// strongest non-env signal of deliberate intent we have, so resolveDefaultModel ranks
+// it right after PRIVATEER_MODEL. Returns "provider/id", or null when either half is
+// missing.
+//
+// WHO WRITES IT is narrower than it looks, and assuming otherwise is what made model
+// picks evaporate between terminals. Pi persists a switch ONLY when its own caller opts
+// in (AgentSession.setModel's `options.persist`): the built-in selector does that on
+// ctrl+s and NOT on Enter, and `/model <name>` hardcodes `{ persist: false }`. The
+// EXTENSION api cannot ask for it at all — core/extensions/loader.js forwards
+// `setModel(model)` with no options object — so pi-privacy's /models picker, the ACP
+// model dropdown and this repo's own /model switched the live session and wrote
+// nothing, leaving the next launch to resolve a pick from whenever settings.json was
+// last touched. Those three call sites now write it themselves, via
+// writePiDefaultModel().
 export function savedPiDefaultSpec(): string | null {
   try {
     const raw = readFileSync(join(agentDir(), "settings.json"), "utf8").trim();
@@ -245,6 +254,32 @@ function splitSpec(spec: string): { provider: string; modelId: string } | null {
 // `privateer/…` for a Tinfoil-keyed user would demote them from direct
 // client-attested inference to the subscription proxy on every later launch.
 export function ensurePiDefaultModel(spec: string = resolveSignedInModel()): string | null {
+  return writeSettingsDefaultModel(spec, true);
+}
+
+// Make `spec` the persisted default, whatever is already there. This is the write that
+// a DELIBERATE model switch makes for itself, because the host won't: see
+// savedPiDefaultSpec above for why every switch a Privateer user can actually reach
+// arrives with `persist` unset.
+//
+// Deliberate picks ONLY. An automatic switch must not come through here — in
+// particular the sign-in one in extensions/privateer-brand.ts, which moves a session
+// onto the confidential model for the user rather than at their request. Persisting
+// that would pin a BYO-keyed user to `privateer/…` for good: on the day they log out,
+// resolveDefaultModel would hand them back a model their machine has no credential for
+// instead of falling through to the key they do have.
+//
+// Best-effort and silent, like ensurePiDefaultModel: the switch itself has already
+// happened by the time we're called, and failing to REMEMBER a pick is a much smaller
+// harm than throwing out of the code path that made it. Returns the spec written, or
+// null if the spec was unusable or the write failed.
+export function writePiDefaultModel(spec: string): string | null {
+  return writeSettingsDefaultModel(spec, false);
+}
+
+// The one writer behind both. `onlyIfUnset` is the seed-vs-pick distinction: seeding
+// (ensurePiDefaultModel) must never stomp a choice, a pick IS the choice.
+function writeSettingsDefaultModel(spec: string, onlyIfUnset: boolean): string | null {
   const parts = splitSpec(spec);
   if (!parts) return null;
   const settingsPath = join(agentDir(), "settings.json");
@@ -256,7 +291,7 @@ export function ensurePiDefaultModel(spec: string = resolveSignedInModel()): str
     }
     // Respect an existing choice — presence of the key means the user (or Pi) already
     // has a default; don't override it.
-    if (typeof settings.defaultModel === "string" && settings.defaultModel.trim()) {
+    if (onlyIfUnset && typeof settings.defaultModel === "string" && settings.defaultModel.trim()) {
       return null;
     }
     settings.defaultProvider = parts.provider;

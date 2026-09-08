@@ -35,6 +35,7 @@ import { addPiiAllow, piiAllowEntries, removePiiAllow } from "./piiAllow.ts";
 import { cliPalette, detectScheme } from "../ui/palette.ts";
 import { accountPosture, privateerChannel } from "../providers/account.ts";
 import { hasCredentials } from "../auth/privateer.ts";
+import { writePiDefaultModel } from "../providers/defaultModel.ts";
 
 // Color-coat pi-privacy's auto-redact notice as the moat acting on your behalf: the red
 // no-quarter flag (same glyph and color as the no-quarter banner in chat.ts and the gate
@@ -168,7 +169,45 @@ function registerPrivacyCommand(pi: any): void {
 export function privacyExtension() {
   const privacy = makePiPrivacyExtension(sharedPrivacyOptions());
   return function privateerPrivacyCore(pi: any): void {
-    privacy(pi);
+    privacy(persistingModelPicks(pi));
     registerPrivacyCommand(pi);
   };
+}
+
+/**
+ * pi-privacy's `/models` picker switched the live session and stopped there, so the
+ * pick lasted exactly as long as the terminal and the next one launched on whatever
+ * settings.json still said. Pi persists a switch only for a caller that passes
+ * `{ persist: true }`, and the extension api it reaches setModel through forwards no
+ * options at all (see savedPiDefaultSpec in providers/defaultModel.ts).
+ *
+ * Pi's own selector splits the two — Enter switches for the session, ctrl+s makes it
+ * the default. OUR picker has no second key to press and never advertised a
+ * distinction, so a pick made in it means "this is my model": we persist it.
+ *
+ * Wrapped here rather than fixed inside pi-privacy so the rule sits with the rest of
+ * what Privateer configures on that extension, and so it stays scoped to the picker.
+ * The brand extension's sign-in switch shares the same api and deliberately does NOT
+ * get this — writePiDefaultModel says why an automatic switch must not persist.
+ *
+ * A Proxy, not a spread: the api object is a plain literal today, but a spread of a
+ * class instance would silently drop every method and take pi-privacy down with it.
+ * Forwarding leaves that failure mode impossible.
+ */
+function persistingModelPicks(pi: any): any {
+  if (typeof pi?.setModel !== "function") return pi;
+  const setModel = async (model: any) => {
+    const ok = await pi.setModel(model);
+    // false = the host has no key for that provider, so nothing switched and there is
+    // nothing to remember. Anything else (true, undefined) is a switch that happened.
+    if (ok !== false && model?.provider && model?.id) writePiDefaultModel(`${model.provider}/${model.id}`);
+    return ok;
+  };
+  return new Proxy(pi, {
+    get(target, prop, receiver) {
+      if (prop === "setModel") return setModel;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }

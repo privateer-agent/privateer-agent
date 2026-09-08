@@ -53,9 +53,12 @@ export type IpcRequest =
  *   terminated  remote access was switched off from the app; needs a restart
  *   signed-out  no account credentials on this machine
  *   refused     the server said no (plan's agent cap, rejected ticket) — standing
+ *   disabled    remote access is off for this MACHINE (PRIVATEER_RELAY_EXPOSURE) —
+ *               standing, and the one reason here that is a setting rather than a
+ *               fault, so the app words it as an invitation rather than an error
  *   connecting  genuinely still trying; this one really is worth a moment
  */
-export type RelayReason = "terminated" | "signed-out" | "refused" | "connecting";
+export type RelayReason = "terminated" | "signed-out" | "refused" | "disabled" | "connecting";
 
 /**
  * The harbor's view of its own relay connection, reported by `status`.

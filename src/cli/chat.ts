@@ -53,7 +53,8 @@ async function main() {
   const { modelRegistryOf } = await import("../providers/piAuthStore.ts");
   const { agentVersion } = await import("../config/version.ts");
   const { pickerCatalog, hiddenAccountNotice, hiddenAccountTitleSuffix } = await import("../providers/modelCatalog.ts");
-  const { resolveDefaultModel, resolveSignedInModel, savedPiDefaultSpec } = await import("../providers/defaultModel.ts");
+  const { resolveDefaultModel, resolveSignedInModel, savedPiDefaultSpec, writePiDefaultModel } =
+    await import("../providers/defaultModel.ts");
   const { postOutbox } = await import("../outbox/cloudOutbox.ts");
   const { addPendingCloud } = await import("../routines/store.ts");
 
@@ -715,6 +716,11 @@ async function main() {
     try {
       await session.setModel(model);
       currentSpec = sp;
+      // Typed /model is a deliberate pick, and Pi persists a switch only for a caller
+      // that asks (AgentSession.setModel's `options.persist`, which we don't pass and
+      // its own /model doesn't either). Without this the pick died with the process and
+      // the next terminal came back on the old model. See writePiDefaultModel.
+      writePiDefaultModel(sp);
       const m = `model → ${sp}`;
       console.log(`${DIM}${m}${RESET}`);
       relay?.sendContext({ model: currentSpec, cwd, version: agentVersion() }); // banner follows the switch

@@ -20,6 +20,7 @@ import {
   resolveDefaultModel,
   resolveSignedInModel,
   savedPiDefaultSpec,
+  writePiDefaultModel,
 } from "../src/providers/defaultModel.ts";
 import { acceptsImages, visionInput } from "../src/providers/vision.ts";
 import { agentDir } from "../src/config/paths.ts";
@@ -195,6 +196,57 @@ test("ensurePiDefaultModel: a spec with no provider prefix is a no-op", () => {
   freshHome();
   assert.equal(ensurePiDefaultModel("bareword"), null);
   assert.ok(!existsSync(join(agentDir(), "settings.json")), "must not create a file for an invalid spec");
+});
+
+// writePiDefaultModel is the write a deliberate model switch makes for itself, because
+// the host makes it for nobody: Pi persists only for a caller that passes `persist`,
+// and the extension api (pi-privacy's /models picker, the ACP dropdown) can't. The
+// difference from ensurePiDefaultModel is the whole point — a seed defers to an
+// existing choice, a pick IS one.
+test("writePiDefaultModel: a pick overwrites an existing default", () => {
+  freshHome();
+  writeFileSync(
+    join(agentDir(), "settings.json"),
+    JSON.stringify({ defaultProvider: "anthropic", defaultModel: "claude-opus-4-8", theme: "dark" }),
+  );
+  assert.equal(writePiDefaultModel("privateer/tinfoil/gemma4-31b"), "privateer/tinfoil/gemma4-31b");
+  const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "privateer");
+  assert.equal(settings.defaultModel, "tinfoil/gemma4-31b");
+  assert.equal(settings.theme, "dark", "unrelated settings must survive a pick");
+  // The point of writing it at all: the next launch resolves the pick.
+  assert.equal(savedPiDefaultSpec(), "privateer/tinfoil/gemma4-31b");
+  assert.equal(resolveDefaultModel({ env: {}, signedIn: true }), "privateer/tinfoil/gemma4-31b");
+});
+
+test("writePiDefaultModel: writes into a settings.json that has no default yet", () => {
+  freshHome();
+  assert.equal(writePiDefaultModel("openai/gpt-5.5"), "openai/gpt-5.5");
+  const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "openai");
+  assert.equal(settings.defaultModel, "gpt-5.5");
+});
+
+test("writePiDefaultModel: model ids keep their own slashes", () => {
+  freshHome();
+  writePiDefaultModel("privateer/near/zai-org/GLM-5.1-FP8");
+  const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "privateer");
+  assert.equal(settings.defaultModel, "near/zai-org/GLM-5.1-FP8", "only the FIRST slash splits the spec");
+  assert.equal(savedPiDefaultSpec(), "privateer/near/zai-org/GLM-5.1-FP8", "and it round-trips");
+});
+
+test("writePiDefaultModel: an unusable spec writes nothing", () => {
+  freshHome();
+  assert.equal(writePiDefaultModel("bareword"), null);
+  assert.equal(writePiDefaultModel("trailing/"), null);
+  assert.ok(!existsSync(join(agentDir(), "settings.json")), "must not create a file for an invalid spec");
+});
+
+test("writePiDefaultModel: a corrupt settings.json costs the pick, never a throw", () => {
+  freshHome();
+  writeFileSync(join(agentDir(), "settings.json"), "{ not json");
+  assert.equal(writePiDefaultModel("openai/gpt-5.5"), null, "best-effort: the switch already happened");
 });
 
 test.after(() => rmSync(process.env.PRIVATEER_HOME!, { recursive: true, force: true }));

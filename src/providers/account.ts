@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { globalDir } from "../config/paths.ts";
 import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts";
+import { installGzipRequestBodies } from "../util/gzipRequestBody.ts";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
 import { visionInput } from "./vision.ts";
@@ -652,6 +653,11 @@ export function makeAccountProvider() {
     on?: (event: string, handler: (e: unknown, ctx: unknown) => void) => void;
   }): void => {
     if (typeof pi.registerProvider !== "function") return;
+    // Compress this channel's inference bodies before anything can send one. The edge
+    // WAF in front of our server 403s a plaintext body that merely MENTIONS a traversal
+    // path or a shell command, which is most of a coding agent's traffic — see
+    // util/gzipRequestBody.ts. Idempotent, and inert for every other fetch.
+    installGzipRequestBodies();
     // Seed with the last live catalog when we have one (see seedCatalogIds): this is the
     // list Pi resolves a saved default / a restored session model against at launch,
     // before the live re-registration can reach the registry.
