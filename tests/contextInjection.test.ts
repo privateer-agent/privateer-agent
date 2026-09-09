@@ -5,7 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import privateerContext from "../extensions/privateer-context.ts";
-import { CONTEXT_BLOCK_MARKER, RUNTIME_GUIDELINES_MARKER } from "../src/context.ts";
+import {
+  CONTEXT_BLOCK_MARKER,
+  CONTEXT_MAX_BYTES_ENV,
+  DEFAULT_CONTEXT_MAX_BYTES,
+  RUNTIME_GUIDELINES_MARKER,
+  contextBlock,
+  contextMaxBytes,
+  contextStats,
+  runtimeGuidelinesBlock,
+} from "../src/context.ts";
 
 /**
  * What extensions/privateer-context.ts is allowed to do to a system prompt.
@@ -142,4 +151,112 @@ test("context: -nc / --no-context-files silences EVERYTHING this extension injec
       `${injected} must sit behind the -nc gate, or the flag half-works`,
     );
   }
+});
+
+/**
+ * The per-turn budget (src/context.ts).
+ *
+ * A context file is charged inside the system prompt of EVERY request, so its size is a
+ * tax on every tool call, not a one-off load. Measured case that put this cap here: a
+ * 117 KB PRIVATEER.md in a game project sent ~34,000 tokens per request, on confidential
+ * endpoints that have no prompt cache to read them back from — 121 tool calls in one turn,
+ * 17 minutes, nearly all of it time-to-first-token.
+ *
+ * What has to hold: a normal file is loaded verbatim (the cap must never become a silent
+ * editor of small files), an oversized one is cut at a line boundary and SAYS SO in the
+ * block itself, and the user can always turn the cap off.
+ */
+
+function withEnv(value: string | undefined, fn: () => void): void {
+  const prev = process.env[CONTEXT_MAX_BYTES_ENV];
+  if (value === undefined) delete process.env[CONTEXT_MAX_BYTES_ENV];
+  else process.env[CONTEXT_MAX_BYTES_ENV] = value;
+  try {
+    fn();
+  } finally {
+    if (prev === undefined) delete process.env[CONTEXT_MAX_BYTES_ENV];
+    else process.env[CONTEXT_MAX_BYTES_ENV] = prev;
+  }
+}
+
+test("budget: a file inside the cap is injected byte-for-byte", () => {
+  const { cwd, cleanup } = emptyCwd();
+  try {
+    const body = "## Conventions\n" + "small enough to load whole\n".repeat(20);
+    writeFileSync(join(cwd, "PRIVATEER.md"), body);
+    const stats = contextStats(cwd);
+    assert.equal(stats.truncated, false);
+    assert.equal(stats.files[0].loaded, body, "no cut, no footer, no rewriting");
+    assert.equal(stats.loadedBytes, stats.diskBytes);
+    assert.ok(contextBlock(cwd).includes(body));
+  } finally {
+    cleanup();
+  }
+});
+
+test("budget: an oversized file is cut, and the block says where the rest is", () => {
+  const { cwd, cleanup } = emptyCwd();
+  try {
+    const path = join(cwd, "PRIVATEER.md");
+    const head = "# Project\nthe part that matters\n";
+    writeFileSync(path, head + "history line\n".repeat(20_000)); // ~250 KB
+    const stats = contextStats(cwd);
+    const file = stats.files[0];
+
+    assert.equal(file.truncated, true);
+    assert.ok(file.loadedBytes <= DEFAULT_CONTEXT_MAX_BYTES, "cut to the budget");
+    assert.ok(file.bytes > DEFAULT_CONTEXT_MAX_BYTES * 4, "the fixture really is oversized");
+    assert.ok(file.loaded.startsWith(head), "the HEAD is kept — a context file opens with what the project is");
+    assert.ok(file.loaded.includes(path), "the model is told which file to read for the rest");
+    assert.ok(/every turn/i.test(file.loaded), "…and why it was cut");
+    assert.ok(
+      file.loaded.slice(0, file.loadedBytes).endsWith("\n") ||
+        file.loaded.slice(0, file.loadedBytes).endsWith("history line"),
+      "the cut lands on a line boundary",
+    );
+
+    // The whole point: what reaches the model is bounded, not the file size.
+    const block = contextBlock(cwd);
+    assert.ok(Buffer.byteLength(block, "utf-8") < file.bytes / 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("budget: the cap is overridable, and 'off' loads the file whole", () => {
+  const { cwd, cleanup } = emptyCwd();
+  try {
+    const body = "x".repeat(80 * 1024);
+    writeFileSync(join(cwd, "PRIVATEER.md"), body);
+
+    withEnv("off", () => {
+      const stats = contextStats(cwd);
+      assert.equal(stats.truncated, false, "opting out means opting out");
+      assert.equal(stats.files[0].loaded, body);
+      assert.equal(stats.maxBytes, Number.POSITIVE_INFINITY);
+    });
+
+    withEnv("4096", () => {
+      const stats = contextStats(cwd);
+      assert.equal(stats.maxBytes, 4096);
+      assert.ok(stats.files[0].loadedBytes <= 4096);
+    });
+
+    // A typo must not amputate the file to nothing — fall back to the default.
+    withEnv("banana", () => {
+      assert.equal(contextMaxBytes(), DEFAULT_CONTEXT_MAX_BYTES);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("guidelines: the shell-state and batching rules are in every turn", () => {
+  // These two lines exist to stop the two behaviours that made turns slow: a `cd` per
+  // tool call (shell state does not survive a call) and 60-120 one-line calls in a row
+  // (each one re-sends the whole conversation).
+  const block = runtimeGuidelinesBlock();
+  assert.match(block, /fresh subshell/i);
+  assert.match(block, /never spend a call on `cd` alone/i);
+  assert.match(block, /re-sends the whole conversation/i);
 });

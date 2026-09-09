@@ -36,7 +36,12 @@ import {
 } from "../src/providers/account.ts";
 import { resolveSignedInModel, savedPiDefaultSpec } from "../src/providers/defaultModel.ts";
 import { canOpenBrowser, openInBrowser } from "../src/util/openBrowser.ts";
-import { discoverContextFiles, onContextChanged } from "../src/context.ts";
+import {
+  contextStats,
+  estimateTokens,
+  fmtBytes,
+  onContextChanged,
+} from "../src/context.ts";
 import { onPackUpdatesChanged, pendingCliUpdate, pendingPackUpdates } from "../src/updates.ts";
 import { type Palette, paletteFor } from "../src/ui/palette.ts";
 
@@ -257,7 +262,7 @@ function packNotice(p: Palette): string {
 // quiet tease that /init scaffolds one. Reads the filesystem at render time, so it
 // reflects the current cwd and updates after /init (via onContextChanged → refresh).
 function contextLine(p: Palette): string {
-  const files = discoverContextFiles();
+  const { files, loadedBytes, truncated } = contextStats();
   if (files.length === 0) {
     return `${p.DIM}no PRIVATEER.md · ${p.INK}/init${p.DIM} to add project context${p.RESET}`;
   }
@@ -265,7 +270,14 @@ function contextLine(p: Palette): string {
   // with a "+N" so the header stays one line but the count isn't hidden.
   const nearest = shortPath(files[files.length - 1].path);
   const more = files.length > 1 ? `${p.DIM} +${files.length - 1}${p.RESET}` : "";
-  return `${p.GREEN}⚓${p.DIM} ${p.RESET}${p.INK}${nearest}${p.RESET}${more}`;
+  // What this costs on every single turn. A context file is the one thing a user adds to
+  // the agent whose price is charged per request and shown nowhere — so show it here, and
+  // say so loudly when a file was too big to load whole.
+  const tok = `${(estimateTokens(loadedBytes) / 1000).toFixed(1)}k`;
+  const cost = truncated
+    ? `${p.YELLOW} · too big, ${fmtBytes(loadedBytes)} loaded · ${p.INK}/context${p.RESET}`
+    : `${p.DIM} · ~${tok} tok/turn${p.RESET}`;
+  return `${p.GREEN}⚓${p.DIM} ${p.RESET}${p.INK}${nearest}${p.RESET}${more}${cost}`;
 }
 
 // ── "What's New" — a tiny in-banner changelog ────────────────────────────────

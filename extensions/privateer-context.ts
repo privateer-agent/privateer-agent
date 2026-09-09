@@ -15,9 +15,13 @@
 
 import {
   contextBlock,
+  contextStats,
+  estimateTokens,
+  fmtBytes,
   writeTemplate,
   emitContextChanged,
   CONTEXT_BLOCK_MARKER,
+  CONTEXT_MAX_BYTES_ENV,
   RUNTIME_GUIDELINES_MARKER,
   runtimeGuidelinesBlock,
 } from "../src/context.ts";
@@ -56,6 +60,44 @@ export default function privateerContext(pi: any): void {
     }
     if (prompt === base) return; // nothing to add — leave the chain alone
     return { systemPrompt: prompt };
+  });
+
+  // /context — what the project-context files cost, per turn.
+  //
+  // The cost of a context file is invisible: it is charged inside the system prompt of
+  // every request, so a file that grew to 117 KB reads as "the model got slow", never as
+  // "I am sending 34,000 tokens per tool call". This command is the answer to that — it
+  // names each file, what reaches the model, and what was left behind.
+  pi.registerCommand?.("context", {
+    description: "Show the PRIVATEER.md files loaded into every turn, and what they cost",
+    handler: (_args: string, ctx: any) => {
+      const { files, diskBytes, loadedBytes, truncated, maxBytes } = contextStats(process.cwd());
+      if (files.length === 0) {
+        ctx?.ui?.notify?.(
+          `No PRIVATEER.md found for ${process.cwd()} — /init writes a starter one.`,
+          "info",
+        );
+        return;
+      }
+      const lines = files.map((f) => {
+        const cost = `${fmtBytes(f.loadedBytes)} ≈ ${estimateTokens(f.loadedBytes).toLocaleString()} tokens/turn`;
+        const cut = f.truncated ? `  ⚠ TRUNCATED from ${fmtBytes(f.bytes)}` : "";
+        return `  ${f.path}\n    ${cost}${cut}`;
+      });
+      const cap = Number.isFinite(maxBytes)
+        ? `${fmtBytes(maxBytes)} per file (${CONTEXT_MAX_BYTES_ENV}=off to load them whole)`
+        : `none — ${CONTEXT_MAX_BYTES_ENV} disabled the cap`;
+      const total =
+        `Total on disk ${fmtBytes(diskBytes)} · sent every turn ${fmtBytes(loadedBytes)} ` +
+        `≈ ${estimateTokens(loadedBytes).toLocaleString()} tokens.`;
+      const advice = truncated
+        ? "\n\nA context file is re-sent in full on every tool call, and confidential (TEE) endpoints cannot cache it — so this is paid again on each one. Split the history out into an ARCHIVE.md the agent reads only when asked."
+        : "";
+      ctx?.ui?.notify?.(
+        `Project context loaded into every turn:\n${lines.join("\n")}\n\n${total}\nCap: ${cap}.${advice}`,
+        truncated ? "warning" : "info",
+      );
+    },
   });
 
   // /init — scaffold a PRIVATEER.md in the working directory. Never clobbers an existing
