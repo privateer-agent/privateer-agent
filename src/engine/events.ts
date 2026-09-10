@@ -36,7 +36,20 @@ export type EngineEvent =
   | { type: "retrying"; attempt: number; max: number; delayMs: number; reason: string }
   // `error` is the short user-facing message; `hint` is an optional actionable
   // next step rendered dim beneath it. Both are already secret-redacted.
-  | { type: "error"; error: string; hint?: string; retryable?: boolean };
+  | { type: "error"; error: string; hint?: string; retryable?: boolean }
+  // The turn is still running and has produced nothing for `sinceMs`. Emitted by a
+  // HOST that supervises turns (today: the desktop's turnSupervisor), never by the
+  // engine — the engine has no clock and no view of the turn as a whole.
+  //
+  // It exists because silence is ambiguous and the app cannot resolve it: a tool
+  // call emits at its start and its end and nothing in between, so a fifteen-minute
+  // build, a stalled model socket and a dead agent all look identical from the far
+  // side of the relay. This is the frame that says which. `tool`/`toolMs` name what
+  // is being waited on when something is.
+  //
+  // It is NOT turn activity: it must not reset a "silent for 4m" clock, or it would
+  // erase the very thing it was sent to report.
+  | { type: "still-working"; sinceMs: number; tool?: string; toolMs?: number };
 
 export const emptyUsage = (): UsageTotals => ({
   inputTokens: 0,

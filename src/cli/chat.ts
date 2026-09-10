@@ -329,6 +329,15 @@ async function main() {
   async function runTurn(text: string, remote: boolean, echo = true): Promise<void> {
     if (turnActive) {
       console.log(`\n${DIM}(busy — a turn is already running)${RESET}`);
+      // Say it to the DRIVER too, not just to this terminal's own console. An
+      // app-driven prompt refused here used to vanish: the app had already echoed
+      // the message into its feed and lit the thinking pill (submit() in
+      // RemoteDriveContext does both before transmitting), and the only trace of
+      // the refusal was a dim line on a terminal nobody was looking at. The driver
+      // saw their own message sit under a spinner forever. A notice does not close
+      // their turn, and must not — a turn IS running, and it is the one they are
+      // watching — but it tells them this message was not added to it.
+      if (remote) relay?.sendNotice("Not sent — this terminal is already running a turn. Wait for it to finish, or press Stop.");
       return;
     }
     turnActive = true;

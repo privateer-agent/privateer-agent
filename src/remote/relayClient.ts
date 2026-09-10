@@ -373,6 +373,11 @@ function projectEvent(ev: EngineEvent): Record<string, unknown> {
       return { type: "aborted" };
     case "step-finish":
       return { type: "step-finish" };
+    // Fields, not just the tag: the default below would drop sinceMs/tool and the
+    // frame would arrive saying "something is happening" without saying what or
+    // for how long, which is the whole of its content.
+    case "still-working":
+      return { type: "still-working", sinceMs: ev.sinceMs, tool: ev.tool, toolMs: ev.toolMs };
     default:
       // text/reasoning are coalesced in sendEvent and never reach here.
       return { type: ev.type };
