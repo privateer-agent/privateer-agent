@@ -1,83 +1,85 @@
-// The adapter's error path — the one that decides whether a failed turn is visible
-// in the APP at all.
-//
-// Pi reports a dead model call as an assistant message with stopReason "error" and
-// an errorMessage, and then resolves prompt() normally. Our own pi patch widened
-// that route on purpose (a hard 4xx, and a 429 that outlived the retry budget, both
-// end the turn rather than re-entering the agent loop). The CLI is fine either way —
-// its TUI reads the assistant message. Every app-driven surface reads EngineEvents,
-// so if turn_end doesn't carry the failure out, the turn arrives as a bare `finish`
-// and the driver is shown a green tick over an empty reply.
-//
-//   node --import tsx --test tests/engineAdapter.test.ts
-
+// Pi steps/retries are not whole runs. Only agent_settled closes the app turn.
+// node --import tsx --test tests/engineAdapter.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-
 import { createEngineEventAdapter } from "../src/bridge/engineAdapter.ts";
 
 const USAGE = { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 };
+const end = (a: ReturnType<typeof createEngineEventAdapter>, stopReason = "stop", errorMessage?: string) =>
+  a.toEngineEvents({ type: "turn_end", message: { usage: USAGE, stopReason, errorMessage } });
+const settle = (a: ReturnType<typeof createEngineEventAdapter>) => a.toEngineEvents({ type: "agent_settled" });
 
-test("a clean turn_end emits usage + finish, and no error", () => {
+test("a clean step emits usage, but only settlement emits finish once", () => {
   const a = createEngineEventAdapter();
-  const out = a.toEngineEvents({
-    type: "turn_end",
-    message: { usage: USAGE, stopReason: "stop" },
-  } as any);
-  assert.deepEqual(out.map((e) => e.type), ["usage", "finish"]);
-  assert.equal((out[1] as any).finishReason, "stop");
+  assert.deepEqual(end(a).map((e) => e.type), ["usage", "step-finish"]);
+  assert.deepEqual(settle(a).map((e) => e.type), ["finish"]);
+  assert.deepEqual(settle(a), []);
 });
 
-test("a FAILED turn_end emits an error event ahead of the finish", () => {
+test("failed calls stay nonterminal until settled, then report actionable errors", () => {
   const a = createEngineEventAdapter();
-  const out = a.toEngineEvents({
-    type: "turn_end",
-    message: {
-      usage: USAGE,
-      stopReason: "error",
-      errorMessage: "401 status code (no body)",
-    },
-  } as any);
-  assert.deepEqual(out.map((e) => e.type), ["usage", "error", "finish"]);
-  const err = out[1] as any;
-  // describeErrorText recovers the status and says what to do about it.
-  assert.match(err.error, /401/);
-  assert.match(err.hint, /\/login/);
-  // The finish still goes out, and still says the turn ended badly — the client
-  // reads this too, so an older agent can't report success either.
-  assert.equal((out[2] as any).finishReason, "error");
+  assert.deepEqual(end(a, "error", "401 status code (no body)").map((e) => e.type), ["usage", "step-finish"]);
+  const out = settle(a);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].type, "error");
+  if (out[0].type !== "error") return;
+  assert.match(out[0].error, /401/);
+  assert.match(out[0].hint!, /\/login/);
 });
 
-test("a rate limit is reported as retryable, with the delay the server asked for", () => {
+test("an exhausted rate limit preserves the retry hint", () => {
   const a = createEngineEventAdapter();
-  const out = a.toEngineEvents({
-    type: "turn_end",
-    message: {
-      usage: USAGE,
-      stopReason: "error",
-      errorMessage: '429 status code · {"retry-after": 30}',
-    },
-  } as any);
-  const err = out.find((e) => e.type === "error") as any;
-  assert.ok(err, "a 429 turn must reach the app as an error");
+  end(a, "error", '429 status code · {"retry-after": 30}');
+  const err = settle(a)[0];
+  assert.equal(err.type, "error");
+  if (err.type !== "error") return;
   assert.equal(err.retryable, true);
-  assert.match(err.hint, /30s/);
+  assert.match(err.hint!, /30s/);
 });
 
-test("an unreadable body still produces a message rather than silence", () => {
+test("an unreadable error body still produces a message", () => {
   const a = createEngineEventAdapter();
-  const out = a.toEngineEvents({
-    type: "turn_end",
-    message: { usage: USAGE, stopReason: "error", errorMessage: "" },
-  } as any);
-  const err = out.find((e) => e.type === "error") as any;
-  assert.ok(err, "an error with no readable status must NOT be dropped");
-  assert.ok(err.error.length > 0);
+  end(a, "error", "");
+  const err = settle(a)[0];
+  assert.ok(err.type === "error" && err.error.length > 0);
 });
 
-test("agent_end carries no error on pi 0.84 and must stay silent", () => {
+test("tool loop, retry and compaction continuation produce one whole-run finish", () => {
   const a = createEngineEventAdapter();
-  // The real shape: { messages, willRetry }. The turn-level mapping above is the
-  // error path; this branch must not start inventing a second one.
-  assert.deepEqual(a.toEngineEvents({ type: "agent_end", messages: [], willRetry: false } as any), []);
+  a.toEngineEvents({ type: "agent_start" });
+  end(a, "toolUse");
+  end(a, "error", "503 temporary failure");
+  assert.deepEqual(a.toEngineEvents({ type: "agent_end", messages: [], willRetry: true }), []);
+  assert.equal(a.toEngineEvents({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 50 })[0].type, "retrying");
+  a.toEngineEvents({ type: "agent_start" }); // retry does not reset run usage
+  end(a, "length");
+  assert.deepEqual(a.toEngineEvents({ type: "agent_end", messages: [], willRetry: false }), []);
+  a.toEngineEvents({ type: "agent_start" }); // overflow recovery
+  const usage = end(a)[0];
+  assert.ok(usage.type === "usage" && usage.turn.inputTokens === 40);
+  assert.equal(settle(a)[0].type, "finish", "a successful retry must not emit the recovered error");
+  a.toEngineEvents({ type: "agent_start" });
+  const next = end(a)[0];
+  assert.ok(next.type === "usage" && next.turn.inputTokens === 10 && next.usage.inputTokens === 50);
+  assert.equal(settle(a)[0].type, "finish");
+});
+
+test("aborted assistant message settles as interrupted, not done", () => {
+  const a = createEngineEventAdapter();
+  end(a, "aborted");
+  assert.deepEqual(settle(a), [{ type: "aborted" }]);
+  assert.deepEqual(a.toEngineEvents({ type: "aborted" }), []);
+  a.toEngineEvents({ type: "agent_start" });
+  assert.deepEqual(a.toEngineEvents({ type: "abort" }), [{ type: "aborted" }]);
+  assert.deepEqual(settle(a), []);
+});
+
+test("partial tool output is snapshot progress, never a result", () => {
+  const a = createEngineEventAdapter();
+  const update = (text: string) => a.toEngineEvents({ type: "tool_execution_update", toolCallId: "b1", toolName: "bash", partialResult: { content: [{ type: "text", text }] } });
+  assert.deepEqual(update("one"), [{ type: "tool-progress", id: "b1", name: "bash", output: "one" }]);
+  assert.equal((update("x".repeat(5000) + "tail")[0] as any).output, "x".repeat(5000) + "tail", "cloud redaction must receive the full snapshot before clipping");
+  assert.equal(a.toEngineEvents({ type: "tool_execution_update", toolCallId: "b1", toolName: "bash" })[0].type, "tool-progress");
+  const out = a.toEngineEvents({ type: "tool_execution_end", toolCallId: "b1", toolName: "bash", result: "done" });
+  assert.equal(out[0].type, "tool-result");
 });

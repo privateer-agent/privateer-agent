@@ -10,7 +10,7 @@
 // never nominated a model. resolveDefaultModel() makes the account channel the default
 // the moment credentials exist, and keeps the legacy BYO behaviour otherwise.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hasCredentials } from "../auth/privateer.ts";
 import { agentDir } from "../config/paths.ts";
@@ -282,8 +282,10 @@ export function writePiDefaultModel(spec: string): string | null {
 function writeSettingsDefaultModel(spec: string, onlyIfUnset: boolean): string | null {
   const parts = splitSpec(spec);
   if (!parts) return null;
-  const settingsPath = join(agentDir(), "settings.json");
+  const dir = agentDir();
+  const settingsPath = join(dir, "settings.json");
   try {
+    mkdirSync(dir, { recursive: true });
     let settings: Record<string, unknown> = {};
     if (existsSync(settingsPath)) {
       const raw = readFileSync(settingsPath, "utf8").trim();

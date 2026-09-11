@@ -25,6 +25,7 @@ import { ensureSealedShim, sealedShimBase, stopSealedShim } from "../src/provide
 import { ACCOUNT_DEFAULT_MODEL_ID } from "../src/providers/defaultModel.ts";
 import { clearCredentials, currentUser, saveCredentials } from "../src/auth/privateer.ts";
 import { setPiAuthStoreForTests } from "../src/providers/piAuthStore.ts";
+import { isHardHttpFailure } from "../src/engine/errors.ts";
 
 // A stand-in for Pi's ExtensionContext + auth store (auth.json), so the tests can see
 // exactly which provider entries a teardown or an arm touched.
@@ -96,6 +97,42 @@ test("makeAccountProvider registers the privateer OAuth provider with NO credent
   assert.ok(priv!.config.oauth, "registration must include the oauth login path");
   assert.equal(priv!.config.oauth.name, "Privateer account");
   assert.ok(Array.isArray(priv!.config.models) && priv!.config.models.length > 0, "must seed models");
+});
+
+test("message_end gives signed-in account balance failures a durable top-up message", () => {
+  clearCredentials();
+  const handlers: Record<string, (e: unknown, ctx: unknown) => unknown> = {};
+  makeAccountProvider()({
+    registerProvider: () => {},
+    on: (event, handler) => { handlers[event] = handler; },
+  });
+  const message = {
+    role: "assistant", provider: "privateer", stopReason: "error", content: [],
+    errorMessage: '429 {"code":"INSUFFICIENT_FUNDS","message":"Insufficient credits."}',
+  };
+  const ctx = { model: { provider: "privateer" } };
+  const handle = (msg = message) => handlers.message_end({ message: msg }, ctx) as { message: typeof message } | undefined;
+  try {
+    assert.equal(handle(), undefined, "signed-out errors are untouched");
+    saveCredentials(PARENT);
+    const replacement = handle();
+    assert.ok(replacement, "return a replacement for Pi's render/persist path, not just a toast");
+    assert.equal(replacement.message.role, "assistant");
+    assert.equal(replacement.message.stopReason, "error");
+    assert.equal(replacement.message.content, message.content);
+    assert.match(replacement.message.errorMessage, /insufficient balance/);
+    assert.match(replacement.message.errorMessage, /https:\/\/privateer\.pro\/top-up/);
+    assert.equal(isHardHttpFailure(replacement.message.errorMessage), true, "no session retry or compaction");
+    assert.match(message.errorMessage, /^429 /, "leave replacement application to Pi");
+
+    assert.equal(handle({ ...message, provider: "openrouter" }), undefined, "BYO provider billing is not Privateer billing");
+    assert.equal(handle({ ...message, errorMessage: "429 Too Many Requests" }), undefined);
+    assert.equal(handle({ ...message, errorMessage: '429 {"code":"DAILY_CAP_HIT"}' }), undefined);
+    assert.equal(handle({ ...message, stopReason: "stop" }), undefined);
+    assert.equal(handle({ ...message, role: "toolResult" }), undefined);
+  } finally {
+    clearCredentials();
+  }
 });
 
 test("makeAccountProvider is a no-op when the host lacks registerProvider", () => {

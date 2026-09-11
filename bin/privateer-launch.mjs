@@ -30,6 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 import { routeUpdate } from "./update-route.mjs";
 import { runToCompletion } from "./run-to-completion.mjs";
+import { configureCompileCache } from "./startup-cache.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
 const REPO = path.resolve(HERE, "..");
@@ -41,14 +42,18 @@ const isWin = process.platform === "win32";
 // Unicode wave blocks and emojis into 3-byte mojibake that wraps and floods the console.
 if (isWin) {
   try {
-    const chcp = process.env.SystemRoot
-      ? path.join(process.env.SystemRoot, "System32", "chcp.com")
-      : "chcp.com";
-    spawnSync(chcp, ["65001"], { stdio: "ignore", windowsHide: true });
+    const comspec = process.env.ComSpec || "cmd.exe";
+    spawnSync(comspec, ["/d", "/s", "/c", "chcp 65001 >nul"], { stdio: "inherit", windowsHide: true });
   } catch {
     /* best effort */
   }
 }
+
+// Suppress upstream update checks: Pi's CLI update banner and pi-background-tasks'
+// update check / footer notice ("bg ⬆ v... /bg-update"). Privateer manages updates
+// at the distribution level via `privateer update` and its own banner.
+if (!process.env.PI_SKIP_VERSION_CHECK) process.env.PI_SKIP_VERSION_CHECK = "1";
+if (!process.env.PI_BG_DISABLE_UPDATE_CHECK) process.env.PI_BG_DISABLE_UPDATE_CHECK = "1";
 
 const PRIVATEER_HOME = process.env.PRIVATEER_HOME || path.join(os.homedir(), ".privateer");
 const ENV_FILE = path.join(REPO, ".env"); // dev-only; a real install has none
@@ -348,6 +353,134 @@ if (sub === "update") {
   else updateSelf();
 }
 
+// --- `privateer init [directory]` ------------------------------------------
+// Scaffold a starter PRIVATEER.md project-context file. Runs synchronously and exits
+// immediately — no Pi boot, no splash screen, no API keys needed.
+else if (sub === "init") {
+  const rest = args.slice(1);
+  const help = rest.includes("--help") || rest.includes("-h");
+  const cmd = process.env.PRIVATEER_CMD || "privateer";
+  if (help) {
+    console.log(
+      [
+        `${cmd} init — scaffold a starter PRIVATEER.md project-context file.`,
+        "",
+        `Usage: ${cmd} init [directory]`,
+        "",
+        "Options:",
+        "  -h, --help    Show this help message",
+        "",
+        "Creates a starter PRIVATEER.md in the current directory (or the specified directory).",
+        "Privateer loads this file automatically at startup to give the agent project context.",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
+
+  const unknownOpt = rest.find((a) => a.startsWith("-"));
+  if (unknownOpt) {
+    console.error(`privateer init: unknown option '${unknownOpt}'`);
+    console.error(`Run '${cmd} init --help' for usage.`);
+    process.exit(1);
+  }
+
+  const positionals = rest.filter((a) => !a.startsWith("-"));
+  if (positionals.length > 1) {
+    console.error(`privateer init: unexpected argument '${positionals[1]}'`);
+    console.error(`Run '${cmd} init --help' for usage.`);
+    process.exit(1);
+  }
+
+  const targetDir = positionals[0] ? path.resolve(positionals[0]) : process.cwd();
+  if (!fs.existsSync(targetDir) || !fs.statSync(targetDir).isDirectory()) {
+    console.error(`privateer init: directory not found '${targetDir}'`);
+    process.exit(1);
+  }
+
+  const targetFile = path.join(targetDir, "PRIVATEER.md");
+  if (fs.existsSync(targetFile)) {
+    console.log(`PRIVATEER.md already exists at ${targetFile} — left untouched.`);
+    process.exit(0);
+  }
+
+  const template = [
+    "# PRIVATEER.md",
+    "",
+    "Project context for the Privateer agent. Privateer loads this file automatically at",
+    "startup (the same way it loads AGENTS.md / CLAUDE.md) and prepends it to the model's",
+    "system prompt — so put anything the agent should always know about THIS project here.",
+    "",
+    "## Project",
+    "",
+    "<One or two lines: what this project is and what it does.>",
+    "",
+    "## Conventions",
+    "",
+    "- <Coding style, patterns, and idioms to follow.>",
+    "- <Things to avoid.>",
+    "",
+    "## Commands",
+    "",
+    "- build: <command>",
+    "- test: <command>",
+    "- run: <command>",
+    "",
+    "## Notes for the agent",
+    "",
+    "- <Domain context, gotchas, or constraints worth stating once.>",
+    "",
+  ].join("\n");
+
+  try {
+    fs.writeFileSync(targetFile, template, "utf8");
+    console.log(`\x1b[32m✓\x1b[0m Created ${targetFile}`);
+    console.log("  Edit it with your project's context — it loads automatically on every turn.");
+    process.exit(0);
+  } catch (err) {
+    console.error(`privateer init: failed to write ${targetFile} — ${err.message}`);
+    process.exit(1);
+  }
+}
+
+// --- `privateer help [command]` / `privateer --help` ------------------------
+else if (sub === "help" || (args.length === 1 && (args[0] === "--help" || args[0] === "-h"))) {
+  const target = sub === "help" ? args[1] : undefined;
+  const cmd = process.env.PRIVATEER_CMD || "privateer";
+  if (target === "init") {
+    console.log(
+      [
+        `${cmd} init — scaffold a starter PRIVATEER.md project-context file.`,
+        "",
+        `Usage: ${cmd} init [directory]`,
+        "",
+        "Options:",
+        "  -h, --help    Show this help message",
+        "",
+        "Creates a starter PRIVATEER.md in the current directory (or the specified directory).",
+        "Privateer loads this file automatically at startup to give the agent project context.",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
+  if (target === "update") {
+    console.log(
+      [
+        `${cmd} update — fetch the latest release, or newer tool packs.`,
+        "",
+        `  ${cmd} update                  update the Privateer CLI itself`,
+        `  ${cmd} update --extensions     update every installed tool pack`,
+        `  ${cmd} update <pack>           update one pack (npm name or git URL)`,
+        `  ${cmd} update --all            tool packs, then the CLI`,
+        "",
+        "Inside a running terminal, /update fetches tool packs in place — no restart.",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
+  printPrivateerHelp(cmd);
+  process.exit(0);
+}
+
 // --- `privateer harbor [run|install|uninstall|status]` ---------------------
 // The resident background harbor (routines + app-driven headless task spawns). Boots
 // straight into src/harbor via bin/privateer-harbor.mjs — the harbor loads the moat as
@@ -390,6 +523,10 @@ else if (sub === "acp") {
 
 // --- normal launch: resolve the moat, then exec Pi's TUI with it -----------
 else {
+  // Node 22 can reuse compiled code across launches instead of reparsing Pi and every
+  // provider SDK. Set the child env before any Node spawn; children inherit it too.
+  configureCompileCache(PRIVATEER_HOME);
+
   // Windows has no bash out of the box, but Privateer's command tool needs one. If a
   // real bash isn't reachable, stop here with a clear, actionable message — otherwise
   // the user boots fine and only hits a cryptic `'bash' is not recognized` the first
@@ -447,6 +584,7 @@ else {
   // Suppress Pi's upstream update banner (our banner is the startup surface). Disables
   // ONLY the version fetch — fd/rg can still download on first run.
   if (!process.env.PI_SKIP_VERSION_CHECK) process.env.PI_SKIP_VERSION_CHECK = "1";
+  if (!process.env.PI_BG_DISABLE_UPDATE_CHECK) process.env.PI_BG_DISABLE_UPDATE_CHECK = "1";
 
   // Quiet Pi's built-in startup chatter so our banner is the only greeting. Each key is
   // set only when unset, so a user's own settings.json toggle still wins.
@@ -551,8 +689,21 @@ else {
   // TUI branch only: harbor/acp/subagent children have no terminal to animate on (and
   // acp's stdout is a JSON-RPC stream). pathToFileURL, not the bare path — a Windows
   // absolute path reads as the URL scheme "d:"; see bin/privateer.mjs for the same trap.
+  const isNonInteractive = args.some(
+    (a) =>
+      a === "-p" ||
+      a === "--print" ||
+      a === "--mode" ||
+      a === "--export" ||
+      a === "--list-models" ||
+      a === "--help" ||
+      a === "-h" ||
+      a === "-v" ||
+      a === "-V" ||
+      a === "--version",
+  );
   const splash = path.join(HERE, "privateer-splash.mjs");
-  if (fs.existsSync(splash)) nodeArgs.push("--import", pathToFileURL(splash).href);
+  if (!isNonInteractive && fs.existsSync(splash)) nodeArgs.push("--import", pathToFileURL(splash).href);
 
   runToCompletion(NODE_BIN, [...nodeArgs, CLI, ...modelArgs, ...extArgs, ...skillArgs, ...args]);
 }
@@ -699,6 +850,74 @@ function warnKeylessLaunch() {
         "",
       ];
   process.stderr.write(lines.join("\n") + "\n");
+}
+
+function printPrivateerHelp(cmd = process.env.PRIVATEER_CMD || "privateer") {
+  console.log(
+    [
+      "privateer - Terminal & TUI coding agent with verified privacy and local control",
+      "",
+      "Usage:",
+      `  ${cmd} [options] [--] [@files...] [messages...]`,
+      "",
+      "Commands:",
+      `  ${cmd} init [directory]     Create a starter PRIVATEER.md project-context file`,
+      `  ${cmd} update [--all]       Fetch the latest release or newer tool packs`,
+      `  ${cmd} harbor <command>     Manage the resident background Harbor daemon (run/install/uninstall/status)`,
+      `  ${cmd} verify               Check local installation integrity and patch state`,
+      `  ${cmd} acp                  Run as an Agent Client Protocol server (JSON-RPC on stdio)`,
+      `  ${cmd} install <source>     Install extension source and add to settings`,
+      `  ${cmd} remove <source>      Remove extension source from settings`,
+      `  ${cmd} uninstall <source>   Alias for remove`,
+      `  ${cmd} list                 List installed extensions from settings`,
+      `  ${cmd} config               Open TUI to enable/disable package resources`,
+      `  ${cmd} auth <command>       Print credentials or check provider readiness`,
+      `  ${cmd} <command> --help     Show help for a specific command`,
+      "",
+      "Options:",
+      "  --provider <name>              Provider name",
+      '  --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")',
+      "  --api-key <key>                API key (defaults to env vars)",
+      "  --system-prompt <text>         System prompt (default: coding assistant prompt)",
+      "  --append-system-prompt <text>  Append text or file contents to the system prompt",
+      "  --mode <mode>                  Output mode: text (default), json, or rpc",
+      "  --print, -p                    Non-interactive mode: process prompt and exit",
+      "  --continue, -c                 Continue previous session",
+      "  --resume, -r                   Select a session to resume",
+      "  --session <path|id>            Use specific session file or partial UUID",
+      "  --session-id <id>              Use exact project session ID, creating it if missing",
+      "  --fork <path|id>               Fork specific session file or partial UUID into a new session",
+      "  --session-dir <dir>            Directory for session storage and lookup",
+      "  --no-session                   Don't save session (ephemeral)",
+      "  --name, -n <name>              Set session display name",
+      "  --models <patterns>            Comma-separated model patterns for Ctrl+P cycling",
+      "  --no-tools, -nt                Disable all tools by default (built-in and extension)",
+      "  --no-builtin-tools, -nbt       Disable built-in tools by default",
+      "  --tools, -t <tools>            Comma-separated allowlist of tool names to enable",
+      "  --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable",
+      "  --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max",
+      "  --extension, -e <path>         Load an extension file (can be used multiple times)",
+      "  --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)",
+      "  --skill <path>                 Load a skill file or directory (can be used multiple times)",
+      "  --no-skills, -ns               Disable skills discovery and loading",
+      "  --prompt-template <path>       Load a prompt template file or directory",
+      "  --no-prompt-templates, -np     Disable prompt template discovery and loading",
+      "  --theme <path>                 Load a theme file or directory",
+      "  --use-theme <name[/name]>      Set the initial interactive theme for this run",
+      "  --no-themes                    Disable theme discovery and loading",
+      "  --no-context-files, -nc        Disable PRIVATEER.md, AGENTS.md and CLAUDE.md discovery",
+      "  --export <file>                Export session file to HTML and exit",
+      "  --list-models [search]         List available models (with optional fuzzy search)",
+      "  --verbose                      Force verbose startup",
+      "  --tui-mode <mode>              TUI mode: regular (default) or fullscreen",
+      "  --approve, -a                  Trust project-local files for this run",
+      "  --no-approve, -na              Ignore project-local files for this run",
+      "  --offline                      Disable startup network operations",
+      "  --                             End option parsing; treat remaining arguments as messages/files",
+      "  --help, -h                     Show this help",
+      "  --version, -v, -V              Show version number",
+    ].join("\n"),
+  );
 }
 
 function refreshUpdateCache() {

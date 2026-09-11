@@ -171,6 +171,13 @@ for how you installed) or check your version with `privateer --version`.
 > `~/.privateer/agent/settings.json`. Linux arm64 and Windows arm64 bundles aren't built
 > yet — arm64 Windows runs the x64 bundle under emulation.
 
+Background-task storage is created only when a task starts, not when you open Privateer.
+Tasks normally write logs to `.pi/tasks` in your working directory. If that directory
+denies writes (for example, Git Bash opened in `C:\Program Files\Git`), Privateer
+uses `~/.privateer/agent/tasks/<project-id>/<run-id>` instead, respecting
+`PRIVATEER_HOME`. The task's output path shows the actual location. This does **not**
+change the working directory for commands or grant permission to edit protected files.
+
 ### Verifying what you're about to run
 
 Privateer is a coding agent — it runs shell commands and edits files, so "should I trust

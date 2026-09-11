@@ -10,9 +10,9 @@
 //   - `finish` carries usage + finishReason,
 //   - compaction / auto-retry / agent-end-error mapped through.
 //
-// Field names for the compaction/retry/error events are best-effort against Pi
-// 0.80 and marked TODO(verify) — Phase 1's test (`tests/engine.test.ts`, ported
-// from tree-cli) asserts the mapping against a real event stream and pins them.
+// Pi's turn_end is ONE model response plus tools, not the user's whole run.
+// agent_end can still be followed by retries/compaction. Only agent_settled
+// (Pi 0.84) is terminal; keeping this distinction preserves the app's busy pill.
 
 import {
   addUsage,
@@ -55,7 +55,7 @@ function textOf(result: unknown): string {
   const parts = (result as any)?.content;
   if (Array.isArray(parts)) return parts.map((p: any) => p.text ?? `[${p.type}]`).join("");
   try {
-    return JSON.stringify(result);
+    return JSON.stringify(result) ?? "";
   } catch {
     return String(result);
   }
@@ -70,9 +70,16 @@ function num(v: unknown, fallback = 0): number {
 // each Pi event; feed each through in `session.subscribe`.
 export function createEngineEventAdapter() {
   let sessionTotal: UsageTotals = emptyUsage();
+  let turnTotal: UsageTotals = emptyUsage();
+  let lastMessage: any;
+  let terminalSent = false;
 
   function toEngineEvents(ev: PiSessionEvent): EngineEvent[] {
     switch (ev.type) {
+      case "agent_start":
+        terminalSent = false;
+        return [];
+
       case "message_update": {
         const a = ev.assistantMessageEvent as any;
         if (a?.type === "text_delta") return [{ type: "text", text: a.delta }];
@@ -89,6 +96,16 @@ export function createEngineEventAdapter() {
             input: ev.args,
           },
         ];
+
+      // Pi partial results are snapshots, NOT deltas. Transports bound these;
+      // cloud redaction must see the full text BEFORE any tail truncation.
+      case "tool_execution_update":
+        return [{
+          type: "tool-progress",
+          id: ev.toolCallId as string,
+          name: ev.toolName as string,
+          output: textOf(ev.partialResult),
+        }];
 
       case "tool_execution_end":
         return ev.isError
@@ -113,43 +130,35 @@ export function createEngineEventAdapter() {
         const msg = ev.message as any;
         const turn = normUsage(msg?.usage);
         sessionTotal = addUsage(sessionTotal, turn);
-        const finishReason =
-          (ev.finishReason as string) ?? (msg?.stopReason as string) ?? "stop";
-        const out: EngineEvent[] = [{ type: "usage", usage: sessionTotal, turn }];
-        // A FAILED turn ends here, not by throwing — and this is the only place the
-        // app can learn it failed.
-        //
-        // Pi reports a dead model call as an assistant message with
-        // `stopReason: "error"` and an `errorMessage`; `prompt()` then resolves
-        // NORMALLY, so the desktop's runTurn catch never fires. Our own pi patch
-        // widened that path deliberately (a hard 4xx, and a 429 that outlived the
-        // retry budget, both end the turn instead of re-entering the agent loop),
-        // which is right for the CLI — its TUI reads the assistant message and
-        // prints describeErrorText. The app reads EngineEvents, and this adapter
-        // used to drop `errorMessage` on the floor: the turn arrived as a bare
-        // `finish`, which RemoteDriveContext closes as a green ✓ "done". A signed-in
-        // user whose first turn 401'd or hit their cap saw a tick and no words.
-        //
-        // So say it. Same wording the terminal gets, ahead of the finish so the feed
-        // reads in order, and redacted either way because an unrecognised body goes
-        // out verbatim.
+        turnTotal = addUsage(turnTotal, turn);
+        lastMessage = msg;
+        return [{ type: "usage", usage: sessionTotal, turn: turnTotal }, { type: "step-finish" }];
+      }
+
+      case "agent_settled": {
+        if (terminalSent) return [];
+        terminalSent = true;
+        const msg = lastMessage;
+        lastMessage = undefined;
+        turnTotal = emptyUsage();
+        // Failed model calls often resolve prompt() normally. Delay the error
+        // until retries/overflow recovery are exhausted, but never hide it.
         if (msg?.stopReason === "error") {
           const raw = typeof msg.errorMessage === "string" ? msg.errorMessage : "";
           const described = describeErrorText(raw);
-          out.push({
+          return [{
             type: "error",
             error: described?.message ?? redactText(raw || "The model call failed."),
             ...(described?.hint ? { hint: described.hint } : {}),
             ...(described?.retryable != null ? { retryable: described.retryable } : {}),
-          });
+          }];
         }
-        out.push({ type: "finish", usage: sessionTotal, finishReason });
-        return out;
+        if (msg?.stopReason === "aborted") return [{ type: "aborted" }];
+        return [{ type: "finish", usage: sessionTotal, finishReason: msg?.stopReason ?? "stop" }];
       }
 
-      // Compaction: Pi collapses history to free context. TODO(verify) field
-      // names for before/after token counts against a real compaction event.
       case "compaction_start":
+        return [{ type: "step-finish" }];
       case "compaction_end":
         return [
           {
@@ -173,28 +182,17 @@ export function createEngineEventAdapter() {
           },
         ];
 
-      // Terminal error surfaced at the end of an agent run.
-      //
-      // ⚠️ Pi 0.84's `agent_end` is `{ messages, willRetry }` — there is NO `error`
-      // field, so this branch has been returning [] for every run since the 0.84
-      // refactor. It is kept (harmless, and other Pi versions have carried one)
-      // but it is NOT the error path: a failed model call arrives on `turn_end`
-      // above, which is where the real mapping lives. Do not "restore" error
-      // reporting here and delete it there.
-      case "agent_end": {
-        const err = (ev as any).error;
-        if (!err) return [];
-        return [
-          {
-            type: "error",
-            error: typeof err === "string" ? err : (err.message ?? String(err)),
-            retryable: Boolean((ev as any).retryable),
-          },
-        ];
-      }
+      // agent_end is only a low-level loop boundary. willRetry:false still
+      // permits overflow compaction and queued continuation; never finish here.
+      case "agent_end":
+        return [];
 
       case "abort":
       case "aborted":
+        if (terminalSent) return [];
+        terminalSent = true;
+        lastMessage = undefined;
+        turnTotal = emptyUsage();
         return [{ type: "aborted" }];
 
       default:

@@ -353,6 +353,8 @@ function projectEvent(ev: EngineEvent): Record<string, unknown> {
   switch (ev.type) {
     case "tool-call":
       return { type: "tool-call", id: ev.id, name: ev.name, input: safe(asText(ev.input), 2000) };
+    case "tool-progress":
+      return { type: "tool-progress", id: ev.id, name: ev.name, output: redactSecrets(ev.output).slice(-4000) };
     case "tool-result":
       return { type: "tool-result", id: ev.id, name: ev.name, output: safe(asText(ev.output), 4000) };
     case "tool-error":

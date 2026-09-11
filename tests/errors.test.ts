@@ -5,6 +5,7 @@ import {
   compactProviderError,
   describeError,
   describeErrorText,
+  describeAccountBalanceError,
   isAccountCapCode,
   isHardHttpFailure,
   isThrottleFailure,
@@ -39,6 +40,41 @@ test("account cap (429 + cap code) → surfaces backend message, not retryable",
   assert.match(d.message, /Daily message limit of 25 reached/);
   assert.ok(!d.retryable); // must NOT retry a hard cap
   assert.match(d.hint ?? "", /Privateer account/);
+});
+
+test("account balance failures get a top-up link, including text-only and nested SDK errors", () => {
+  for (const status of [402, 429]) {
+    for (const code of ["INSUFFICIENT_BALANCE", "INSUFFICIENT_FUNDS", "INSUFFICIENT_CREDITS"]) {
+      for (const body of [{ code }, { error: { code, message: "Payment required" } }]) {
+        const d = describeAccountBalanceError(`${status} ${JSON.stringify(body)}`);
+        assert.match(d!.message, /Privateer account.*insufficient balance/);
+        assert.match(d!.hint!, /https:\/\/privateer\.pro\/top-up/);
+        assert.equal(d!.retryable, false);
+      }
+    }
+  }
+  for (const message of ["Insufficient credits. Please top up to continue.", "Insufficient credit balance", "This account is out of credit."]) {
+    assert.ok(describeAccountBalanceError(`429 ${message}`), message);
+  }
+});
+
+test("account balance guidance never guesses from a bare 429, quota, cap, or unrelated status", () => {
+  for (const text of [
+    "429 status code (no body)",
+    "429 Too Many Requests",
+    '429 {"code":"DAILY_CAP_HIT","message":"Daily message limit of 25 reached. Upgrade or top up to continue."}',
+    '429 {"error":{"code":"insufficient_quota","message":"Quota exceeded"}}',
+    '429 {"code":"rate_limited","message":"Insufficient credits? Check your balance."}',
+    '429 {"code":null}',
+    '429 {malformed json',
+    '429 <!doctype html><html>Insufficient balance</html>',
+    "500 upstream reported insufficient balance",
+    "401 Insufficient balance",
+    "402 Payment Required",
+    "",
+  ]) {
+    assert.equal(describeAccountBalanceError(text), null, text);
+  }
 });
 
 test("plain 429 → rate limited, retryable", () => {

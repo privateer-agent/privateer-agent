@@ -202,3 +202,49 @@ test("listeners fire on every change, so the banner never shows a stale flag", (
   assert.equal(fired, 2);
   assert.equal(pendingPackUpdates().length, 0);
 });
+
+test("boot suppresses upstream update checks", async () => {
+  await import("../src/boot.ts");
+  assert.equal(process.env.PI_SKIP_VERSION_CHECK, "1");
+  assert.equal(process.env.PI_BG_DISABLE_UPDATE_CHECK, "1");
+});
+
+test("background tasks update check and notice are suppressed in Privateer", async () => {
+  const { default: bgExt } = await import("pi-background-tasks/extensions/background-tasks.ts");
+  const handlers = new Map<string, any>();
+  const commands = new Map<string, any>();
+  const mockPi = {
+    on: (ev: string, fn: any) => handlers.set(ev, fn),
+    registerCommand: (name: string, def: any) => commands.set(name, def),
+    registerShortcut: () => {},
+    registerTool: () => {},
+    registerMessageRenderer: () => {},
+    events: { on: () => () => {}, emit: () => {} },
+    appendSessionOutput: () => {},
+  };
+  bgExt(mockPi as any);
+
+  // /bg-update provides Privateer distribution update guidance instead of npm install instructions
+  const bgUpdate = commands.get("bg-update");
+  assert.ok(bgUpdate, "bg-update command must be registered");
+  const notes: string[] = [];
+  await bgUpdate.handler("", { ui: { notify: (msg: string) => notes.push(msg) } });
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /privateer update/);
+  assert.ok(!notes[0].includes("npm:pi-background-tasks"), "must not recommend raw npm install");
+
+  // session_start does not schedule update checks or set update segment
+  const sessionStart = handlers.get("session_start");
+  assert.ok(sessionStart, "session_start must be registered");
+  const statuses: Array<{ key: string; text?: string }> = [];
+  const ctx = {
+    cwd: home,
+    ui: { setStatus: (key: string, text?: string) => statuses.push({ key, text }) },
+  };
+  await sessionStart({}, ctx);
+  assert.ok(!statuses.some((s) => s.text?.includes("bg-update") || s.text?.includes("⬆")), "footer must not show update notice");
+
+  const sessionShutdown = handlers.get("session_shutdown");
+  if (sessionShutdown) await sessionShutdown({ reason: "quit" }, ctx);
+});
+

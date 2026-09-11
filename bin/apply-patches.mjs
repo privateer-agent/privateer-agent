@@ -67,13 +67,16 @@ export function resolveDep(from, name, ...rest) {
 }
 
 function resolvePatchRoots(repo, patchFiles) {
-  const roots = new Set();
+  const roots = new Map();
   for (const file of patchFiles) {
     // "@earendil-works+pi-coding-agent+0.80.3.patch" -> "@earendil-works/pi-coding-agent"
     const parts = path.basename(file, ".patch").split("+");
     const name = parts[0].startsWith("@") ? `${parts[0]}/${parts[1]}` : parts[0];
     const root = findDepRoot(repo, name);
-    if (root) roots.add(root);
+    if (root) {
+      if (!roots.has(root)) roots.set(root, []);
+      roots.get(root).push(file);
+    }
   }
   return [...roots];
 }
@@ -112,23 +115,35 @@ export function applyPatchesIfNeeded(repo, nodeBin = process.execPath) {
     if (!pp || !fs.existsSync(pp)) return "skipped";
 
     let did = false;
-    for (const root of roots) {
+    for (const [root, files] of roots) {
       const stampFile = path.join(root, "node_modules", ".privateer-patches.json");
       try {
         if (JSON.parse(fs.readFileSync(stampFile, "utf8")).hash === want) continue; // current
       } catch { /* missing or unreadable stamp — (re)apply */ }
 
-      // --patch-dir points at OUR patches even though cwd is wherever the deps landed.
-      // It MUST be relative: patch-package resolves it against cwd, so an absolute path
-      // is silently mangled into a non-existent one and every patch "fails" to apply.
-      const relPatchDir = path.relative(root, patchDir);
-      const r = spawnSync(nodeBin, [pp, "--error-on-fail", "--patch-dir", relPatchDir], {
-        cwd: root,
-        stdio: ["ignore", "ignore", "pipe"],
-        timeout: 60_000,
-        windowsHide: true,
-      });
-      if (r.status !== 0) return "failed";
+      // Different targets can be hoisted to different roots. Apply only the patches
+      // belonging to this root, or patch-package fails on the absent/wrong copy of
+      // another target. Keep the staging dir on the SAME drive on Windows: --patch-dir
+      // must be relative (an absolute path is mangled by patch-package).
+      let stagedDir;
+      try {
+        let sourceDir = patchDir;
+        if (files.length !== patchFiles.length) {
+          stagedDir = fs.mkdtempSync(path.join(root, "node_modules", ".privateer-patches-"));
+          for (const file of files) fs.copyFileSync(path.join(patchDir, file), path.join(stagedDir, file));
+          sourceDir = stagedDir;
+        }
+        const relPatchDir = path.relative(root, sourceDir);
+        const r = spawnSync(nodeBin, [pp, "--error-on-fail", "--patch-dir", relPatchDir], {
+          cwd: root,
+          stdio: ["ignore", "ignore", "pipe"],
+          timeout: 60_000,
+          windowsHide: true,
+        });
+        if (r.status !== 0) return "failed";
+      } finally {
+        if (stagedDir) fs.rmSync(stagedDir, { recursive: true, force: true });
+      }
       did = true;
 
       // Only stamp after a clean apply, so a partial/failed run retries next launch.

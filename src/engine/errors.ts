@@ -117,6 +117,30 @@ export function isAccountCapCode(code: string | null | undefined): boolean {
   return typeof code === "string" && CAP_CODE.test(code);
 }
 
+/**
+ * Balance guidance for the signed-in Privateer account channel ONLY. A bare 429
+ * is not evidence of an empty balance; neither is a daily cap or provider quota.
+ * The SDK may retain the JSON body (flat or OpenAI-shaped), or just its message.
+ */
+export function describeAccountBalanceError(text: string): DescribedError | null {
+  if (!/^\s*(?:402|429)\b/.test(text) || /<!doctype html|<html[\s>]/i.test(text)) return null;
+  const bodyStart = text.indexOf("{");
+  const facts = bodyStart < 0 ? {} : extract({ responseBody: text.slice(bodyStart) });
+  const code = facts.code;
+  const message = facts.providerMessage ?? text;
+  const balanceCode = /^(?:INSUFFICIENT_(?:BALANCE|FUNDS|CREDITS?)|(?:BALANCE|CREDITS?)_EXHAUSTED)$/i;
+  const balanceText = /\b(?:insufficient (?:credit(?:s| balance)?|balance|funds)|out of credits?|(?:credit balance|balance|credits?) (?:is |are )?exhausted)\b/i;
+  // If a machine code exists, it decides — don't turn a rate limit whose help
+  // text mentions credits into a billing failure.
+  if (code ? !balanceCode.test(code) : !balanceText.test(message)) return null;
+  return {
+    message: "Your Privateer account has insufficient balance.",
+    // Use our known destination, never a URL copied from an untrusted error body.
+    hint: "Top up at https://privateer.pro/top-up, then try again.",
+    retryable: false,
+  };
+}
+
 // ── Oversized / non-API error bodies ─────────────────────────────────────────
 //
 // An inference endpoint does not always answer as an API. Put a WAF, a proxy or a

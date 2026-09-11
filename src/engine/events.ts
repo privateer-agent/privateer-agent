@@ -18,6 +18,8 @@ export type EngineEvent =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
   | { type: "tool-call"; id: string; name: string; input: unknown }
+  // Latest output snapshot; transports bound it, without settling the running card.
+  | { type: "tool-progress"; id: string; name: string; output: string }
   | { type: "tool-result"; id: string; name: string; output: unknown }
   | { type: "tool-error"; id: string; name: string; error: string }
   | { type: "step-finish" }
@@ -42,7 +44,7 @@ export type EngineEvent =
   // engine — the engine has no clock and no view of the turn as a whole.
   //
   // It exists because silence is ambiguous and the app cannot resolve it: a tool
-  // call emits at its start and its end and nothing in between, so a fifteen-minute
+  // call may emit at its start and its end with nothing in between, so a fifteen-minute
   // build, a stalled model socket and a dead agent all look identical from the far
   // side of the relay. This is the frame that says which. `tool`/`toolMs` name what
   // is being waited on when something is.

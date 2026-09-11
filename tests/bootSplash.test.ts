@@ -75,14 +75,14 @@ test("splash: Windows consoles are switched to UTF-8 code page 65001", () => {
   const launchSrc = readFileSync(join(BIN, "privateer-launch.mjs"), "utf8");
   assert.match(
     launchSrc,
-    /chcp.*\[["']65001["']\]/,
+    /chcp\s+65001/,
     "privateer-launch.mjs must set console code page 65001 on Windows",
   );
 
   const splashSrc = readFileSync(SPLASH, "utf8");
   assert.match(
     splashSrc,
-    /chcp.*\[["']65001["']\]/,
+    /chcp\s+65001/,
     "privateer-splash.mjs must set console code page 65001 on Windows",
   );
 });

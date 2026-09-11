@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { configureCompileCache } from "../bin/startup-cache.mjs";
 
 /**
  * Every launcher in bin/ hands a LOCAL PATH to dynamic import(), and on Windows
@@ -25,6 +27,50 @@ import { join, resolve } from "node:path";
  * untouched: only a *path* needs the conversion, and only paths are matched.
  */
 const BIN = resolve(import.meta.dirname, "..", "bin");
+
+test("launcher: code cache uses Privateer's home, not the install or project", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "privateer-cache-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const env: NodeJS.ProcessEnv = {};
+  configureCompileCache(home, env);
+  const expected = join(home, "cache", "node-compile");
+  assert.equal(env.NODE_COMPILE_CACHE, expected);
+  assert.ok(statSync(expected).isDirectory());
+  if (process.platform !== "win32") assert.equal(statSync(expected).mode & 0o077, 0);
+  configureCompileCache(home, env); // repeated launches reuse the directory
+  assert.equal(env.NODE_COMPILE_CACHE, expected);
+});
+
+test("launcher: respects Node cache override and opt-out without creating files", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "privateer-cache-override-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  for (const env of [
+    { NODE_COMPILE_CACHE: join(home, "custom") },
+    { NODE_COMPILE_CACHE: "" },
+    { NODE_DISABLE_COMPILE_CACHE: "1" },
+  ]) {
+    const before = { ...env };
+    configureCompileCache(home, env);
+    assert.deepEqual(env, before);
+  }
+  assert.equal(existsSync(join(home, "cache")), false);
+});
+
+test("launcher: unavailable cache is non-fatal and leaves the child env alone", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "privateer-cache-blocked-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeFileSync(join(home, "cache"), "not a directory");
+  const env: NodeJS.ProcessEnv = {};
+  assert.doesNotThrow(() => configureCompileCache(home, env));
+  assert.deepEqual(env, {});
+});
+
+test("launcher: enables code cache before spawning the TUI", () => {
+  const src = readFileSync(join(BIN, "privateer-launch.mjs"), "utf8");
+  const start = src.indexOf("configureCompileCache(PRIVATEER_HOME)");
+  assert.ok(start > 0);
+  assert.ok(start < src.indexOf("runToCompletion(NODE_BIN, [...nodeArgs, CLI,"));
+});
 
 test("launchers: dynamic imports of local paths go through pathToFileURL", () => {
   const files = readdirSync(BIN).filter((f) => f.endsWith(".mjs"));

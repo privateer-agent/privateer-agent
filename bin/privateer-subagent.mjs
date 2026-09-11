@@ -74,6 +74,8 @@ export function buildChildArgs(originalArgs, repoRoot = REPO, env = process.env)
 
 // Run only when invoked directly (not when imported by the test).
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (!process.env.PI_SKIP_VERSION_CHECK) process.env.PI_SKIP_VERSION_CHECK = "1";
+  if (!process.env.PI_BG_DISABLE_UPDATE_CHECK) process.env.PI_BG_DISABLE_UPDATE_CHECK = "1";
   const args = buildChildArgs(process.argv.slice(2));
   const child = spawn(process.execPath, [piCliPath(), ...args], { stdio: "inherit", env: process.env });
   // Propagate the child's exit faithfully so pi-subagents' parent reads the real

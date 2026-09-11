@@ -30,6 +30,7 @@ import {
   accountPosture,
   fetchAccountCatalog,
 } from "../src/providers/account.ts";
+import { writePiDefaultModel } from "../src/providers/defaultModel.ts";
 
 // A minimal view of Pi's theme (passed to the ui.custom factory) — enough to color
 // text without pulling Pi's internal theme types into an extension.
@@ -353,11 +354,7 @@ export default function privateerModels(pi: {
     argumentHint: "[search]",
     handler: async (args: string, ctx: any): Promise<void> => {
       const ui = ctx?.ui;
-      if (!ui?.custom) {
-        ctx?.ui?.notify?.("The model picker needs an interactive terminal.", "warning");
-        return;
-      }
-      const registry = ctx.modelRegistry;
+      const registry = ctx?.modelRegistry;
       // Refresh so a just-fetched account catalog / models.json edit is reflected.
       try {
         registry?.refresh?.();
@@ -376,13 +373,43 @@ export default function privateerModels(pi: {
 
       let available: ModelLike[] = [];
       try {
-        available = (await registry.getAvailable()) as ModelLike[];
+        available = (await registry?.getAvailable?.()) as ModelLike[] ?? [];
       } catch (e) {
-        ui.notify?.(`Couldn't list models: ${(e as Error).message}`, "error");
+        ui?.notify?.(`Couldn't list models: ${(e as Error).message}`, "error");
         return;
       }
       if (!available.length) {
-        ui.notify?.("No models available. Use /login to add a provider.", "warning");
+        ui?.notify?.("No models available. Use /login to add a provider.", "warning");
+        return;
+      }
+
+      const initialQuery = String(args ?? "").trim();
+      if (!ui?.custom) {
+        if (initialQuery) {
+          const match = available.find(
+            (m) => `${m.provider}/${m.id}` === initialQuery || m.id === initialQuery,
+          );
+          if (match) {
+            try {
+              const ok = await pi.setModel!(match);
+              if (ok === false) {
+                ui?.notify?.(`No API key for ${match.provider}/${match.id}.`, "warning");
+                return;
+              }
+              writePiDefaultModel(`${match.provider}/${match.id}`);
+              const tier = baselineTier(match.provider, match.id);
+              ui?.notify?.(
+                `Model: ${match.provider}/${match.id}  ·  ${TIERS[tier].label}`,
+                "info",
+              );
+              return;
+            } catch (e) {
+              ui?.notify?.(`Couldn't switch model: ${(e as Error).message}`, "error");
+              return;
+            }
+          }
+        }
+        ui?.notify?.("The model picker needs an interactive terminal.", "warning");
         return;
       }
 
@@ -394,7 +421,6 @@ export default function privateerModels(pi: {
         tier: baselineTier(m.provider, m.id),
       }));
 
-      const initialQuery = String(args ?? "").trim();
       const chosen: Row | undefined = await ui.custom(
         (tui: TuiLike, theme: ThemeLike, _kb: unknown, close: (result?: Row) => void) => {
           const picker = new ModelsPicker({
@@ -417,6 +443,7 @@ export default function privateerModels(pi: {
           ui.notify?.(`No API key for ${chosen.provider}/${chosen.id}.`, "warning");
           return;
         }
+        writePiDefaultModel(`${chosen.provider}/${chosen.id}`);
         ui.notify?.(
           `Model: ${chosen.provider}/${chosen.id}  ·  ${TIERS[chosen.tier].label}`,
           "info",

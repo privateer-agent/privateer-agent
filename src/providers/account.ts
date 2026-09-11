@@ -27,6 +27,8 @@ import { join } from "node:path";
 import { globalDir } from "../config/paths.ts";
 import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts";
 import { installGzipRequestBodies } from "../util/gzipRequestBody.ts";
+import { describeAccountBalanceError } from "../engine/errors.ts";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
 import { visionInput } from "./vision.ts";
@@ -650,7 +652,7 @@ export function registerAccountModels(pi: {
 export function makeAccountProvider() {
   return (pi: {
     registerProvider?: (name: string, config: unknown) => void;
-    on?: (event: string, handler: (e: unknown, ctx: unknown) => void) => void;
+    on?: (event: string, handler: (e: unknown, ctx: unknown) => unknown) => void;
   }): void => {
     if (typeof pi.registerProvider !== "function") return;
     // Compress this channel's inference bodies before anything can send one. The edge
@@ -710,14 +712,22 @@ export function makeAccountProvider() {
       }
     });
 
-    // message_end: an assistant turn that ended in an auth error on the account channel
-    // means our session token is dead server-side. Pi has no reactive-401 refresh, so
-    // replace the session now instead of failing every prompt until `expires`.
-    // See recoverAccountSession.
+    // Replace confirmed balance failures before Pi renders/persists the message.
+    // showError alone misses first-attempt failures (the assistant component renders
+    // those directly). This also covers print mode and the remote event adapter.
     pi.on?.("message_end", (e, ctx) => {
-      const msg = (e as { message?: { role?: string; stopReason?: string; errorMessage?: string } })?.message;
+      const msg = (e as { message?: AssistantMessage })?.message;
       if (msg?.role !== "assistant" || msg.stopReason !== "error" || !msg.errorMessage) return;
-      if ((ctx as SeedContext)?.model?.provider !== "privateer") return;
+      if (msg.provider !== "privateer") return;
+      const balance = hasCredentials() ? describeAccountBalanceError(msg.errorMessage) : null;
+      if (balance) {
+        // Normalize the known billing failure to Payment Required, just as
+        // authedFetch does for cap responses. Keeping a hard status first stops
+        // Pi retrying/compacting into the same exhausted account.
+        return { message: { ...msg, errorMessage: `402 ${balance.message}\n${balance.hint}` } };
+      }
+      // An auth failure, unlike a balance failure, needs a fresh child session.
+      // Pi has no reactive-401 refresh; see recoverAccountSession.
       void recoverAccountSession(ctx, msg.errorMessage);
     });
   };

@@ -1,0 +1,110 @@
+diff --git a/node_modules/pi-background-tasks/src/core/registry.ts b/node_modules/pi-background-tasks/src/core/registry.ts
+index cfbf133..c632390 100644
+--- a/node_modules/pi-background-tasks/src/core/registry.ts
++++ b/node_modules/pi-background-tasks/src/core/registry.ts
+@@ -1,11 +1,11 @@
+ import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
+-import { randomBytes } from 'node:crypto';
++import { createHash, randomBytes } from 'node:crypto';
+ import { createWriteStream, existsSync } from 'node:fs';
+ import { mkdir, realpath, writeFile } from 'node:fs/promises';
+-import { join } from 'node:path';
++import { join, resolve } from 'node:path';
+ import type { Api, Model } from '@earendil-works/pi-ai';
+ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+-import { formatSize } from '@earendil-works/pi-coding-agent';
++import { formatSize, getAgentDir } from '@earendil-works/pi-coding-agent';
+ import {
+   boundedRead,
+   deriveTaskNameFromCommand,
+@@ -781,9 +781,29 @@ export class BackgroundTaskRegistry {
+     if (this.runtimeDir) return this.runtimeDir;
+     const sessionId = sanitizePathSegment(ctx.sessionId ?? `session-${String(process.pid)}`);
+     const runId = `${sessionId}-${String(process.pid)}`;
+-    const runtimeDirAbs = join(ctx.cwd, '.pi', 'tasks', runId);
+-    const runtimeDirDisplay = join('.pi', 'tasks', runId);
+-    await mkdir(runtimeDirAbs, { recursive: true });
++    let runtimeDirAbs = join(ctx.cwd, '.pi', 'tasks', runId);
++    let runtimeDirDisplay = join('.pi', 'tasks', runId);
++    try {
++      await mkdir(runtimeDirAbs, { recursive: true });
++    } catch (error) {
++      // Privateer: Git Bash can open in Program Files. Keep the command cwd,
++      // but store task artifacts in the user's agent dir when cwd is protected.
++      const code = (error as NodeJS.ErrnoException).code;
++      if (code !== 'EACCES' && code !== 'EPERM' && code !== 'EROFS') throw error;
++      const projectDir = runtimeDirAbs;
++      const projectId = createHash('sha256').update(resolve(ctx.cwd)).digest('hex').slice(0, 16);
++      runtimeDirAbs = resolve(getAgentDir(), 'tasks', projectId, runId);
++      // Never describe an external artifact as project-relative.
++      runtimeDirDisplay = runtimeDirAbs;
++      try {
++        await mkdir(runtimeDirAbs, { recursive: true, mode: 0o700 });
++      } catch (fallbackError) {
++        throw new Error(
++          `Cannot create background task storage at ${projectDir} (${code}) or ${runtimeDirAbs}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
++          { cause: fallbackError },
++        );
++      }
++    }
+     this.runtimeDir = { abs: runtimeDirAbs, display: runtimeDirDisplay };
+     return this.runtimeDir;
+   }
+diff --git a/node_modules/pi-background-tasks/src/extension.ts b/node_modules/pi-background-tasks/src/extension.ts
+index 3afbd8e..d003a57 100644
+--- a/node_modules/pi-background-tasks/src/extension.ts
++++ b/node_modules/pi-background-tasks/src/extension.ts
+@@ -473,14 +473,15 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+   pi.on('session_start', async (_event, ctx) => {
+     registry.setShuttingDown(false);
+     currentCtx = ctx;
+-    await registry.ensureRuntimeDir(ctx);
++    // Privateer: no project writes just to open a session. Each task-start path
++    // creates its runtime directory on demand, with a per-user fallback.
+     updateUi(ctx);
+     if (statusInterval) clearInterval(statusInterval);
+     statusInterval = setInterval(() => {
+       updateUi();
+     }, STATUS_INTERVAL_MS);
+-    // One-shot, non-blocking: never awaited on the session-start path or the status tick.
+-    void scheduleUpdateCheck(ctx);
++    // Privateer: update check disabled. Privateer manages updates at the distribution
++    // level via `privateer update`; individual tool packs shouldn't check npm or prompt /bg-update.
+   });
+ 
+   pi.on('session_shutdown', async (_event, ctx) => {
+@@ -565,22 +566,11 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+   });
+ 
+   pi.registerCommand('bg-update', {
+-    description: 'Show how to update pi-background-tasks to the latest published version',
++    description: 'Show update guidance for background tasks in Privateer',
+     handler: (_args, ctx) => {
+-      const current = PACKAGE_VERSION ?? 'unknown';
+-      const latest = latestKnownVersion;
+-      const pinnedNpm = latest ? `${PACKAGE_NAME}@${latest}` : `${PACKAGE_NAME}@<version>`;
+       const lines = [
+-        latest
+-          ? `pi-background-tasks ${current} is installed; ${latest} is the latest published version.`
+-          : `pi-background-tasks ${current} is installed.`,
+-        'Update from npm:',
+-        `  pi install npm:${PACKAGE_NAME}@latest`,
+-        `  pi install npm:${pinnedNpm}`,
+-        'Git releases are independent of npm versions; use main only when you want current repository state:',
+-        `  pi install ${GIT_INSTALL_TARGET}@main`,
+-        `For a pinned git release, first verify the tag exists, then use ${GIT_INSTALL_TARGET}@<existing-tag>.`,
+-        'This command only prints update instructions; it does not install or self-update.',
++        'pi-background-tasks is built into Privateer.',
++        'To update Privateer and bundled tools, run: privateer update',
+       ];
+       ctx.ui.notify(lines.join('\n'), 'info');
+       return Promise.resolve();
+@@ -682,7 +672,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+   pi.registerTool<typeof BgRunParams, BgRunDetails>({
+     name: 'bg_run',
+     label: 'Background Run',
+-    description: `Start a named long-running shell command in the background and return immediately with a task ID and output path. By default, completed, failed, or killed terminal state is delivered automatically as <background-task-notification> and starts a follow-up agent turn; do not sleep or poll merely to wait. Output is written to .pi/tasks and model-visible logs are bounded to ${formatSize(MAX_LOG_BYTES)}.`,
++    description: `Start a named long-running shell command in the background and return immediately with a task ID and output path. By default, completed, failed, or killed terminal state is delivered automatically as <background-task-notification> and starts a follow-up agent turn; do not sleep or poll merely to wait. Output is written to .pi/tasks (or per-user agent storage when the project denies writes); use the returned output path. Model-visible logs are bounded to ${formatSize(MAX_LOG_BYTES)}.`,
+     promptSnippet:
+       'Start a named long-running shell command; default terminal notification wakes a follow-up turn, so yield instead of polling',
+     promptGuidelines: [

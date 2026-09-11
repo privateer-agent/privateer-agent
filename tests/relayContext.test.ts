@@ -34,6 +34,18 @@ function relayWithSocket() {
   return { relay, sent };
 }
 
+test("tool progress is redacted BEFORE bounding, and preserves the latest tail", () => {
+  const { relay, sent } = relayWithSocket();
+  relay.sendEvent({ type: "tool-progress", id: "b", name: "bash", output: `TOKEN=${"secret".repeat(1000)}\n${"x".repeat(4200)}\nlatest` });
+  const event = sent[0].event;
+  assert.equal(event.type, "tool-progress");
+  assert.equal(event.id, "b");
+  assert.equal(event.output.length, 4000);
+  assert.ok(event.output.endsWith("latest"));
+  relay.sendEvent({ type: "tool-progress", id: "b", name: "bash", output: `TOKEN=${"secret".repeat(1000)}\nlatest` });
+  assert.ok(!sent[1].event.output.includes("secret"), "a long secret must not lose its identifying prefix before redaction");
+});
+
 test("context frame: omits cwd when the caller doesn't pass one", () => {
   const { relay, sent } = relayWithSocket();
   relay.sendContext({ model: "openrouter:z-ai/glm-5.2", version: "0.3.6" });

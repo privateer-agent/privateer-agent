@@ -38,6 +38,13 @@ process.env[PI_AGENT_DIR_ENV] ??= agentDir();
 // (2) Install the attestation dispatcher (idempotent).
 installAttestationDispatcher();
 
+// (3) Suppress upstream update checks: Pi's CLI update banner and pi-background-tasks'
+// update check / footer notice ("bg ⬆ v... /bg-update"). Privateer manages updates
+// at the distribution level via `privateer update` and its own banner; individual
+// bundled tool packs must not query npm or display `/bg-update`.
+process.env.PI_SKIP_VERSION_CHECK ??= "1";
+process.env.PI_BG_DISABLE_UPDATE_CHECK ??= "1";
+
 // Marker other modules can assert on to catch an accidental "imported Pi before
 // boot" regression during development.
 export const BOOTED = true;

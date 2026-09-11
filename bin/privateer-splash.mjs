@@ -64,10 +64,8 @@ const enabled =
 // than privateer.cmd, the console might still be on OEM CP437.
 if (enabled && process.platform === "win32") {
   try {
-    const chcp = process.env.SystemRoot
-      ? path.join(process.env.SystemRoot, "System32", "chcp.com")
-      : "chcp.com";
-    spawnSync(chcp, ["65001"], { stdio: "ignore", windowsHide: true });
+    const comspec = process.env.ComSpec || "cmd.exe";
+    spawnSync(comspec, ["/d", "/s", "/c", "chcp 65001 >nul"], { stdio: "inherit", windowsHide: true });
   } catch {
     /* best effort */
   }
