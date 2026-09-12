@@ -4,7 +4,9 @@ process.env.PRIVATEER_HOME = "/private/tmp/claude-501/pv-account-test";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { join } from "node:path";
 import {
   makeAccountProvider,
@@ -706,26 +708,221 @@ test("enclave thinking models are registered as steerable, in their verified sha
 });
 
 test("models whose thinking shape we did not verify are left exactly as they were", () => {
-  // Proxied third-party models: an unsupported parameter fails the whole turn, so
-  // being wrong here is worse than thinking too much.
-  for (const id of ["anthropic/claude-sonnet-5", "openai/gpt-5.4-mini", "deepseek/deepseek-v4-flash"]) {
-    assert.equal(thinkingProfile(id), null, `${id} must not be annotated`);
-  }
   // Reasons, but ignored both levers when probed — a dial connected to nothing.
   assert.equal(thinkingProfile("tinfoil/kimi-k2-6"), null);
   // Non-thinking variants.
   assert.equal(thinkingProfile("phala/qwen/qwen-2.5-7b-instruct"), null);
   assert.equal(thinkingProfile("tinfoil/llama3-3-70b"), null);
+
+  // Proxied families that DO reason but whose parameter shape is unprobed from here.
+  // An unsupported parameter fails the whole turn, and proxyChatCompletion is the one
+  // relay path with no retry-without-the-hint fallback — so they stay unannotated.
+  for (const id of ["anthropic/claude-sonnet-5", "qwen/qwen3-next-80b-a3b-thinking", "moonshotai/kimi-k3", "minimax/minimax-m3"]) {
+    assert.equal(thinkingProfile(id), null, `${id} must not be annotated`);
+  }
+
+  // Proxied models that do not reason at all — the catalog is 284 ids wide and
+  // carries roleplay finetunes and code-apply models alongside the frontier ones.
+  for (const id of ["google/gemma-4-31b-it", "openai/gpt-4o", "openai/gpt-3.5-turbo-16k", "sao10k/l3-euryale-70b", "morph/morph-v3-large", "deepseek/deepseek-chat-v3-0324", "x-ai/grok-build-0.1"]) {
+    assert.equal(thinkingProfile(id), null, `${id} must not be annotated`);
+  }
+});
+
+test("the proxied families that burned their budget now carry an OpenRouter effort dial", () => {
+  // These are the exact ids measured spending 58–76% of every output token on
+  // reasoning — uncapped, because `reasoning: false` sends no thinking parameter at
+  // all and reasoning shares maxTokens with the answer.
+  for (const id of [
+    "google/gemini-3.7-flash",
+    "google/gemini-3.8-flash",
+    "z-ai/glm-5.3-flash",
+    "deepseek/deepseek-v4.1-flash",
+    "x-ai/grok-4.6",
+    "openai/gpt-6-astra",
+  ]) {
+    const p = thinkingProfile(id);
+    assert.ok(p, `${id} must be steerable`);
+    assert.equal(p.reasoning, true);
+    // OpenRouter's nested `reasoning` object — the one shape the relay forwards
+    // unchanged, and the one that also caps the thinking budget.
+    assert.equal(p.compat?.thinkingFormat, "openrouter");
+    // "off" is the floor, not silence: `effort: "none"` is not universally accepted
+    // and a rejected enum costs the whole turn.
+    assert.equal(p.thinkingLevelMap?.off, "low");
+    assert.equal(p.thinkingLevelMap?.minimal, "low");
+    // low/medium/high pass through verbatim; xhigh/max stay unmapped so pi-ai's
+    // getSupportedThinkingLevels drops them rather than inventing a level.
+    assert.equal(p.thinkingLevelMap?.high, undefined);
+    assert.equal(p.thinkingLevelMap?.xhigh, undefined);
+  }
+});
+
+test("the thinking profile is a fresh copy per model", () => {
+  // These land on ~82 registered entries; one shared nested object is a single
+  // careless mutation away from retuning the whole catalog.
+  const a = thinkingProfile("google/gemini-3.8-flash")!;
+  const b = thinkingProfile("z-ai/glm-5.3-flash")!;
+  assert.notEqual(a.thinkingLevelMap, b.thinkingLevelMap);
+  assert.notEqual(a.compat, b.compat);
+  a.thinkingLevelMap!.off = "high";
+  assert.equal(thinkingProfile("z-ai/glm-5.3-flash")?.thinkingLevelMap?.off, "low");
+});
+
+// What actually goes on the wire. The profile object is only a promise about the
+// request body, and the body is the thing the relay forwards verbatim to OpenRouter —
+// so pin it end to end rather than trusting the shape. A capture server stands in for
+// the relay: pi-ai builds the request from our registered model entry, we read it back.
+async function captureRequestBody(
+  id: string,
+  // Pi's thinking LEVEL (streamSimple clamps it to the model's supported set and
+  // then maps it through thinkingLevelMap); "off" is what these models sit at today.
+  reasoning: string,
+): Promise<Record<string, any>> {
+  const bodies: any[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ id: "x", choices: [{ delta: { content: "hi" }, finish_reason: null }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ id: "x", choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  try {
+    const cfg: any = accountProviderConfig([id]);
+    const entry = cfg.models.find((m: any) => m.id === id);
+    const model = { ...entry, api: cfg.api, provider: "privateer", baseUrl: `http://127.0.0.1:${(server.address() as any).port}/v1` };
+    const context = { systemPrompt: "s", messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }] };
+    await (await streamSimple(model as any, context as any, { apiKey: "k", maxTokens: entry.maxTokens, reasoning } as any)).result();
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+  return bodies[0] ?? {};
+}
+
+test("a proxied thinking model sends OpenRouter's nested reasoning object", async () => {
+  // "off" is the level these models sit at today (with reasoning:false pi offers no
+  // other), and it is the one that has to stop costing a whole budget: it must send a
+  // real floor, not nothing. Nothing is what produced the 16,384-token think.
+  const off = await captureRequestBody("google/gemini-3.8-flash", "off");
+  assert.deepEqual(off.reasoning, { effort: "low" });
+  // Never both spellings — OpenRouter reads the nested object, and a request carrying
+  // the flat field too is one more thing a provider can reject.
+  assert.equal(off.reasoning_effort, undefined);
+  // The ceiling the effort is a fraction of. Which spelling carries it is pi's
+  // baseUrl-derived choice (compat.maxTokensField), not ours, and the relay honours
+  // either — proxyRequestBounds reads max_completion_tokens first, then max_tokens.
+  assert.equal(off.max_completion_tokens ?? off.max_tokens, 16384);
+
+  // The dial actually moves.
+  const medium = await captureRequestBody("google/gemini-3.8-flash", "medium");
+  assert.deepEqual(medium.reasoning, { effort: "medium" });
+  const high = await captureRequestBody("openai/gpt-6-astra", "high");
+  assert.deepEqual(high.reasoning, { effort: "high" });
+});
+
+test("an unannotated model still sends no thinking parameter at all", async () => {
+  // The safety property: families we have not probed must keep the exact body they
+  // had, because a rejected parameter costs the whole turn and proxyChatCompletion
+  // has no retry-without-the-hint fallback.
+  const body = await captureRequestBody("anthropic/claude-sonnet-5", "off");
+  assert.equal(body.reasoning, undefined);
+  assert.equal(body.reasoning_effort, undefined);
+  assert.equal(body.thinking, undefined);
+  assert.equal(body.chat_template_kwargs, undefined);
+});
+
+test("a published context window reaches the model entry, and survives a relaunch", async () => {
+  // WHY: pi sizes each turn's answer budget as (contextWindow − prompt − 4096) and
+  // clamps max_tokens to it. Registering every model at a flat 128000 therefore
+  // throttled a larger-windowed model — and, before the pi-ai floor patch, collapsed
+  // its answer to a single token — while the model still had room.
+  await withCacheHome(async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      json({
+        models: [
+          { modelId: "google/gemini-3.8-flash", privacy: { tier: "zdr-enforced" }, contextLength: 1048576 },
+          // Upstream has no window for this one — the server says so honestly.
+          { modelId: "acme/no-window", privacy: { tier: "zdr-enforced" }, contextLength: null },
+          // An older server, before the field existed: the key is simply absent.
+          { modelId: "acme/old-server", privacy: { tier: "zdr-enforced" } },
+          // Not credible — a garbled or hostile number must never reach pi's budget
+          // arithmetic, where too small silently strangles every turn.
+          { modelId: "acme/absurd", privacy: { tier: "zdr-enforced" }, contextLength: 12 },
+          { modelId: "acme/hostile", privacy: { tier: "zdr-enforced" }, contextLength: 9e99 },
+        ],
+      })) as typeof fetch;
+    try {
+      const infos = await fetchAccountCatalog();
+      assert.equal(infos.find((i) => i.id === "google/gemini-3.8-flash")?.contextWindow, 1048576);
+      for (const id of ["acme/no-window", "acme/old-server", "acme/absurd", "acme/hostile"]) {
+        assert.equal(infos.find((i) => i.id === id)?.contextWindow, undefined, `${id} must read as unknown`);
+      }
+
+      const entry = (id: string) =>
+        (accountProviderConfig([id]) as any).models.find((m: any) => m.id === id);
+      assert.equal(entry("google/gemini-3.8-flash").contextWindow, 1048576);
+      // Unknown keeps the documented fallback — an older server behaves as it always did.
+      for (const id of ["acme/no-window", "acme/old-server", "acme/absurd", "acme/hostile"]) {
+        assert.equal(entry(id).contextWindow, 128000, `${id} must fall back`);
+      }
+    } finally {
+      globalThis.fetch = real;
+    }
+
+    // THE LAUNCH CASE. Registration is synchronous and runs before any fetch can
+    // resolve, so a window known only to the live catalog would always arrive one
+    // launch too late. Simulate the next launch: fresh module state, no network.
+    const cached = JSON.parse(readFileSync(CACHE_FILE, "utf8"));
+    assert.equal(cached.windows["google/gemini-3.8-flash"], 1048576);
+    assert.equal("acme/no-window" in cached.windows, false, "unknown windows are not persisted as guesses");
+    // v1 readers still find what they expect.
+    assert.deepEqual(cached.ids.slice(0, 2), ["google/gemini-3.8-flash", "acme/no-window"]);
+
+    const fresh = await import(`../src/providers/account.ts?relaunch=${Date.now()}`);
+    assert.equal(fresh.accountContextWindow("google/gemini-3.8-flash"), 1048576);
+    assert.equal(
+      fresh.accountProviderConfig(["google/gemini-3.8-flash"]).models[0].contextWindow,
+      1048576,
+      "the window must be on the entry pi binds at launch, not only after the fetch",
+    );
+  });
+});
+
+test("a v1 cache with no windows still launches, on the fallback", async () => {
+  // The upgrade path: a file written by a build that predates this field.
+  await withCacheHome(async () => {
+    mkdirSync(CACHE_HOME, { recursive: true });
+    writeFileSync(
+      CACHE_FILE,
+      JSON.stringify({ v: 1, fetchedAt: new Date().toISOString(), ids: ["google/gemini-3.8-flash"] }),
+      "utf8",
+    );
+    const fresh = await import(`../src/providers/account.ts?v1cache=${Date.now()}`);
+    assert.equal(fresh.accountContextWindow("google/gemini-3.8-flash"), undefined);
+    assert.equal(fresh.accountProviderConfig(["google/gemini-3.8-flash"]).models[0].contextWindow, 128000);
+    assert.deepEqual(fresh.loadCachedCatalogIds(), ["google/gemini-3.8-flash"]);
+  });
 });
 
 test("the registered model entries carry the profile through to pi", () => {
-  const models: any[] = (accountProviderConfig(["tinfoil/glm-5-2", "anthropic/claude-sonnet-5"]) as any).models;
+  const models: any[] = (accountProviderConfig(["tinfoil/glm-5-2", "google/gemini-3.8-flash", "anthropic/claude-sonnet-5"]) as any).models;
   const glm = models.find((m) => m.id === "tinfoil/glm-5-2");
+  const gemini = models.find((m) => m.id === "google/gemini-3.8-flash");
   const claude = models.find((m) => m.id === "anthropic/claude-sonnet-5");
   // pi gates every thinking branch on this field; false is what pinned the catalog
   // to maximum thinking with an inert toggle.
   assert.equal(glm.reasoning, true);
   assert.equal(glm.compat.thinkingFormat, "qwen-chat-template");
+  // The proxied path reaches the registry too — this is what stops the relay's
+  // models from reasoning until the answer has nowhere left to go.
+  assert.equal(gemini.reasoning, true);
+  assert.equal(gemini.compat.thinkingFormat, "openrouter");
   assert.equal(claude.reasoning, false);
   assert.equal(claude.compat, undefined);
 });

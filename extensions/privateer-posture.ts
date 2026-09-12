@@ -9,6 +9,7 @@
 import { verifyModelPosture, TIERS, type PrivacyTier } from "pi-privacy";
 import { accountPosture } from "../src/providers/account.ts";
 import { type Palette, paletteFor } from "../src/ui/palette.ts";
+import { privacyDisabled } from "../src/config/privacyDisabled.ts";
 
 const DOT: Record<string, string> = { green: "🟢", yellow: "🟡", red: "🔴", neutral: "⚪" };
 
@@ -35,11 +36,39 @@ async function badgeFor(provider: string, modelId: string, p: Palette): Promise<
   return `${DOT[info.posture] ?? "⚪"} ${info.label}`;
 }
 
+export async function updatePostureBadge(ctx: any, provider?: string, modelId?: string): Promise<void> {
+  if (!ctx?.ui?.setStatus) return;
+  if (privacyDisabled()) {
+    ctx.ui.setStatus("privacy", "⚑ privacy off");
+    ctx.ui.setStatus("pi-privacy", undefined);
+    return;
+  }
+  const p = provider ?? ctx?.model?.provider;
+  const m = modelId ?? ctx?.model?.id;
+  if (!p || !m) {
+    ctx.ui.setStatus("privacy", undefined);
+    return;
+  }
+  try {
+    ctx.ui.setStatus("privacy", "⛉ …");
+    const badge = await badgeFor(p, m, paletteFor(ctx?.ui?.theme));
+    ctx.ui.setStatus("privacy", badge);
+  } catch {
+    ctx.ui.setStatus("privacy", undefined);
+  }
+}
+
 export default function privateerPosture(pi: any): void {
   // "latest wins" so rapid model cycling (Ctrl+P) doesn't leave a stale badge.
   let seq = 0;
   const update = async (provider?: string, modelId?: string, ctx?: any) => {
-    if (!provider || !modelId || !ctx?.ui?.setStatus) return;
+    if (!ctx?.ui?.setStatus) return;
+    if (privacyDisabled()) {
+      ctx.ui.setStatus("privacy", "⚑ privacy off");
+      ctx.ui.setStatus("pi-privacy", undefined);
+      return;
+    }
+    if (!provider || !modelId) return;
     const mine = ++seq;
     try {
       ctx.ui.setStatus("privacy", "⛉ …"); // immediate placeholder while attesting

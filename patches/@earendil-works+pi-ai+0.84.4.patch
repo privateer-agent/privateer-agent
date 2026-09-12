@@ -1,0 +1,46 @@
+diff --git a/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js b/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
+index 216a45f..a1e3214 100644
+--- a/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
++++ b/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
+@@ -1,11 +1,38 @@
+ import { estimateContextTokens } from "../utils/estimate.js";
+ const CONTEXT_SAFETY_TOKENS = 4096;
+-const MIN_MAX_TOKENS = 1;
++// Privateer patch: floor the answer budget at a usable answer, not at one token.
++//
++// Stock pi floored this at 1, so the moment the (chars/4) context estimate reached
++// the declared window every turn asked the provider for ONE token: the whole prompt
++// still sent, still billed, one token back with finish_reason "length" — which the
++// TUI renders as "Response was truncated before completion." Compaction gets one
++// attempt, and when the estimate is still over afterwards the session stays there,
++// burning a full-price prompt per turn and producing nothing. Privateer reaches it
++// early because every account model is registered with a flat contextWindow of
++// 128000 (src/providers/account.ts seedModel) — /api/models publishes no per-model
++// window — so a larger-windowed model hits this ceiling with room to spare.
++//
++// The floor only raises `available`; the Math.min still honours a deliberately small
++// ask (a summariser, a title), and it is smaller than the CONTEXT_SAFETY_TOKENS
++// already subtracted above, so a floored request was inside that margin anyway. When
++// `available` is genuinely negative the context really does not fit and the provider
++// says so — a context-length error, which pi routes to compaction via
++// isContextOverflow. That is the designed recovery, and strictly better than a
++// silent one-token stub that costs the same.
++//
++// The floor is MIN_ANSWER_TOKENS, this module's OWN constant — declared below at its
++// original site, deliberately not redeclared here (a second top-level `const` of that
++// name is a SyntaxError that takes the whole app down). Reading it from below is safe:
++// clampMaxTokensToContext is only ever called at request time, long after module
++// evaluation, so the temporal dead zone has closed. Same value, same meaning, and it
++// stays in sync if upstream retunes it.
++//
++// Mirrors src/engine/contextBudget.ts, which is where this is specified and tested.
+ export function clampMaxTokensToContext(model, context, maxTokens) {
+     if (model.contextWindow <= 0)
+-        return Math.max(MIN_MAX_TOKENS, maxTokens);
++        return Math.max(1, maxTokens);
+     const available = model.contextWindow - estimateContextTokens(context).tokens - CONTEXT_SAFETY_TOKENS;
+-    return Math.min(maxTokens, Math.max(MIN_MAX_TOKENS, available));
++    return Math.min(maxTokens, Math.max(MIN_ANSWER_TOKENS, available));
+ }
+ export function buildBaseOptions(model, context, options, apiKey) {
+     const samplingParams = model.samplingParams || options?.samplingParams

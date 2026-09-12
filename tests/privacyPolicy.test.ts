@@ -31,6 +31,7 @@ import { privacyExtension } from "../src/config/privacyPolicy.ts";
 import { buildMoat, type ExtensionFactory } from "../src/config/moat.ts";
 import { setNoQuarter } from "../src/permissions/noQuarter.ts";
 import { addPiiAllow, removePiiAllow } from "../src/config/piiAllow.ts";
+import { privacyDisabled, setPrivacyDisabled } from "../src/config/privacyDisabled.ts";
 import type { GateController } from "../src/ext/permissionGate.ts";
 
 rmSync(process.env.PRIVATEER_HOME!, { recursive: true, force: true });
@@ -55,6 +56,9 @@ interface Session {
   badges: string[];
   selectModel: (provider: string, id: string) => Promise<void>;
   request: (payload: unknown) => Promise<any>;
+  toolCall: (name: string, input: any) => Promise<any>;
+  toolResult: (name: string, input: any, content: any) => Promise<any>;
+  runCommand: (name: string, args: string) => Promise<any>;
 }
 
 // Apply extension factories to a fake Pi, capture what registers for the events this suite
@@ -64,6 +68,9 @@ interface Session {
 function session(factories: ExtensionFactory[]): Session {
   const onRequest: ((event: any, ctx: any) => Promise<any>)[] = [];
   const onModelSelect: ((event: any, ctx: any) => any)[] = [];
+  const onToolCall: ((event: any, ctx: any) => Promise<any>)[] = [];
+  const onToolResult: ((event: any, ctx: any) => Promise<any>)[] = [];
+  const commands = new Map<string, any>();
   const selects: string[] = [];
   const notices: string[] = [];
   const badges: string[] = [];
@@ -71,9 +78,11 @@ function session(factories: ExtensionFactory[]): Session {
     on: (event: string, fn: any) => {
       if (event === "before_provider_request") onRequest.push(fn);
       if (event === "model_select") onModelSelect.push(fn);
+      if (event === "tool_call") onToolCall.push(fn);
+      if (event === "tool_result") onToolResult.push(fn);
     },
     registerProvider: () => {},
-    registerCommand: () => {},
+    registerCommand: (name: string, spec: any) => commands.set(name, spec),
     registerTool: () => {},
     setModel: () => true,
     getModel: () => undefined,
@@ -101,7 +110,10 @@ function session(factories: ExtensionFactory[]): Session {
       // The posture badge's first sink. `pi-privacy` is pi-privacy's own badge key; the
       // filter keeps another extension's status line out of the assertion.
       setStatus: (key: string, value: string) => {
-        if (key === "pi-privacy" && value) badges.push(value);
+        if ((key === "pi-privacy" || key === "privacy" || key === "posture") && value) badges.push(value);
+      },
+      setWidget: (key: string, values: string[]) => {
+        if ((key === "pi-privacy" || key === "privacy" || key === "posture") && values?.[0]) badges.push(values[0]);
       },
     },
   };
@@ -123,6 +135,27 @@ function session(factories: ExtensionFactory[]): Session {
       let current = payload;
       for (const h of onRequest) current = (await h({ payload: current }, ctx)) ?? current;
       return current;
+    },
+    toolCall: async (name: string, input: any) => {
+      let result;
+      for (const h of onToolCall) {
+        const res = await h({ name, input }, ctx);
+        if (res !== undefined) result = res;
+      }
+      return result;
+    },
+    toolResult: async (name: string, input: any, content: any) => {
+      let current = content;
+      for (const h of onToolResult) {
+        const res = await h({ name, input, content: current }, ctx);
+        if (res?.content !== undefined) current = res.content;
+      }
+      return current;
+    },
+    runCommand: async (name: string, args: string) => {
+      const cmd = commands.get(name);
+      assert.ok(cmd, `command "${name}" was not registered`);
+      return cmd.handler(args, ctx);
     },
   };
 }
@@ -290,3 +323,93 @@ test("with the moat up, the PII gate still asks", async () => {
   assert.equal(s.selects.length, 1, "an attended session must still be asked");
   assert.match(s.selects[0], /detected/, `unexpected prompt: ${s.selects[0]}`);
 });
+
+// ── /privacy off / on / status and full disablement ──────────────────────────
+
+test("/privacy off completely disables pi-privacy and /privacy on restores it", async () => {
+  setPrivacyDisabled(false);
+  setNoQuarter(false);
+
+  const s = session([privateerPrivacy]);
+
+  // Initially enabled: PII request prompts
+  await s.request(payloadWithPii());
+  assert.equal(s.selects.length, 1, "attended session should prompt when enabled");
+
+  // Run /privacy off
+  await s.runCommand("privacy", "off");
+  assert.equal(privacyDisabled(), true);
+  assert.ok(s.notices.some((n) => n.includes("completely OFF")));
+  assert.ok(s.badges.includes("⚑ privacy off"), "badge should update to reflect privacy off");
+
+  // With privacy off, outbound PII passes with NO prompt and NO redaction
+  s.selects.length = 0;
+  const rawPayload = {
+    messages: [{ role: "user", content: `connect to 198.51.100.42 and email ${EMAIL}` }],
+  };
+  const out = await s.request(rawPayload);
+  assert.equal(s.selects.length, 0, "no prompt when privacy is off");
+  assert.ok(payloadText(out).includes("198.51.100.42"), "IP address untouched");
+  assert.ok(payloadText(out).includes(EMAIL), "email untouched");
+
+  // Tool result with credentials passes untouched
+  const sensitiveResult = [{ type: "text", text: "Bearer ghp_deadbeefdeadbeefdeadbeefdeadbeefdead" }];
+  const toolOut = await s.toolResult("fetch", {}, sensitiveResult);
+  assert.deepEqual(toolOut, sensitiveResult, "tool results not redacted when privacy is off");
+
+  // Check /privacy status
+  await s.runCommand("privacy", "status");
+  assert.ok(s.notices.some((n) => n.includes("pi-privacy status: OFF")));
+
+  // Run /privacy on to restore protections
+  await s.runCommand("privacy", "on");
+  assert.equal(privacyDisabled(), false);
+  assert.ok(s.notices.some((n) => n.includes("pi-privacy is ON")));
+
+  // Next PII request with fresh PII exceeding earlier baseline prompts again
+  s.selects.length = 0;
+  const newPiiPayload = {
+    messages: [{ role: "user", content: "mail bob@acme-corp.io and carol@acme-corp.io at 198.51.100.42" }],
+  };
+  await s.request(newPiiPayload);
+  assert.equal(s.selects.length, 1, "PII prompt should reappear when privacy is on");
+});
+
+test("/pi-privacy alias behaves identically to /privacy", async () => {
+  setPrivacyDisabled(false);
+  try {
+    const s = session([privateerPrivacy]);
+    await s.runCommand("pi-privacy", "off");
+    assert.equal(privacyDisabled(), true);
+    await s.runCommand("pi-privacy", "status");
+    assert.ok(s.notices.some((n) => n.includes("pi-privacy status: OFF")));
+    await s.runCommand("pi-privacy", "on");
+    assert.equal(privacyDisabled(), false);
+  } finally {
+    setPrivacyDisabled(false);
+  }
+});
+
+test("PRIVATEER_PRIVACY_OFF env var disables privacy across both factory and discovered routes", async () => {
+  process.env.PRIVATEER_PRIVACY_OFF = "1";
+  try {
+    assert.equal(privacyDisabled(), true);
+
+    for (const [route, factories] of [
+      ["discovered extension", async () => [privateerPrivacy]],
+      ["moat-built session", moatFactories],
+    ] as [string, () => Promise<ExtensionFactory[]>][]) {
+      const s = session(await factories());
+      const payload = { messages: [{ role: "user", content: `call 192.0.2.1 and email ${EMAIL}` }] };
+      const out = await s.request(payload);
+      assert.equal(s.selects.length, 0, `${route}: must not prompt when PRIVATEER_PRIVACY_OFF=1`);
+      assert.ok(payloadText(out).includes("192.0.2.1"), `${route}: IP address preserved`);
+      assert.ok(payloadText(out).includes(EMAIL), `${route}: email preserved`);
+    }
+  } finally {
+    delete process.env.PRIVATEER_PRIVACY_OFF;
+    delete process.env.PI_PRIVACY_OFF;
+    setPrivacyDisabled(false);
+  }
+});
+

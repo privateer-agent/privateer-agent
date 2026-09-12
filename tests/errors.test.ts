@@ -8,6 +8,7 @@ import {
   describeAccountBalanceError,
   isAccountCapCode,
   isHardHttpFailure,
+  isIdleTimeoutError,
   isThrottleFailure,
   retryAfterMs,
   retryDelayMs,
@@ -102,6 +103,48 @@ test("localhost refused → 'nothing is listening', not retryable", () => {
 test("data-policy / no-endpoints text → actionable OpenRouter message", () => {
   const d = describeError({ statusCode: 404, responseBody: JSON.stringify({ error: { message: "No endpoints found matching your data policy" } }) });
   assert.match(d.message, /data-policy settings/i);
+});
+
+test("413 payload too large → actionable message, not retryable", () => {
+  const d = describeError({ statusCode: 413, responseBody: JSON.stringify({ error: { code: "PAYLOAD_TOO_LARGE" } }) });
+  assert.match(d.message, /Request payload too large/i);
+  assert.match(d.hint!, /conversation history or attached files/i);
+  assert.ok(!d.retryable);
+});
+
+// ── Idle timeouts: the stalled stream ────────────────────────────────────────
+//
+// The incident: a turn went quiet mid-stream. undici's bodyTimeout fired at 5 min
+// and threw BodyTimeoutError, whose message — "Body Timeout Error" — carries no HTTP
+// status. describeErrorText passed it through raw, and pi's retry regex matched the
+// word "timeout", so the turn was silently re-sent across the whole budget: roughly
+// 15 minutes of apparent hang before the user was shown two useless words. These pin
+// exact recognition and the terminal treatment.
+
+test("isIdleTimeoutError recognises undici's body/headers timeout exactly", () => {
+  assert.ok(isIdleTimeoutError("Body Timeout Error"));
+  assert.ok(isIdleTimeoutError("Headers Timeout Error"));
+  assert.ok(isIdleTimeoutError("UND_ERR_BODY_TIMEOUT"));
+  assert.ok(isIdleTimeoutError("UND_ERR_HEADERS_TIMEOUT"));
+  assert.ok(!isIdleTimeoutError("fetch failed"));
+  assert.ok(!isIdleTimeoutError("429 status code (no body)"));
+  assert.ok(!isIdleTimeoutError(undefined));
+  // A provider merely *mentioning* a timeout is not a transport stall.
+  assert.ok(!isIdleTimeoutError("request timed out at the provider"));
+});
+
+test("a stalled stream → 'connection went idle', not retryable", () => {
+  const d = describeError({ code: "UND_ERR_BODY_TIMEOUT", message: "Body Timeout Error" });
+  assert.match(d.message, /connection went idle/i);
+  assert.match(d.hint!, /idle-timeout window/i);
+  assert.ok(!d.retryable);
+});
+
+test("describeErrorText describes the idle timeout even without a status", () => {
+  const d = describeErrorText("Body Timeout Error");
+  assert.match(d!.message, /connection went idle/i);
+  assert.match(d!.hint!, /idle-timeout window/i);
+  assert.ok(!d!.retryable);
 });
 
 // ── Error bodies that aren't API responses ───────────────────────────────────
@@ -219,6 +262,8 @@ test("an error we only have the text of still gets a useful description", () => 
 
   assert.match(describeErrorText("401 Unauthorized")!.hint!, /\/login/);
   assert.match(describeErrorText("404 no such model")!.hint!, /\/model/);
+  assert.match(describeErrorText("413 Payload Too Large")!.message, /Request payload too large/);
+  assert.match(describeErrorText("413 Payload Too Large")!.hint!, /\/new/);
   assert.match(describeErrorText("503 upstream unavailable")!.hint!, /transient/i);
 
   // No leading status → nothing to add; the caller prints the original.

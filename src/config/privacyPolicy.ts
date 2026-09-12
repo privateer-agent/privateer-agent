@@ -36,6 +36,8 @@ import { cliPalette, detectScheme } from "../ui/palette.ts";
 import { accountPosture, privateerChannel } from "../providers/account.ts";
 import { hasCredentials } from "../auth/privateer.ts";
 import { writePiDefaultModel } from "../providers/defaultModel.ts";
+import { privacyDisabled, setPrivacyDisabled } from "./privacyDisabled.ts";
+import { updatePostureBadge } from "../../extensions/privateer-posture.ts";
 
 // Color-coat pi-privacy's auto-redact notice as the moat acting on your behalf: the red
 // no-quarter flag (same glyph and color as the no-quarter banner in chat.ts and the gate
@@ -67,6 +69,7 @@ export function sharedPrivacyOptions() {
   const ambient = loadConfig();
   return {
     ...ambient,
+    disabled: privacyDisabled,
     // The account channel's real posture. pi-privacy ships a `privateer` provider, but it
     // is the PUBLIC developer-key channel (sk-priv-…, server-proxied and unverifiable
     // end-to-end), so from the package alone every privateer/* model floors to
@@ -131,69 +134,161 @@ export function sharedPrivacyOptions() {
 // Registered from HERE rather than from the extension file, for the reason this module
 // exists at all: the factory-built sessions and the discovered extension must not drift.
 function registerPrivacyCommand(pi: any): void {
-  pi.registerCommand?.("privacy", {
-    description: "Values the PII gate must not treat as personal data: /privacy [allow <value> | unallow <value>]",
-    handler: (args: string, ctx: any) => {
-      const raw = String(args ?? "").trim();
-      const [verb, ...rest] = raw.split(/\s+/);
-      const value = rest.join(" ").trim();
-      const notify = (msg: string, level: "info" | "warning" = "info") => ctx?.ui?.notify?.(msg, level);
+  const handler = async (args: string, ctx: any) => {
+    const raw = String(args ?? "").trim();
+    const [verb, ...rest] = raw.split(/\s+/);
+    const value = rest.join(" ").trim();
+    const notify = (msg: string, level: "info" | "warning" = "info") => ctx?.ui?.notify?.(msg, level);
 
-      if (verb === "allow" || verb === "unallow") {
-        if (!value) return notify(`usage: /privacy ${verb} <value>`, "warning");
-        const r = verb === "allow" ? addPiiAllow(value) : removePiiAllow(value);
-        return notify(r.message, r.ok ? "info" : "warning");
-      }
-      if (verb) return notify(`unknown option "${verb}" — usage: /privacy [allow <value> | unallow <value>]`, "warning");
+    if (verb === "off" || verb === "disable") {
+      setPrivacyDisabled(true);
+      await updatePostureBadge(ctx);
+      return notify(
+        "⚑ pi-privacy is completely OFF for this session. Outbound requests will not be scanned or gated for PII, " +
+          "and tool exfiltration, result, and downgrade guards are disabled. Run /privacy on to restore.",
+        "warning",
+      );
+    }
 
+    if (verb === "on" || verb === "enable" || verb === "restore") {
+      setPrivacyDisabled(false);
+      await updatePostureBadge(ctx);
+      return notify(
+        "pi-privacy is ON for this session. PII scanning, tool exfiltration guards, and privacy checks restored.",
+        "info",
+      );
+    }
+
+    if (verb === "status") {
+      const state = privacyDisabled() ? "OFF (disabled for this session)" : "ON (active)";
       const mine = piiAllowEntries();
-      notify(
+      return notify(
         [
+          `pi-privacy status: ${state}`,
           mine.length ? `PII allowlist (~/.privateer/config.json):\n  ${mine.join("\n  ")}` : "PII allowlist: empty",
-          "Reserved shapes (example.com, loopback, noreply@…) are allowed by default and not listed here.",
-          "Add one with /privacy allow <value> — an address (me@acme.com), a domain (@acme.com),",
-          "an IPv4 block (10.0.0.0/8), or any exact/globbed value.",
+          "Reserved shapes (example.com, loopback, noreply@…) are allowed by default.",
+          "Commands: /privacy off | /privacy on | /privacy status | /privacy allow <value> | /privacy unallow <value>",
         ].join("\n"),
         "info",
       );
+    }
+
+    if (verb === "allow" || verb === "unallow") {
+      if (!value) return notify(`usage: /privacy ${verb} <value>`, "warning");
+      const r = verb === "allow" ? addPiiAllow(value) : removePiiAllow(value);
+      return notify(r.message, r.ok ? "info" : "warning");
+    }
+
+    if (verb && verb !== "help") {
+      return notify(`unknown option "${verb}" — usage: /privacy [off | on | status | allow <value> | unallow <value>]`, "warning");
+    }
+
+    const state = privacyDisabled() ? "OFF (disabled for this session)" : "ON (active)";
+    const mine = piiAllowEntries();
+    notify(
+      [
+        `pi-privacy status: ${state}`,
+        mine.length ? `PII allowlist (~/.privateer/config.json):\n  ${mine.join("\n  ")}` : "PII allowlist: empty",
+        "Reserved shapes (example.com, loopback, noreply@…) are allowed by default and not listed here.",
+        "Commands:",
+        "  /privacy off              — turn off pi-privacy completely for this session",
+        "  /privacy on               — restore pi-privacy protections",
+        "  /privacy status           — show current status and allowlist",
+        "  /privacy allow <value>    — add value to PII allowlist",
+        "  /privacy unallow <value>  — remove value from PII allowlist",
+      ].join("\n"),
+      "info",
+    );
+  };
+
+  const spec = {
+    description: "Manage privacy protections: /privacy [off | on | status | allow <value> | unallow <value>]",
+    handler,
+    getArgumentCompletions: (prefix: string) => {
+      const p = prefix.trim().toLowerCase();
+      const verbs = ["off", "on", "status", "allow", "unallow"];
+      return verbs.filter((v) => v.startsWith(p)).map((v) => ({ value: v, label: v }));
+    },
+  };
+
+  pi.registerCommand?.("privacy", spec);
+  pi.registerCommand?.("pi-privacy", {
+    ...spec,
+    description: "Alias for /privacy: /pi-privacy [off | on | status | allow <value> | unallow <value>]",
+  });
+}
+
+/**
+ * Intercept pi-privacy's event registrations and commands so that when pi-privacy is completely
+ * disabled via `/privacy off` (or `PRIVATEER_PRIVACY_OFF=1` / `PI_PRIVACY_OFF=1`),
+ * all gating, prompt, and redaction hooks are cleanly bypassed.
+ */
+function gatingPrivacyPi(pi: any): any {
+  const on = (event: string, handler: any) => {
+    if (typeof pi?.on !== "function") return;
+    if (typeof handler !== "function") return pi.on(event, handler);
+
+    if (
+      event === "before_provider_request" ||
+      event === "tool_call" ||
+      event === "user_bash" ||
+      event === "tool_result" ||
+      event === "model_select"
+    ) {
+      return pi.on(event, async (ev: any, ctx: any) => {
+        if (privacyDisabled()) return undefined;
+        return handler(ev, ctx);
+      });
+    }
+
+    return pi.on(event, handler);
+  };
+
+  const registerCommand = (name: string, spec: any) => {
+    if (typeof pi?.registerCommand !== "function") return;
+    if (name === "pii" && spec && typeof spec.handler === "function") {
+      const orig = spec.handler;
+      const wrappedHandler = async (args: string, ctx: any) => {
+        const raw = String(args ?? "").trim().toLowerCase();
+        const [verb] = raw.split(/\s+/);
+        if (verb === "off" || verb === "disable") {
+          setPrivacyDisabled(true);
+          await updatePostureBadge(ctx);
+        } else if (verb === "on" || verb === "enable" || verb === "restore") {
+          setPrivacyDisabled(false);
+          await updatePostureBadge(ctx);
+        }
+        return orig(args, ctx);
+      };
+      return pi.registerCommand(name, { ...spec, handler: wrappedHandler });
+    }
+    return pi.registerCommand(name, spec);
+  };
+
+  return new Proxy(pi, {
+    get(target, prop, receiver) {
+      if (prop === "on") return on;
+      if (prop === "registerCommand") return registerCommand;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
     },
   });
 }
 
 /**
  * The privacy half of the moat as ONE factory: pi-privacy configured the Privateer way,
- * plus the `/privacy` command that maintains its allowlist. Both routes into pi-privacy
+ * plus the `/privacy` command that maintains its allowlist and toggles. Both routes into pi-privacy
  * (src/config/moat.ts and extensions/privateer-privacy.ts) use this, so neither can end
  * up with the gate but not its escape hatch.
  */
 export function privacyExtension() {
   const privacy = makePiPrivacyExtension(sharedPrivacyOptions());
   return function privateerPrivacyCore(pi: any): void {
-    privacy(persistingModelPicks(pi));
+    privacy(gatingPrivacyPi(persistingModelPicks(pi)));
     registerPrivacyCommand(pi);
   };
 }
 
-/**
- * pi-privacy's `/models` picker switched the live session and stopped there, so the
- * pick lasted exactly as long as the terminal and the next one launched on whatever
- * settings.json still said. Pi persists a switch only for a caller that passes
- * `{ persist: true }`, and the extension api it reaches setModel through forwards no
- * options at all (see savedPiDefaultSpec in providers/defaultModel.ts).
- *
- * Pi's own selector splits the two — Enter switches for the session, ctrl+s makes it
- * the default. OUR picker has no second key to press and never advertised a
- * distinction, so a pick made in it means "this is my model": we persist it.
- *
- * Wrapped here rather than fixed inside pi-privacy so the rule sits with the rest of
- * what Privateer configures on that extension, and so it stays scoped to the picker.
- * The brand extension's sign-in switch shares the same api and deliberately does NOT
- * get this — writePiDefaultModel says why an automatic switch must not persist.
- *
- * A Proxy, not a spread: the api object is a plain literal today, but a spread of a
- * class instance would silently drop every method and take pi-privacy down with it.
- * Forwarding leaves that failure mode impossible.
- */
 function persistingModelPicks(pi: any): any {
   if (typeof pi?.setModel !== "function") return pi;
   const setModel = async (model: any) => {

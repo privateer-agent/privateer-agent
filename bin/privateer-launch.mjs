@@ -170,6 +170,26 @@ if (NO_QUARTER) {
   );
 }
 
+// `--no-privacy` / `--privacy-off` — completely disable pi-privacy for this session.
+// Stripped before Pi's cli.js sees it. Exports PRIVATEER_PRIVACY_OFF=1 and PI_PRIVACY_OFF=1;
+// all PII scanning, prompts, and tool exfiltration/result checks are bypassed.
+const NO_PRIVACY = args.some((a) => a === "--no-privacy" || a === "--privacy-off");
+if (NO_PRIVACY) {
+  for (let i = args.length - 1; i >= 0; i--) if (args[i] === "--no-privacy" || args[i] === "--privacy-off") args.splice(i, 1);
+  process.env.PRIVATEER_PRIVACY_OFF = "1";
+  process.env.PI_PRIVACY_OFF = "1";
+  process.stderr.write(
+    [
+      "",
+      "  ⚓ \x1b[1;33mPrivacy off\x1b[0m — pi-privacy DISABLED for this session.",
+      "     PII scanning, tool exfiltration guards, and result credential redaction are OFF.",
+      "     Outbound requests and tool calls will NOT prompt or redact PII / IP addresses.",
+      "     Run /privacy on in-session to restore privacy protections.",
+      "",
+    ].join("\n") + "\n",
+  );
+}
+
 // `--allow-computer-control` — arm GUI control (screenshots, mouse, keyboard) for this
 // session. Stripped before Pi's cli.js sees it, exactly like --no-quarter above.
 //

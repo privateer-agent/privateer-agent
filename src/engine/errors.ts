@@ -37,7 +37,7 @@ const HOST_LABELS: Record<string, string> = {
 // provider's machine code (which comes out of the response body) — these mean the
 // request never got a response at all.
 const NETWORK_ERRNO =
-  /^(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EPIPE|ENETUNREACH|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)$/;
+  /^(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EPIPE|ENETUNREACH|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|UND_ERR_BODY_TIMEOUT|UND_ERR_HEADERS_TIMEOUT)$/;
 
 // Pull structured fields off an unknown error without trusting any one shape.
 //
@@ -241,6 +241,35 @@ export function isHardHttpFailure(text: string | null | undefined): boolean {
   return status >= 400 && status < 500 && !TRANSIENT_CLIENT_STATUS.has(status);
 }
 
+// ── Idle timeouts: a stalled stream, said plainly ────────────────────────────
+//
+// undici guards a connection that has gone quiet with `bodyTimeout` (the gap
+// between response chunks) and `headersTimeout` (the wait for the first byte). Pi
+// wires both from `httpIdleTimeoutMs` (default 5 min, see http-dispatcher.js). When
+// either fires, undici throws BodyTimeoutError / HeadersTimeoutError with an exact,
+// stable message and code — and NO HTTP status.
+//
+// That absence is the whole problem. `describeErrorText` only describes text that
+// opens with a 3-digit status, so the bare string "Body Timeout Error" printed
+// through untouched; and pi's retry regex matches the word "timeout", so the agent
+// silently re-sent the entire turn across its whole retry budget — a single stalled
+// stream became three 5-minute waits before the user saw any message at all. The
+// transport timing out is a fact, not a guess from a body substring, so recognise
+// it exactly (message OR code) and treat it as terminal: retrying re-bills the same
+// request and, on a genuinely stalled provider, will stall again.
+const IDLE_TIMEOUT_CODE = /^UND_ERR_(?:BODY|HEADERS)_TIMEOUT$/;
+const IDLE_TIMEOUT_TEXT = /(?:^|\b)(?:Body|Headers) Timeout Error\b/i;
+
+export function isIdleTimeoutError(text: string | null | undefined): boolean {
+  const s = typeof text === "string" ? text : "";
+  return IDLE_TIMEOUT_TEXT.test(s) || IDLE_TIMEOUT_CODE.test(s.trim());
+}
+
+const IDLE_TIMEOUT_DESCRIPTION: DescribedError = {
+  message: "The provider stopped responding — the connection went idle.",
+  hint: "No data arrived for the whole idle-timeout window, so the turn was cut off. Send it again, or run /model to switch providers — a slow model can be given longer under /settings → HTTP idle timeout.",
+};
+
 function rawMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
@@ -318,6 +347,17 @@ export function describeError(err: unknown): DescribedError {
       hint: "Check the model id — run /model to switch.",
     });
   }
+  if (
+    status === 413 ||
+    facts.code === "PAYLOAD_TOO_LARGE" ||
+    facts.code === "REQUEST_TOO_LARGE" ||
+    /payload too large|request_too_large|request entity too large/i.test(text)
+  ) {
+    return out({
+      message: `Request payload too large${forProvider} (413).`,
+      hint: "The conversation history or attached files exceed the server limit. Start a new session (/new) or remove large attachments.",
+    });
+  }
   if (status === 429) {
     return out({
       message: `Rate limited${forProvider} (429).`,
@@ -331,6 +371,12 @@ export function describeError(err: unknown): DescribedError {
       hint: "Usually transient — retry shortly.",
       retryable: true,
     });
+  }
+  // A stream that stopped producing data. This carries no status, so without this
+  // branch it fell through to the generic "Network error" below, and pi re-sent the
+  // whole turn on the substring "timeout". Say what actually happened, and stop.
+  if (isIdleTimeoutError(text) || isIdleTimeoutError(facts.errno)) {
+    return out(IDLE_TIMEOUT_DESCRIPTION);
   }
   if (
     facts.errno != null ||
@@ -469,7 +515,18 @@ export function retryDelayMs(
 export function describeErrorText(text: string | null | undefined): DescribedError | null {
   const s = typeof text === "string" ? text : "";
   const status = Number(/^\s*(\d{3})\b/.exec(s)?.[1] ?? NaN);
-  if (!Number.isFinite(status)) return null;
+  if (!Number.isFinite(status)) {
+    // No leading status: the one message we can still describe with certainty is a
+    // transport idle timeout, which undici names exactly. Everything else is printed
+    // unchanged, as before.
+    if (isIdleTimeoutError(s)) {
+      return {
+        message: redactText(IDLE_TIMEOUT_DESCRIPTION.message),
+        hint: IDLE_TIMEOUT_DESCRIPTION.hint,
+      };
+    }
+    return null;
+  }
 
   if (status === 429) {
     const stated = retryAfterMs(s);
@@ -491,6 +548,12 @@ export function describeErrorText(text: string | null | undefined): DescribedErr
     return {
       message: redactText(compactProviderError(s)),
       hint: "Check the model id — run /model to switch.",
+    };
+  }
+  if (status === 413 || /413\b|payload too large|request_too_large|request entity too large/i.test(s)) {
+    return {
+      message: redactText(`Request payload too large (413).`),
+      hint: "The conversation history or attached files exceed the server limit. Start a new session (/new) or remove large attachments.",
     };
   }
   if (status >= 500) {

@@ -68,10 +68,10 @@ index f04269f..536e030 100644
  export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
  export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index fd82b71..5e0821c 100644
+index fd82b71..7c10ba9 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -38,6 +38,111 @@ import { createLocalBashOperations } from "./tools/bash.js";
+@@ -38,6 +38,122 @@ import { createLocalBashOperations } from "./tools/bash.js";
  import { createAllToolDefinitions } from "./tools/index.js";
  import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
  import { addUsageToTotals, createUsageTotals } from "./usage-totals.js";
@@ -139,6 +139,17 @@ index fd82b71..5e0821c 100644
 +    const status = Number(m[1]);
 +    return status >= 400 && status < 500 && !PV_TRANSIENT_CLIENT_STATUS.has(status);
 +}
++// Privateer patch: undici's idle-timeout errors. Mirrors isIdleTimeoutError in
++// src/engine/errors.ts. The text is exact and stable — undici throws
++// BodyTimeoutError / HeadersTimeoutError with message "Body/Headers Timeout Error"
++// and code UND_ERR_BODY_TIMEOUT / UND_ERR_HEADERS_TIMEOUT — and it carries NO HTTP
++// status. pi's retry regex therefore reads the word "timeout" and silently re-sends
++// the whole turn across the full budget: three 5-minute stalls before the user sees
++// anything at all. A stalled transport is a fact; a body substring is a guess.
++export function isIdleTimeoutError(text) {
++    const s = typeof text === "string" ? text : "";
++    return /(?:^|\b)(?:Body|Headers) Timeout Error\b/i.test(s) || /^UND_ERR_(?:BODY|HEADERS)_TIMEOUT$/.test(s.trim());
++}
 +// Privateer patch: throttle handling. Mirrors isThrottleFailure / retryAfterMs /
 +// retryDelayMs in src/engine/errors.ts — see the incident note there.
 +export function isThrottleFailure(text) {
@@ -183,7 +194,7 @@ index fd82b71..5e0821c 100644
  /**
   * Parse a skill block from message text.
   * Returns null if the text doesn't contain a skill block.
-@@ -102,6 +207,8 @@ export class AgentSession {
+@@ -102,6 +218,8 @@ export class AgentSession {
      // Retry state
      _retryAbortController = undefined;
      _retryAttempt = 0;
@@ -192,7 +203,7 @@ index fd82b71..5e0821c 100644
      // Bash execution state
      _bashAbortControllers = new Set();
      _pendingBashMessages = [];
-@@ -186,6 +293,14 @@ export class AgentSession {
+@@ -186,6 +304,14 @@ export class AgentSession {
          }
          const isOAuth = this._modelRuntime.isUsingOAuth(model.provider);
          if (isOAuth) {
@@ -207,7 +218,7 @@ index fd82b71..5e0821c 100644
              throw new Error(`Authentication failed for "${model.provider}". ` +
                  `Credentials may have expired or network is unavailable. ` +
                  `Run '/login ${model.provider}' to re-authenticate.`);
-@@ -380,6 +495,16 @@ export class AgentSession {
+@@ -380,6 +506,16 @@ export class AgentSession {
                  }
              }
          }
@@ -224,7 +235,7 @@ index fd82b71..5e0821c 100644
          // Emit to extensions first
          await this._emitExtensionEvent(event);
          // Notify all listeners
-@@ -801,6 +926,33 @@ export class AgentSession {
+@@ -801,6 +937,33 @@ export class AgentSession {
                  finalError: msg.errorMessage,
              });
              this._retryAttempt = 0;
@@ -258,7 +269,7 @@ index fd82b71..5e0821c 100644
          }
          if (await this._checkCompaction(msg)) {
              return true;
-@@ -882,6 +1034,14 @@ export class AgentSession {
+@@ -882,6 +1045,14 @@ export class AgentSession {
              if (!hasConfiguredAuth) {
                  const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
                  if (isOAuth) {
@@ -273,7 +284,7 @@ index fd82b71..5e0821c 100644
                      throw new Error(`Authentication failed for "${this.model.provider}". ` +
                          `Credentials may have expired or network is unavailable. ` +
                          `Run '/login ${this.model.provider}' to re-authenticate.`);
-@@ -891,7 +1051,13 @@ export class AgentSession {
+@@ -891,7 +1062,13 @@ export class AgentSession {
              // Check if we need to compact before sending (catches aborted responses).
              // The user's new prompt is sent below, so do not call agent.continue() here.
              const lastAssistant = this._findLastAssistantMessage();
@@ -288,7 +299,7 @@ index fd82b71..5e0821c 100644
                  await this._checkCompaction(lastAssistant, false);
              }
              // Build messages array (custom message if any, then user message)
-@@ -2242,6 +2408,27 @@ export class AgentSession {
+@@ -2242,6 +2419,34 @@ export class AgentSession {
          // Context overflow is handled by compaction, not retry.
          if (isContextOverflow(message, this.model?.contextWindow ?? 0))
              return false;
@@ -313,10 +324,17 @@ index fd82b71..5e0821c 100644
 +        if (this.model?.provider === "privateer" &&
 +            /"code"\s*:\s*"[A-Z0-9_]*(?:CAP|QUOTA|LIMIT_REACHED|INSUFFICIENT|TOP_?UP)[A-Z0-9_]*"|limit of [^.]*reached|upgrade or top ?up|usage limit reached/i.test(message.errorMessage ?? ""))
 +            return false;
++        // Privateer patch: a stalled stream is a transport fact, not a body substring.
++        // undici's "Body/Headers Timeout Error" contains "timeout", so pi spent the
++        // whole retry budget re-sending a turn the transport had already given up on —
++        // a 5-minute stall became three, and only then did the user see a message.
++        // Mirrors isIdleTimeoutError in src/engine/errors.ts.
++        if (isIdleTimeoutError(message.errorMessage))
++            return false;
          return isRetryableAssistantError(message);
      }
      /**
-@@ -2287,7 +2474,11 @@ export class AgentSession {
+@@ -2287,7 +2492,11 @@ export class AgentSession {
              this._retryAttempt--;
              return false;
          }
@@ -375,7 +393,7 @@ index 197bccc..bc9ac3f 100644
  //# sourceMappingURL=auth-guidance.js.map
 \ No newline at end of file
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-index bb022d4..382ff2b 100644
+index bb022d4..207f3ba 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 @@ -18,7 +18,7 @@ import { createJiti } from "jiti/static";
@@ -1657,7 +1675,7 @@ index c33fc39..060a38f 100644
          if (content) {
              text += `\n\n${content}`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index a27754f..61a1fff 100644
+index a27754f..3403ca8 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 @@ -10,7 +10,7 @@ import * as TuiLayouts from "@earendil-works/pi-tui";
@@ -1683,7 +1701,7 @@ index a27754f..61a1fff 100644
      if (!sessionManager.usesDefaultSessionDir()) {
          args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
      }
-@@ -232,6 +237,54 @@ export function createInteractiveTuiReference(getTui) {
+@@ -232,6 +237,64 @@ export function createInteractiveTuiReference(getTui) {
          getPrototypeOf: () => Reflect.getPrototypeOf(getTui()),
      });
  }
@@ -1716,8 +1734,18 @@ index a27754f..61a1fff 100644
 +function pvDescribeErrorText(text) {
 +    const s = typeof text === "string" ? text : "";
 +    const status = Number(/^\s*(\d{3})\b/.exec(s)?.[1] ?? NaN);
-+    if (!Number.isFinite(status))
++    if (!Number.isFinite(status)) {
++        // Privateer patch: no HTTP status, but undici's idle-timeout message is exact
++        // and is the one error a stalled turn produces — printing it raw leaves the
++        // user with two words and no next step. Mirrors isIdleTimeoutError /
++        // describeErrorText in src/engine/errors.ts.
++        if (/(?:^|\b)(?:Body|Headers) Timeout Error\b/i.test(s))
++            return {
++                message: "The provider stopped responding — the connection went idle.",
++                hint: "No data arrived for the whole idle-timeout window, so the turn was cut off. Send it again, or run /model to switch providers (a slow model can be given longer in /settings → HTTP idle timeout).",
++            };
 +        return null;
++    }
 +    if (status === 429) {
 +        const stated = pvRetryAfterMs(s);
 +        return {
@@ -1738,7 +1766,7 @@ index a27754f..61a1fff 100644
  export class InteractiveMode {
      runtimeHost;
      renderer;
-@@ -439,9 +492,15 @@ export class InteractiveMode {
+@@ -439,9 +502,15 @@ export class InteractiveMode {
      }
      getBuiltInCommandConflictDiagnostics(extensionRunner) {
          const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
@@ -1755,7 +1783,7 @@ index a27754f..61a1fff 100644
              .map((command) => ({
              type: "warning",
              message: command.invocationName === command.name
-@@ -815,20 +874,18 @@ export class InteractiveMode {
+@@ -815,20 +884,18 @@ export class InteractiveMode {
                  this.showNewVersionNotification(newRelease);
              }
          });
@@ -1788,7 +1816,7 @@ index a27754f..61a1fff 100644
          // Check tmux keyboard setup asynchronously
          this.checkTmuxKeyboardSetup().then((warning) => {
              if (warning) {
-@@ -2393,7 +2450,17 @@ export class InteractiveMode {
+@@ -2393,7 +2460,17 @@ export class InteractiveMode {
              if (text === "/model" || text.startsWith("/model ")) {
                  const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -1807,7 +1835,7 @@ index a27754f..61a1fff 100644
                  return;
              }
              if (text === "/thinking" || text.startsWith("/thinking ")) {
-@@ -2465,12 +2532,42 @@ export class InteractiveMode {
+@@ -2465,12 +2542,42 @@ export class InteractiveMode {
              if (text === "/login" || text.startsWith("/login ")) {
                  const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -1852,7 +1880,30 @@ index a27754f..61a1fff 100644
                  return;
              }
              if (text === "/new") {
-@@ -3164,7 +3261,7 @@ export class InteractiveMode {
+@@ -2788,9 +2895,19 @@ export class InteractiveMode {
+                     if (entries[0]?.type !== "compaction") {
+                         throw new Error("Completed compaction is missing from the session context");
+                     }
+-                    this.chatContainer.clear();
+-                    // The latest compaction is prepended for model context; append it below at its chronological position.
+-                    this.renderSessionEntries(entries.slice(1));
++                    // Privateer patch: a compaction must never erase what the user can see.
++                    // Stock Pi cleared the whole chat container here and re-rendered only
++                    // buildContextEntries().slice(1) — the MODEL's new context, a summary plus
++                    // the firstKeptEntryId tail. That is the right set of messages to send to
++                    // the model and the wrong set to leave on screen: every prompt, answer and
++                    // tool result above the keep boundary vanished from the transcript the
++                    // instant the summary appeared, so the user watched the thing they typed get
++                    // swallowed and replaced by a summary — worst of all when the compaction was
++                    // triggered by that very prompt. The model context is allowed to shrink; the
++                    // transcript is the record of what actually happened and does not. The kept
++                    // tail is already on screen (it was rendered as it happened), so re-rendering
++                    // it would duplicate it — keep every child and append the summary at its
++                    // chronological position, which is the boundary ("now").
+                     this.addMessageToChat(createCompactionSummaryMessage(event.result.summary, event.result.tokensBefore, new Date().toISOString()));
+                     if (event.result.usage) {
+                         this.addCompactionCostNotice({
+@@ -3164,7 +3281,7 @@ export class InteractiveMode {
          if (this.chatContainer.children.length > 0) {
              this.chatContainer.addChild(new Spacer(1));
          }
@@ -1861,7 +1912,7 @@ index a27754f..61a1fff 100644
      }
      async getUserInput() {
          const queuedInput = this.pendingUserInputs.shift();
-@@ -3504,7 +3601,17 @@ export class InteractiveMode {
+@@ -3504,7 +3621,17 @@ export class InteractiveMode {
      }
      showError(errorMessage) {
          this.chatContainer.addChild(new Spacer(1));

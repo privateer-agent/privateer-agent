@@ -76,6 +76,29 @@ const DEFAULT_MODELS = [
   "openai/gpt-5.6-luna",
 ];
 
+// What to assume when the server publishes no window for a model — an older server,
+// a model the upstream catalog has no `context_length` for, or an admin-added row.
+// 128000 was the flat value the whole catalog used to be registered with, so keeping
+// it here means "no published window" behaves exactly as it always has, and only a
+// model we have a real number for changes.
+const DEFAULT_CONTEXT_WINDOW = 128000;
+
+// A sane band for a published window. The catalog is remote input and the cache is a
+// file on disk, so a garbled or hostile number must not reach pi's budget arithmetic:
+// too small silently strangles every turn, too large defeats compaction by promising
+// room that isn't there. Anything outside the band is treated as unpublished.
+const MIN_PUBLISHED_CONTEXT_WINDOW = 8_192;
+const MAX_PUBLISHED_CONTEXT_WINDOW = 10_000_000;
+
+function validContextWindow(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= MIN_PUBLISHED_CONTEXT_WINDOW &&
+    value <= MAX_PUBLISHED_CONTEXT_WINDOW
+    ? Math.floor(value)
+    : undefined;
+}
+
 function seedModel(id: string) {
   return {
     id,
@@ -88,7 +111,13 @@ function seedModel(id: string) {
     // attaches when the user points at a screenshot. See providers/vision.ts.
     input: visionInput(id),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000,
+    // The model's real window when the server published one, else the fallback.
+    // This is not cosmetic: pi sizes each turn's answer budget as
+    // (contextWindow − estimated prompt − 4096) and clamps max_tokens to it
+    // (pi-ai clampMaxTokensToContext, and see src/engine/contextBudget.ts). A window
+    // that under-states the model's real one therefore throttles the answer — and
+    // used to collapse it to a single token — while the model still has room.
+    contextWindow: accountContextWindow(id) ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: 16384,
   };
 }
@@ -146,25 +175,79 @@ const REASONING_EFFORT_THINKING: ThinkingProfile = {
   thinkingLevelMap: { off: "low", minimal: "low", xhigh: null },
 };
 
-// Only the TEE prefixes are annotated. Those are enclaves we drive directly and can
-// probe. The rest of the catalog is proxied to a third-party gateway whose thinking
-// shape we have NOT verified from here, and an unsupported parameter fails the whole
-// turn — decisively worse than a turn that thinks too much. They keep the old
-// behaviour exactly.
+// The proxied catalog: everything that is NOT a TEE prefix reaches OpenRouter
+// through the account relay, which forwards our body unchanged (treeview
+// services/inferenceService.js proxyChatCompletion — "pass the client body through
+// unchanged except for the fields we own"). OpenRouter normalises reasoning across
+// vendors with a nested `reasoning` object, which is exactly Pi's "openrouter"
+// thinkingFormat, and it derives a token budget from the effort — so the effort dial
+// is also the budget cap.
 //
+// That cap is the point. `reasoning: false` does not mean "does not think": it means
+// Pi sends NO thinking parameter at all, because every thinking branch in pi-ai
+// buildParams is gated on model.reasoning. The model then reasons at the gateway's
+// default — and reasoning shares `maxTokens` with the answer, so an unbounded
+// thinking phase eats the response. Measured across 6,200 real turns: 58–76% of ALL
+// output tokens on these models were reasoning, 158 turns spent ≥90% of the 16,384
+// budget thinking, and 12 produced thousands of reasoning tokens with no answer and
+// no tool call — a five-to-nine-minute spinner ending in "Response was truncated
+// before completion." The annotated TEE models, on the same measurement, sat at 0%.
+//
+// "off" pins to the floor instead of sending `effort: "none"`, for the same reason
+// harmony does above: an unsupported enum fails the whole turn, and this is the one
+// path with no safety net — the app's generateTextStream retries without the hint on
+// a 400 (inferenceService.js), proxyChatCompletion does not. "minimal" is only
+// universal on the GPT-5 family, so it shares the floor. low/medium/high pass
+// through verbatim; xhigh/max stay unmapped so getSupportedThinkingLevels drops them.
+const OPENROUTER_THINKING: ThinkingProfile = {
+  reasoning: true,
+  thinkingLevelMap: { off: "low", minimal: "low" },
+  compat: { thinkingFormat: "openrouter" },
+};
+
+// Only the TEE prefixes are driven directly and can be probed from here. The rest is
+// proxied to a third-party gateway, so an id is annotated only when it is
+// unambiguously a thinking model — an allowlist, never a denylist. The live catalog
+// carries 284 ids including roleplay finetunes (sao10k, thedrummer, gryphe) and
+// code-apply models (morph, relace) that do not reason at all, and being wrong here
+// costs the whole turn rather than just a slow one.
+//
+// Every family below was measured burning its budget in the session logs. Families
+// that reason but were NOT observed here — anthropic/*, qwen/*, moonshotai/*,
+// minimax/* — are deliberately left alone until probed live: Anthropic in particular
+// takes a thinking BUDGET through OpenRouter and constrains temperature alongside it,
+// which is a second parameter we would be guessing at.
+const PROXIED_THINKING_MODEL: RegExp[] = [
+  /^google\/gemini-/i, //           gemini-2.5+ all take an effort; gemma-* deliberately excluded
+  /^z-ai\/glm-/i, //                the whole GLM line reasons, vision variants included
+  /^deepseek\/deepseek-(r1|v3\.[12]|v4)/i, // NOT deepseek-chat*, which is the non-thinking split
+  /^x-ai\/grok-4/i, //              grok-4.x; grok-build-0.1 is unprobed
+  /^openai\/gpt-(5|6|oss)/i, //     gpt-4*/gpt-3.5* do not reason
+];
+
+// Non-thinking variants inside an otherwise-thinking family. `-chat` is OpenAI's
+// non-reasoning split (gpt-5.2-chat); `instruct` is the same idea everywhere.
+const NON_THINKING_VARIANT = /(?:^|[-/])(?:chat|instruct)(?:[-.]|$)/i;
+
+const TEE_MODEL = /^(tinfoil|phala|near)\//;
+
 // Two deliberate omissions inside the TEE set: `*-instruct` ids are the
 // non-thinking variants, and tinfoil/kimi-k2-6 reasons but ignored BOTH levers when
 // probed, so annotating it would hand the user a dial connected to nothing.
-const TEE_MODEL = /^(tinfoil|phala|near)\//;
+function teeThinkingProfile(id: string): ThinkingProfile | null {
+  if (/instruct/i.test(id)) return null;
+  if (/gpt-oss/i.test(id)) return REASONING_EFFORT_THINKING;
+  if (/glm|qwen/i.test(id)) return CHAT_TEMPLATE_THINKING;
+  return null;
+}
+
+function proxiedThinkingProfile(id: string): ThinkingProfile | null {
+  if (NON_THINKING_VARIANT.test(id)) return null;
+  return PROXIED_THINKING_MODEL.some((re) => re.test(id)) ? OPENROUTER_THINKING : null;
+}
 
 export function thinkingProfile(id: string): ThinkingProfile | null {
-  if (!TEE_MODEL.test(id)) return null;
-  if (/instruct/i.test(id)) return null;
-  const profile = /gpt-oss/i.test(id)
-    ? REASONING_EFFORT_THINKING
-    : /glm|qwen/i.test(id)
-      ? CHAT_TEMPLATE_THINKING
-      : null;
+  const profile = TEE_MODEL.test(id) ? teeThinkingProfile(id) : proxiedThinkingProfile(id);
   // Hand out a COPY. These entries end up on hundreds of registered models, and a
   // shared nested object is one careless mutation away from retuning the whole catalog.
   return profile && { ...profile, thinkingLevelMap: { ...profile.thinkingLevelMap }, ...(profile.compat ? { compat: { ...profile.compat } } : {}) };
@@ -198,14 +281,67 @@ function catalogCachePath(): string {
 
 // Best effort in both directions: this cache is an optimization, and a launch must never
 // fail because it couldn't be read or written.
-function saveCachedCatalogIds(ids: string[]): void {
+//
+// `windows` joined `ids` here because the synchronous launch seed needs it. Registration
+// builds every model entry before the live fetch can resolve, so a context window known
+// only to the live catalog would always arrive one launch too late — the entries pi
+// actually binds would already carry the fallback. A window is a capability, not a
+// privacy claim, so unlike the tier it is safe to read back from disk: the worst a stale
+// one does is size a budget against last week's number, and the live fetch corrects it
+// moments later. (The v1 `ids` key is still written, so an older build reading this file
+// sees exactly what it expects.)
+function saveCachedCatalog(infos: AccountModelInfo[]): void {
   try {
     mkdirSync(globalDir(), { recursive: true });
-    const payload = { v: 1, fetchedAt: new Date().toISOString(), ids: ids.slice(0, CATALOG_CACHE_MAX) };
+    const kept = infos.slice(0, CATALOG_CACHE_MAX);
+    const windows: Record<string, number> = {};
+    for (const info of kept) {
+      if (info.contextWindow !== undefined) windows[info.id] = info.contextWindow;
+    }
+    const payload = {
+      v: 2,
+      fetchedAt: new Date().toISOString(),
+      ids: kept.map((info) => info.id),
+      windows,
+    };
     writeFileSync(catalogCachePath(), JSON.stringify(payload) + "\n", "utf8");
+    forgetCachedContextWindows();
   } catch {
     /* unwritable home — we just seed from DEFAULT_MODELS next launch */
   }
+}
+
+// Read the cache once per process. seedModel calls accountContextWindow for every id in
+// the catalog on every registration, and the catalog re-registers whenever the shim
+// state changes — re-reading and re-parsing a 284-entry file each time would turn a
+// cheap lookup into hundreds of syscalls on the launch path.
+let cachedWindows: Map<string, number> | null = null;
+
+function cachedContextWindows(): Map<string, number> {
+  if (cachedWindows) return cachedWindows;
+  cachedWindows = new Map();
+  try {
+    const path = catalogCachePath();
+    if (existsSync(path)) {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as { windows?: unknown };
+      // A v1 file has no `windows` at all; every id then falls back, exactly as before.
+      if (parsed.windows && typeof parsed.windows === "object") {
+        for (const [id, value] of Object.entries(parsed.windows as Record<string, unknown>)) {
+          const window = validContextWindow(value);
+          if (window !== undefined && cachedWindows.size < CATALOG_CACHE_MAX) cachedWindows.set(id, window);
+        }
+      }
+    }
+  } catch {
+    /* absent, unreadable, or garbage — every model just uses the fallback window */
+  }
+  return cachedWindows;
+}
+
+// Drop the memo so the next read sees what was just written (and so a test can rewrite
+// the cache between assertions).
+function forgetCachedContextWindows(): void {
+  cachedWindows = null;
 }
 
 export function loadCachedCatalogIds(): string[] {
@@ -267,6 +403,10 @@ export function seedCatalogIds(): string[] {
 export interface AccountModelInfo {
   id: string;
   tier: PrivacyTier;
+  // The server's published context window, when it published one and it is credible.
+  // Absent means "unknown" — seedModel falls back to DEFAULT_CONTEXT_WINDOW rather
+  // than to a guess, so an older server behaves exactly as before.
+  contextWindow?: number;
 }
 
 // The set of tier strings pi-privacy defines (posture/tiers.ts). We only trust a
@@ -300,6 +440,19 @@ function normalizeTier(tier: string | undefined, modelId: string): PrivacyTier {
 // A live NEAR attestation (accountPosture) can still upgrade a row to tee-verified.
 const accountTierMap = new Map<string, PrivacyTier>();
 
+// Published context windows, keyed by modelId. Unlike the tier map this one IS
+// persisted (see the cache below): a window is a capability, not a privacy claim, and
+// it is needed at LAUNCH — registration happens synchronously, long before the live
+// fetch resolves, so a window learned only at fetch time would arrive after the model
+// entries pi actually uses were built.
+const accountWindowMap = new Map<string, number>();
+
+// The server's published context window for a model, or undefined if we have not been
+// told one. Live catalog first, then the on-disk cache from the last launch.
+export function accountContextWindow(id: string): number | undefined {
+  return accountWindowMap.get(id) ?? cachedContextWindows().get(id);
+}
+
 // The server-asserted baseline tier for an account model, or undefined if we haven't
 // seen it in a catalog fetch. Used by the /models picker (privateer-models.ts).
 export function accountBaselineTier(modelId: string): PrivacyTier | undefined {
@@ -329,23 +482,38 @@ export async function fetchAccountCatalog(): Promise<AccountModelInfo[]> {
       infos = fallback();
     } else {
       const data = (await res.json()) as {
-        models?: { modelId?: string; privacy?: { tier?: string } }[];
+        models?: { modelId?: string; privacy?: { tier?: string }; contextLength?: unknown }[];
       };
       const parsed = (data.models ?? [])
-        .map((m) => (m.modelId ? { id: m.modelId, tier: normalizeTier(m.privacy?.tier, m.modelId) } : null))
+        .map((m): AccountModelInfo | null =>
+          m.modelId
+            ? {
+                id: m.modelId,
+                tier: normalizeTier(m.privacy?.tier, m.modelId),
+                // `contextLength` is null for a model upstream has no window for, and
+                // absent entirely on a server older than the field — both mean
+                // "unknown", and validContextWindow collapses them to undefined.
+                contextWindow: validContextWindow(m.contextLength),
+              }
+            : null,
+        )
         .filter((x): x is AccountModelInfo => !!x);
       // Cache only a real LIVE listing — never the fallback, which would freeze the six
       // seed ids on disk and read back as though it were the catalog. Both the cache and
       // the returned list are the server's UNFILTERED offer; servability is decided at
       // registration (accountProviderConfig), which re-evaluates it every time.
-      if (parsed.length) saveCachedCatalogIds(parsed.map((p) => p.id));
+      if (parsed.length) saveCachedCatalog(parsed);
       infos = parsed.length ? parsed : fallback();
     }
   } catch {
     infos = fallback();
   }
   accountTierMap.clear();
-  for (const info of infos) accountTierMap.set(info.id, info.tier);
+  accountWindowMap.clear();
+  for (const info of infos) {
+    accountTierMap.set(info.id, info.tier);
+    if (info.contextWindow !== undefined) accountWindowMap.set(info.id, info.contextWindow);
+  }
   return infos;
 }
 
