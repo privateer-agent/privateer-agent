@@ -126,6 +126,13 @@ export interface RelayCallbacks {
   // bypass mode instead of relaying every action, so the agent runs to completion.
   // Dangerous/destructive actions still relay — they sit above bypass locally too.
   onNoQuarter?: (on: boolean) => void;
+  // The app toggled the privacy filter. `off` true = pi-privacy is disabled for this
+  // session, exactly as `/privacy off` does it: no outbound PII scan or prompt, no
+  // tool-result credential redaction, no exfiltration or downgrade guard. The app is
+  // the only surface that can ask for this without a keyboard on this machine, so the
+  // frame carries the SAME state the command writes (process.env, shared with
+  // subagent children) rather than a second flag beside it.
+  onPrivacy?: (off: boolean) => void;
   // A controller attached — push a transcript snapshot so it can catch up.
   onControllerAttached: () => void;
   // The last controller went away (app closed / socket reaped). The terminal keeps
@@ -696,6 +703,7 @@ export class RelayClient {
       seq?: number;
       data?: string;
       on?: boolean;
+      off?: boolean;
       value?: string;
       source?: string;
       description?: string;
@@ -762,6 +770,9 @@ export class RelayClient {
         break;
       case "no_quarter":
         this.cb.onNoQuarter?.(frame.on === true);
+        break;
+      case "privacy":
+        this.cb.onPrivacy?.(frame.off === true);
         break;
       case "controller_attached":
         this.cb.onControllerAttached();
@@ -1156,6 +1167,15 @@ export class RelayClient {
   // change (ack) and on controller attach (a re-attaching app resyncs).
   sendNoQuarter(on: boolean): void {
     this.rawSend({ type: "no_quarter", on });
+  }
+
+  // Echo the privacy-filter state up to the controller, same contract as
+  // sendNoQuarter: an ack of the app's toggle, and a resync on controller attach.
+  // Only ever sent while the filter is OFF — the app defaults its switch to "on"
+  // (the safe reading), so a terminal too old to know this frame, or one running
+  // with the filter intact, correctly shows protected.
+  sendPrivacy(off: boolean): void {
+    this.rawSend({ type: "privacy", off });
   }
 
   // Push this terminal's live context (selected model, agent version) to a

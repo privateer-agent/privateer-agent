@@ -9,7 +9,7 @@
 import { verifyModelPosture, TIERS, type PrivacyTier } from "pi-privacy";
 import { accountPosture } from "../src/providers/account.ts";
 import { type Palette, paletteFor } from "../src/ui/palette.ts";
-import { privacyDisabled } from "../src/config/privacyDisabled.ts";
+import { onPrivacyDisabledChange, privacyDisabled } from "../src/config/privacyDisabled.ts";
 
 const DOT: Record<string, string> = { green: "🟢", yellow: "🟡", red: "🔴", neutral: "⚪" };
 
@@ -79,6 +79,21 @@ export default function privateerPosture(pi: any): void {
     }
   };
 
-  pi.on("model_select", (event: any, ctx: any) => update(event?.model?.provider, event?.model?.id, ctx));
-  pi.on("session_start", (_event: any, ctx: any) => update(ctx?.model?.provider, ctx?.model?.id, ctx));
+  // Keep the last ctx a real event handed us: the badge has to be repainted when the
+  // privacy flag moves, and the flag can now move with no event behind it at all —
+  // the app's shield toggle writes it over the relay (RemoteBridge's onPrivacy), so
+  // `/privacy` is no longer the only driver and the CLI's own badge would otherwise
+  // sit on "⛉ Trusted Execution" over a session whose filter a phone just took down.
+  let lastCtx: any = null;
+  pi.on("model_select", (event: any, ctx: any) => {
+    lastCtx = ctx;
+    return update(event?.model?.provider, event?.model?.id, ctx);
+  });
+  pi.on("session_start", (_event: any, ctx: any) => {
+    lastCtx = ctx;
+    return update(ctx?.model?.provider, ctx?.model?.id, ctx);
+  });
+  onPrivacyDisabledChange(() => {
+    void update(lastCtx?.model?.provider, lastCtx?.model?.id, lastCtx);
+  });
 }

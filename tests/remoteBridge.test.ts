@@ -14,6 +14,7 @@ function makeFakeRelay() {
   const approvals: { id: string; req: PermissionRequest }[] = [];
   const events: EngineEvent[] = [];
   const noQuarter: boolean[] = [];
+  const privacy: boolean[] = [];
   const notices: string[] = [];
   const commandLists: { name: string; description?: string }[][] = [];
   const selects: { id: string; req: any }[] = [];
@@ -28,6 +29,7 @@ function makeFakeRelay() {
   let controller = true;
   const relay: RelayLike & {
     approvals: typeof approvals; events: typeof events; noQuarter: typeof noQuarter;
+    privacy: typeof privacy;
     notices: typeof notices; commandLists: typeof commandLists; selects: typeof selects;
     inputs: typeof inputs; extensions: typeof extensions; skills: typeof skills;
     fileMatches: typeof fileMatches;
@@ -38,6 +40,7 @@ function makeFakeRelay() {
     approvals,
     events,
     noQuarter,
+    privacy,
     notices,
     commandLists,
     selects,
@@ -53,6 +56,7 @@ function makeFakeRelay() {
     isConnected() { return connected; },
     hasController() { return connected && controller; },
     sendNoQuarter(on) { noQuarter.push(on); },
+    sendPrivacy(off) { privacy.push(off); },
     async sendFile() { return { ok: connected }; },
     sendNotice(text) { notices.push(text); },
     sendCommands(commands) { commandLists.push(commands); },
@@ -441,4 +445,81 @@ test("an empty turn is not delivered", () => {
   bridge.forwardEvent({ type: "text", text: "   \n " });
   bridge.settleTurn();
   assert.equal(delivered.length, 0);
+});
+
+// ── the privacy filter over the relay ────────────────────────────────────────
+//
+// The app's shield and `/privacy off` are one switch: the frame writes the same
+// process-wide flag the command writes, so these pin that the two agree and that
+// the app is TOLD what the terminal ended up doing rather than trusting its own
+// press. Each test restores the flag, since it is process state shared with the
+// rest of this file's sessions.
+
+test("onPrivacy writes the session flag and echoes what was applied", async () => {
+  const { privacyDisabled, setPrivacyDisabled } = await import("../src/config/privacyDisabled.ts");
+  setPrivacyDisabled(false);
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  try {
+    bridge.callbacks.onPrivacy(true);
+    assert.equal(privacyDisabled(), true, "the filter is actually off, not just reported off");
+    assert.deepEqual(relay.privacy, [true]);
+    // Asking for a state it is already in still gets an answer — an app whose switch
+    // drifted out of step must not be left waiting on silence.
+    bridge.callbacks.onPrivacy(true);
+    assert.deepEqual(relay.privacy, [true, true]);
+  } finally {
+    bridge.dispose();
+    setPrivacyDisabled(false);
+  }
+});
+
+test("a /privacy toggled at the composer reaches the app unasked", async () => {
+  const { setPrivacyDisabled } = await import("../src/config/privacyDisabled.ts");
+  setPrivacyDisabled(false);
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  try {
+    setPrivacyDisabled(true); // as the command handler does
+    assert.deepEqual(relay.privacy, [true]);
+  } finally {
+    bridge.dispose();
+    setPrivacyDisabled(false);
+  }
+});
+
+test("attach resyncs the switch only while the filter is OFF", async () => {
+  const { setPrivacyDisabled } = await import("../src/config/privacyDisabled.ts");
+  setPrivacyDisabled(false);
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  try {
+    bridge.callbacks.onControllerAttached();
+    assert.deepEqual(relay.privacy, [], "silence means protected — the app's default");
+    setPrivacyDisabled(true);
+    relay.privacy.length = 0;
+    bridge.callbacks.onControllerAttached();
+    assert.deepEqual(relay.privacy, [true], "a shield must never be drawn over a terminal that has none");
+  } finally {
+    bridge.dispose();
+    setPrivacyDisabled(false);
+  }
+});
+
+test("dispose stops a bridge writing to a transport whose window is gone", async () => {
+  const { setPrivacyDisabled } = await import("../src/config/privacyDisabled.ts");
+  setPrivacyDisabled(false);
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  bridge.dispose();
+  try {
+    setPrivacyDisabled(true);
+    assert.deepEqual(relay.privacy, []);
+  } finally {
+    setPrivacyDisabled(false);
+  }
 });

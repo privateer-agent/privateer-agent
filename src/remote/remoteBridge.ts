@@ -12,6 +12,9 @@
 
 import { randomUUID } from "node:crypto";
 import { noQuarterActive, setNoQuarter } from "../permissions/noQuarter.ts";
+// Pure env-var accessors (see config/privacyDisabled.ts) — no Pi, no node builtins,
+// so this stays safe to import from the bridge, which boot-ordered code reaches.
+import { onPrivacyDisabledChange, privacyDisabled, setPrivacyDisabled } from "../config/privacyDisabled.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/modeGate.ts";
@@ -56,6 +59,10 @@ export interface RelayLike {
   // turns into a duplicate of something the app already displayed.
   hasController?(): boolean;
   sendNoQuarter(on: boolean): void;
+  // Echo the privacy-filter state (off = pi-privacy disabled). Optional so a
+  // transport built against an older shape still satisfies the interface; the
+  // bridge's callers all treat a missing echo as "filter on", which is the safe read.
+  sendPrivacy?(off: boolean): void;
   sendFile(file: { name: string; mediaType: string; base64: string; size: number }): Promise<{ ok: boolean; reason?: string }>;
   sendNotice(text: string): void;
   sendCommands(commands: { name: string; description?: string }[]): void;
@@ -190,7 +197,25 @@ export class RemoteBridge {
   private turnPrompt = "";
   private turnText = "";
 
-  constructor(private readonly cfg: RemoteBridgeConfig) {}
+  // Unsubscribes the privacy watcher below. Held so a bridge that outlives its window
+  // (the desktop builds one per window, in one process) stops writing to a transport
+  // whose renderer is gone.
+  private readonly unwatchPrivacy: () => void;
+
+  constructor(private readonly cfg: RemoteBridgeConfig) {
+    // The privacy switch has a second driver: `/privacy off` typed into the composer
+    // (or into the CLI beside a driving app). Watch the flag itself rather than only
+    // the frame, so the app's shield follows the terminal however it was moved — and
+    // on the desktop, where the flag is process-wide, so does every OTHER window's,
+    // which is the truth: they share the env var this writes.
+    this.unwatchPrivacy = onPrivacyDisabledChange((off) => this.relay?.sendPrivacy?.(off));
+  }
+
+  /** Release what outlives a socket. Safe to call twice. */
+  dispose(): void {
+    this.unwatchPrivacy();
+    this.relay = undefined;
+  }
 
   // Wire the outbound relay once it's constructed (RelayClient needs `callbacks`
   // at construction, so the relay is attached right after).
@@ -286,10 +311,29 @@ export class RemoteBridge {
       setNoQuarter(on);
       this.relay?.sendNoQuarter(on); // echo the ack back so the app's toggle syncs
     },
+    // The app's privacy switch. It writes the SAME state `/privacy off` writes — the
+    // env var every module copy and subagent child reads — so a session toggled from
+    // the app and one toggled from the keyboard are the same session, and the CLI's
+    // own `/privacy status` tells the truth about what the app did. Echoed back so
+    // the app's switch reflects what this terminal is actually doing rather than what
+    // it was asked to do.
+    onPrivacy: (off) => {
+      const changed = privacyDisabled() !== off;
+      setPrivacyDisabled(off);
+      // A real change is echoed by the watcher in the constructor (which also covers
+      // `/privacy` typed at a composer). Ack a no-op ask here so an app whose switch
+      // was already out of step still gets an answer rather than silence.
+      if (!changed) this.relay?.sendPrivacy?.(off);
+    },
     onControllerAttached: () => {
       if (this.noQuarter || noQuarterActive()) {
         this.relay?.sendNoQuarter(true);
       }
+      // Resync the privacy switch the same way, and for a sharper reason: the filter
+      // may have been turned off from the keyboard, or by a launch flag, or by an
+      // earlier session of this app — an attaching controller must not paint a shield
+      // over a terminal that has none. Sent only when OFF, so silence means protected.
+      if (privacyDisabled()) this.relay?.sendPrivacy?.(true);
       this.cfg.onControllerAttached?.();
     },
     // The app left while we're still running. Same posture as a dropped socket: stop
@@ -318,6 +362,9 @@ export class RemoteBridge {
 
   getRemote = (): boolean => this.remote;
   getNoQuarter = (): boolean => this.noQuarter || noQuarterActive();
+
+  /** True while the privacy filter is disabled for this session (`/privacy off`). */
+  getPrivacyDisabled = (): boolean => privacyDisabled();
 
   // The gate's remote approver: relay the request to the app and await its
   // allow/deny. Fail closed if no controller, on abort, or on disconnect. (The gate
