@@ -1143,6 +1143,9 @@ export const generateSpriteToolDefinition = {
     "right-facing ones rather than rendered, which is why eight animations cost five clips and not " +
     "eight. Each clip is charged at the account's video rate, so an eight-way set is genuinely " +
     "expensive; say the total to the user before batching characters.\n" +
+    "TWO models are involved, which matters when one of them is down: an IMAGE model turns the " +
+    "picture to face each direction (only for `directions` 'four' and 'eight'), then a VIDEO model " +
+    "renders the motion per facing. `image_model` and `model` override them separately.\n" +
     "It takes several minutes (the clips render sequentially) and this tool waits. Frame count, cell " +
     "size and frame rate are chosen here and cost nothing extra. AVAILABILITY: this needs a video " +
     "decoder on the Privateer API and some deployments do not have one — call media_capabilities and " +
@@ -1218,13 +1221,25 @@ export const generateSpriteToolDefinition = {
     model: Type.Optional(
       Type.String({ description: "Video model id to render the motion with. Omit for the account default." }),
     ),
+    image_model: Type.Optional(
+      Type.String({
+        description:
+          "Image model id used to TURN the picture to face each direction, e.g. " +
+          "'google/gemini-3.1-flash-image'. Omit for the account default. Only used when " +
+          "`directions` is 'four' or 'eight' — 'one' renders no turns and never touches an image " +
+          "model. Worth setting when a run fails with SPRITE_IMAGE_MODEL_UNAVAILABLE: that is the " +
+          "image provider being down, not the request being wrong, and naming another model here " +
+          "retries the whole run for nothing (the turns are drawn before any clip is billed). " +
+          "media_capabilities lists the account's current image model.",
+      }),
+    ),
   }),
   async execute(
     _toolCallId: string,
     params: {
       image: string; prompt: string; dir: string; action?: string; directions?: string;
       frames?: number; frame_size?: number; fps?: number; loop?: boolean;
-      name?: string; res_path?: string; model?: string;
+      name?: string; res_path?: string; model?: string; image_model?: string;
     },
     signal?: AbortSignal,
     _onUpdate?: unknown,
@@ -1264,6 +1279,7 @@ export const generateSpriteToolDefinition = {
             return guessed ? { res_path: guessed } : {};
           })()),
         ...(params.model ? { model: params.model } : {}),
+        ...(params.image_model ? { image_model: params.image_model } : {}),
       },
     });
     if (!submitted.ok) return text(`Sprite generation failed: ${submitted.message}`);
