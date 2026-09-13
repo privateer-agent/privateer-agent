@@ -340,6 +340,63 @@ test("generate_video rejects a lastFrame with no firstFrame before spending anyt
   }
 });
 
+// ── Resuming a job instead of paying for it twice ────────────────────────────
+//
+// A video wait is bounded, and before `resumeJobId` existed hitting that bound
+// was terminal: the tool took no job id, so the message telling the model the
+// clip was still coming named something the model had no way to act on. Its only
+// move was to call generate_video again — a second billed generation and a second
+// wait, which is what "video generation just hangs" looks like from the outside.
+// Three things have to hold for the resume to be the path actually taken.
+
+test("generate_video advertises the resume, and its timeout says not to re-generate", () => {
+  const params = generateVideoToolDefinition.parameters as { properties?: Record<string, unknown> };
+  assert.ok(params.properties?.resumeJobId, "the tool must take a job id, or the timeout message is unactionable");
+  assert.match(
+    generateVideoToolDefinition.description,
+    /resumeJobId/,
+    "the description has to name it — the model only learns about it there",
+  );
+  assert.match(generateVideoToolDefinition.description, /DO NOT call this again with the same/i);
+});
+
+test("a resume classifies as an ordinary write: no billing claim, no alwaysAsk", () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    const fresh = classifyToolCall("generate_video", { prompt: "x", path: "out/a.mp4" }, { cwd });
+    assert.equal(fresh?.alwaysAsk, true, "a generation still spends money and must reach the human");
+    assert.match(String(fresh?.title), /billed/i);
+
+    const resumed = classifyToolCall(
+      "generate_video",
+      { prompt: "x", path: "out/a.mp4", resumeJobId: "job-123" },
+      { cwd },
+    );
+    assert.ok(resumed);
+    // Nothing is submitted and nothing is charged: it polls a job the account has
+    // already paid for and writes the file. Claiming a charge here, or making the
+    // resume prompt as often as a fresh generation, makes re-generating the
+    // cheaper-feeling path — which is the behaviour being fixed.
+    assert.notEqual(resumed.alwaysAsk, true, "a resume bills nothing and must not ask above bypass");
+    assert.doesNotMatch(String(resumed.title), /billed to your Privateer account/i);
+    assert.match(String(resumed.title), /nothing further is billed/i);
+    assert.equal(resumed.kind, "write", "it still writes a file, so it is still a write");
+    assert.equal(decideAuto(resumed, "bypass", []), "allow");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a resume still refuses without a path — it has nowhere to put the clip", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    const out = await callMedia(generateVideoToolDefinition, cwd, { prompt: "", resumeJobId: "job-123" });
+    assert.match(out, /path is required/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("a missing input image is reported locally, not sent upstream", async () => {
   const { cwd, cleanup } = scratch();
   try {

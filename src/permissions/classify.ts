@@ -225,6 +225,9 @@ const MEDIA_TITLES: Record<string, string> = {
   video_compose: "Compose video/audio locally",
   media_capabilities: "Read media capabilities",
 };
+// Not in MEDIA_TITLES: it is the same tool, told apart by its arguments rather
+// than its name (see `resuming` below).
+const RESUME_VIDEO_TITLE = "Save a video already generated (nothing further is billed)";
 
 export function classifyToolCall(
   toolName: string,
@@ -478,6 +481,14 @@ export function classifyToolCall(
   // even when the output lands neatly in cwd.
   if (MEDIA_TOOLS.has(name)) {
     const compose = name === "video_compose";
+    // A generate_video RESUME submits nothing and bills nothing — it goes back to
+    // waiting on a job the account has already paid for and writes the file. So it
+    // is an ordinary write, not a billed one: the title must not claim a charge
+    // that isn't happening, and `alwaysAsk` must not make re-prompting the cheaper
+    // path than re-generating. Getting that backwards is what teaches a model to
+    // pay twice.
+    const resuming = name === "generate_video" && typeof obj.resumeJobId === "string" && !!obj.resumeJobId.trim();
+    const mediaTitle = resuming ? RESUME_VIDEO_TITLE : MEDIA_TITLES[name];
     const inputs = [
       ...(Array.isArray(obj.inputs) ? (obj.inputs as unknown[]).map(str) : []),
       str(obj.input),
@@ -549,13 +560,11 @@ export function classifyToolCall(
     return {
       tool: toolName,
       kind: "write",
-      title: outside
-        ? `${MEDIA_TITLES[name]} outside working directory`
-        : MEDIA_TITLES[name],
+      title: outside ? `${mediaTitle} outside working directory` : mediaTitle,
       detail: `${outputOutside ? absOut : outPath}${inputNote}`,
       protected: isProtectedPath(absOut) || protectedInputs.length > 0,
       outside,
-      alwaysAsk: BILLED_MEDIA_TOOLS.has(name),
+      alwaysAsk: BILLED_MEDIA_TOOLS.has(name) && !resuming,
       path: absOut,
     };
   }

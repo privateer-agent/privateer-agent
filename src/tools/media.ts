@@ -56,8 +56,23 @@ export const MEDIA_TOOL_NAMES = [
 
 // A video job can legitimately take minutes. Bound the wait so a wedged provider
 // doesn't pin an unattended run forever; the job id is reported on timeout so the
-// caller can resume the poll rather than pay for another generation.
-const VIDEO_POLL_TIMEOUT_MS = Number(process.env.PRIVATEER_VIDEO_TIMEOUT_MS) || 12 * 60_000;
+// caller can resume the poll (`resumeJobId`) rather than pay for another generation.
+//
+// TWENTY-FIVE, AND THE RESUME PARAM, ARE ONE FIX. At twelve this was the only
+// surface that gave up on a job at all — the app's own poller (ChatScreen,
+// libraryService) runs on a bare setInterval with no deadline, so the identical
+// job that lands fine in a chat was abandoned in a terminal — and there was
+// nothing to resume WITH: `generate_video` took no job id, so the sentence above
+// described a recovery the tool could not perform. The model's only move was to
+// call generate_video again, which bills a second generation and starts a second
+// wait, which is what "video generation hangs" looks like from the outside.
+//
+// The ceiling stays because an unattended run must not be pinned forever, and 25
+// is not arbitrary: the desktop's turn supervisor abandons a turn whose open tool
+// has been silent for 30 minutes (desktop/src/main/turnSupervisor.ts toolStallMs),
+// and a tool that outlives its own supervisor is abandoned mid-poll with the job
+// uncollected — exactly the failure this is fixing. Keep it under that budget.
+const VIDEO_POLL_TIMEOUT_MS = Number(process.env.PRIVATEER_VIDEO_TIMEOUT_MS) || 25 * 60_000;
 const VIDEO_POLL_INTERVAL_MS = 5_000;
 // A mesh job runs about a minute at the provider's stated typical time, and
 // several for a large face count. Same bounded-wait contract as video: the job
@@ -334,10 +349,18 @@ export const generateVideoToolDefinition = {
     "extracted with video_compose, then start the next from it. Generation takes minutes and this tool " +
     "waits for it. Expensive (roughly $0.10-$1 a clip) and billed to the user's Privateer account, so " +
     "plan the shot before calling. Clip lengths and aspect ratios are model-specific — check " +
-    "media_capabilities first if unsure. Stitch the finished clips with video_compose.",
+    "media_capabilities first if unsure. Stitch the finished clips with video_compose.\n" +
+    "If a call comes back saying the job is still running, DO NOT call this again with the same " +
+    "prompt — that bills a second generation. Call it with `resumeJobId` set to the job id it " +
+    "reported (and the same `path`) to keep waiting on the clip the account has already paid for.",
   parameters: Type.Object({
     prompt: Type.String({ description: "What happens in the shot: subject, action, camera move, style." }),
     path: Type.String({ description: "Where to write the video, relative to cwd or absolute (e.g. 'clips/01-opening.mp4')." }),
+    resumeJobId: Type.Optional(Type.String({
+      description:
+        "Resume waiting on a job already submitted (from a previous call that timed out). " +
+        "Nothing is generated and nothing is billed: it only polls and saves. `prompt` is ignored.",
+    })),
     firstFrame: Type.Optional(Type.String({ description: "Path to an image to use as the opening frame (image-to-video)." })),
     lastFrame: Type.Optional(Type.String({ description: "Path to an image to use as the closing frame. Requires firstFrame." })),
     seconds: Type.Optional(Type.Number({ description: "Clip length in seconds. Only certain values are legal per model — see media_capabilities." })),
@@ -349,7 +372,7 @@ export const generateVideoToolDefinition = {
   async execute(
     _toolCallId: string,
     params: {
-      prompt: string; path: string; firstFrame?: string; lastFrame?: string;
+      prompt: string; path: string; resumeJobId?: string; firstFrame?: string; lastFrame?: string;
       seconds?: number; aspectRatio?: string; resolution?: string; audio?: boolean; model?: string;
     },
     signal?: AbortSignal,
@@ -357,9 +380,18 @@ export const generateVideoToolDefinition = {
     ctx?: { cwd?: string },
   ) {
     const cwd = ctx?.cwd ?? process.cwd();
+    if (!params.path) return text("Error: path is required — say where to save the video.");
+
+    // RESUME. Submit nothing, bill nothing — just go back to waiting on a job the
+    // account has already paid for. Everything below the poll is identical, which
+    // is why the loop lives in awaitVideoJob() rather than being duplicated here.
+    const resumeJobId = String(params.resumeJobId ?? "").trim();
+    if (resumeJobId) {
+      return awaitVideoJob(resumeJobId, cwd, params.path, null, signal);
+    }
+
     const prompt = String(params.prompt ?? "").trim();
     if (!prompt) return text("Error: prompt is required.");
-    if (!params.path) return text("Error: path is required — say where to save the video.");
     if (params.lastFrame && !params.firstFrame) return text("Error: lastFrame needs firstFrame alongside it.");
 
     let firstFrame: { data: string; mimeType: string } | undefined;
@@ -389,45 +421,72 @@ export const generateVideoToolDefinition = {
     const jobId = submitted.data.jobId;
     if (!jobId) return text("Video generation failed: Privateer did not return a job id.");
 
-    // Poll to completion. The account is charged when the provider delivers, so an
-    // abandoned poll still costs money — hence the timeout message names the job id.
-    const deadline = Date.now() + VIDEO_POLL_TIMEOUT_MS;
-    const cancelled = () =>
-      text(`Video job ${jobId} was submitted but the wait was cancelled. It is still running and will still be billed.`);
-    for (;;) {
-      if (signal?.aborted) return cancelled();
-      await sleep(VIDEO_POLL_INTERVAL_MS, signal);
-      // sleep() resolves early on abort, so re-check before spending a request on a
-      // signal that is already dead — otherwise the cancel surfaces as a network error.
-      if (signal?.aborted) return cancelled();
-      const poll = await callAccount<VideoStatusResponse>(`/api/agent/media/videos/${encodeURIComponent(jobId)}`, {
-        method: "GET",
-        signal,
-      });
-      if (!poll.ok) return text(`Video job ${jobId} could not be polled: ${poll.message}`);
-
-      const status = String(poll.data.status ?? "").toLowerCase();
-      if (status === "failed") return text(`Video generation failed: ${poll.data.message ?? "the provider reported a failure"}.`);
-      if (status === "completed") {
-        if (!poll.data.data) {
-          // The bytes were handed out on an earlier poll and are not stored anywhere.
-          return text(`Video job ${jobId} already delivered its bytes on an earlier poll; they were not saved. Generate again if the file is missing.`);
-        }
-        const target = abs(cwd, params.path);
-        const ext = extname(target) || extForMime(poll.data.mimeType ?? "", ".mp4");
-        const out = `${target.slice(0, target.length - extname(target).length)}${ext}`;
-        const summary = writeOut(out, Buffer.from(poll.data.data, "base64"));
-        return text(`Generated video with ${poll.data.model ?? submitted.data.model ?? "the account video model"}: ${summary}`);
-      }
-      if (Date.now() > deadline) {
-        return text(
-          `Video job ${jobId} is still ${status || "running"} after ${Math.round(VIDEO_POLL_TIMEOUT_MS / 60000)} minutes. ` +
-            "It will still complete and still be billed; nothing was saved here.",
-        );
-      }
-    }
+    return awaitVideoJob(jobId, cwd, params.path, submitted.data.model ?? null, signal);
   },
 };
+
+/**
+ * Wait on a submitted video job and write its bytes to `path`.
+ *
+ * Split out of execute() so the RESUME path is the same code rather than a second
+ * copy of it: the bytes are delivered exactly once and are stored nowhere, so a
+ * resume that polled differently from the original wait would be the one place a
+ * paid clip could be dropped.
+ *
+ * `submittedModel` is null on a resume — we did not submit, so we have no model
+ * name of our own. The poll reports one anyway; the fallback only covers a server
+ * that returns neither.
+ */
+async function awaitVideoJob(
+  jobId: string,
+  cwd: string,
+  path: string,
+  submittedModel: string | null,
+  signal?: AbortSignal,
+) {
+  // The account is charged when the provider delivers, so an abandoned poll still
+  // costs money — every exit below names the job id, and `resumeJobId` is what
+  // turns that id back into the file.
+  const deadline = Date.now() + VIDEO_POLL_TIMEOUT_MS;
+  const resumeHint = `Resume it with generate_video { resumeJobId: "${jobId}", path: "${path}" } — that waits on this same clip and bills nothing further.`;
+  const cancelled = () =>
+    text(`Video job ${jobId} is still running and will still be billed; the wait was cancelled. ${resumeHint}`);
+  for (;;) {
+    if (signal?.aborted) return cancelled();
+    await sleep(VIDEO_POLL_INTERVAL_MS, signal);
+    // sleep() resolves early on abort, so re-check before spending a request on a
+    // signal that is already dead — otherwise the cancel surfaces as a network error.
+    if (signal?.aborted) return cancelled();
+    const poll = await callAccount<VideoStatusResponse>(`/api/agent/media/videos/${encodeURIComponent(jobId)}`, {
+      method: "GET",
+      signal,
+    });
+    // A poll that fails is NOT the job failing — the clip is still coming and is
+    // still billed, so this has to point at the resume too. Without that the model
+    // reads a dropped request as a dead job and generates the whole thing again.
+    if (!poll.ok) return text(`Video job ${jobId} could not be polled: ${poll.message}. ${resumeHint}`);
+
+    const status = String(poll.data.status ?? "").toLowerCase();
+    if (status === "failed") return text(`Video generation failed: ${poll.data.message ?? "the provider reported a failure"}.`);
+    if (status === "completed") {
+      if (!poll.data.data) {
+        // The bytes were handed out on an earlier poll and are not stored anywhere.
+        return text(`Video job ${jobId} already delivered its bytes on an earlier poll; they were not saved. Generate again if the file is missing.`);
+      }
+      const target = abs(cwd, path);
+      const ext = extname(target) || extForMime(poll.data.mimeType ?? "", ".mp4");
+      const out = `${target.slice(0, target.length - extname(target).length)}${ext}`;
+      const summary = writeOut(out, Buffer.from(poll.data.data, "base64"));
+      return text(`Generated video with ${poll.data.model ?? submittedModel ?? "the account video model"}: ${summary}`);
+    }
+    if (Date.now() > deadline) {
+      return text(
+        `Video job ${jobId} is still ${status || "running"} after ${Math.round(VIDEO_POLL_TIMEOUT_MS / 60000)} minutes. ` +
+          `It will still complete and is already billed — do NOT generate it again. ${resumeHint}`,
+      );
+    }
+  }
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve_) => {
