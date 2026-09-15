@@ -25,6 +25,7 @@ import { makeSaveCargoTool } from "../src/tools/cargo.ts";
 import { makeChartTools } from "../src/tools/charts.ts";
 import { makeSaveAttachmentTool } from "../src/tools/saveAttachment.ts";
 import { AttachmentStore, type StoredAttachment } from "../src/util/attachmentStore.ts";
+import { resolveMentions, searchFiles } from "../src/util/fileMentions.ts";
 import { makeExtensionsControl } from "../src/remote/extensionsControl.ts";
 import { makeSkillsControl } from "../src/remote/skillsControl.ts";
 import { agentDir } from "../src/config/paths.ts";
@@ -48,7 +49,9 @@ const allowedOutsideRoots: string[] = [];
 // SECOND prompt arriving while Pi is still processing — which throws "Agent is already
 // processing" and wedges the session. This happens in normal use when the app drops
 // (backgrounded → socket suspended) and re-sends its prompt on reconnect. Mirrors the
-// REPL's `turnActive` guard. Set on a successful sendUserMessage, cleared on agent_end.
+// REPL's `turnActive` guard. Claimed as soon as a prompt is accepted — ahead of the
+// mention expansion, which reads files and so opens a window a second prompt could
+// slip through — released again if the send fails, cleared on agent_end.
 let remoteTurnActive = false;
 
 let piRef: any = null;
@@ -149,7 +152,7 @@ async function switchModelRemote(spec: string): Promise<void> {
     const ok = await piRef?.setModel?.(model);
     if (ok === false) { relay?.sendNotice(`No API key for ${p} — can't switch to ${sp}.`); return; }
     currentSpec = sp;
-    relay?.sendContext({ model: currentSpec, version: agentVersion() }); // banner follows
+    relay?.sendContext({ model: currentSpec, cwd: process.cwd(), version: agentVersion() }); // banner follows
     relay?.sendNotice(`model → ${sp}`);
   } catch (e) {
     relay?.sendNotice(`Couldn't switch model: ${(e as Error).message}`);
@@ -344,6 +347,12 @@ const bridge = new RemoteBridge({
       relay?.sendNotice("busy — a turn is already running; wait for it to finish.");
       return;
     }
+    // Claim the turn BEFORE the awaits below, not after the send. Expanding mentions
+    // reads files, so the send is no longer synchronous with this callback — a second
+    // prompt arriving in that window would pass the guard above and land Pi with two
+    // turns. Released again on any failure path, so a refused send can't wedge the
+    // bridge; the success path leaves it set until agent_end.
+    remoteTurnActive = true;
     // Fold any files the app sent since the last prompt into a reference note so the
     // model knows they exist and can save_attachment them.
     const atts = sinceLastPrompt;
@@ -352,14 +361,32 @@ const bridge = new RemoteBridge({
       ? `\n\n[Files attached from the app: ${atts.map((a) => `#${a.n} ${a.name} (${a.mediaType})`).join(", ")}. ` +
         `Use the save_attachment tool with the ref number to write one to disk.]`
       : "";
-    try {
-      piRef?.sendUserMessage?.(text + note); // drive a turn in Pi's TUI
-      remoteTurnActive = true; // cleared on agent_end
-    } catch (e) {
-      // A synchronous "already processing" (or any send failure) must not wedge the
-      // bridge — surface it and stay idle so the next prompt still works.
-      relay?.sendNotice(`couldn't start turn: ${(e as Error).message}`);
-    }
+    void (async () => {
+      try {
+        // Expand any `@path` mentions into appended <file> blocks + image attachments,
+        // resolved against this terminal's cwd (constrained to the cwd subtree). The
+        // REPL (src/cli/chat.ts) and the desktop session (agentSession.ts) both do this;
+        // the shipped TUI did not, so the one surface with no Tab key — a phone driving
+        // this terminal — was the only one where `@file` did nothing at all.
+        const cwd = process.cwd();
+        const mentions = await resolveMentions(text, cwd);
+        if (mentions.skipped.length) {
+          relay?.sendNotice(`Couldn't attach: ${mentions.skipped.join(", ")} (must be a file inside ${cwd})`);
+        }
+        const body = mentions.text + note;
+        // Images ride as content parts — pi's sendUserMessage takes the same
+        // {type:"image",data,mimeType} shape resolveMentions already emits, so a
+        // mentioned screenshot reaches the model as a real attachment, not a path.
+        piRef?.sendUserMessage?.(
+          mentions.images.length ? [{ type: "text", text: body }, ...mentions.images] : body,
+        ); // drive a turn in Pi's TUI
+      } catch (e) {
+        // An "already processing" (or any send/expansion failure) must not wedge the
+        // bridge — surface it and stay idle so the next prompt still works.
+        remoteTurnActive = false;
+        relay?.sendNotice(`couldn't start turn: ${(e as Error).message}`);
+      }
+    })();
   },
   onInterrupt: () => {}, // Pi owns interrupt; best-effort no-op
   // The app asked to end remote access from its side — stop the relay locally too so
@@ -383,10 +410,23 @@ const bridge = new RemoteBridge({
     // terminal, and advertise the slash commands for the composer's autocomplete.
     setRemoteState("connected");
     relay?.sendSnapshot([{ kind: "notice", text: "Privateer terminal connected." }]);
-    relay?.sendContext({ model: currentSpec, version: agentVersion() });
+    // cwd rides along here (home-collapsed on the way out, see RelayClient.sendContext).
+    // Without it the app's composer shows no working-directory strip at all — and that
+    // strip is the only place a driver can see which folder the prompts they type are
+    // reading, writing and `@`-mentioning against.
+    relay?.sendContext({ model: currentSpec, cwd: process.cwd(), version: agentVersion() });
     relay?.sendCommands(advertiseCommands());
   },
   onAttachment: (file) => sinceLastPrompt.push(attachments.register(file)),
+  // The app composer is autocompleting an `@file` mention — list the cwd entries
+  // matching the query and reply. Read-only + cwd-constrained (searchFiles never
+  // escapes the subtree); resolution of the picked path happens in onPrompt above.
+  // Unanswered, the app's searchFiles() times out to [] after 4s and the palette
+  // reads "no files" — indistinguishable from an empty project.
+  onFilesSearch: (id, query) => void (async () => {
+    try { bridge.sendFileMatches(id, await searchFiles(query, process.cwd())); }
+    catch { bridge.sendFileMatches(id, []); }
+  })(),
   // Drive the indicator from the relay's own status stream: "connected" → green;
   // its reconnect/retry notices → yellow "connecting…". Ignored once we're off.
   onStatus: (text) => {
@@ -528,7 +568,7 @@ export default function privateerControl(pi: any): void {
   pi.on("model_select", (ev: any) => {
     if (ev?.model) {
       currentSpec = modelSpec(ev.model);
-      relay?.sendContext({ model: currentSpec, version: agentVersion() });
+      relay?.sendContext({ model: currentSpec, cwd: process.cwd(), version: agentVersion() });
     }
   });
 
