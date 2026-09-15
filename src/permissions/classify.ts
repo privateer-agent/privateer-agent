@@ -225,9 +225,10 @@ const MEDIA_TITLES: Record<string, string> = {
   video_compose: "Compose video/audio locally",
   media_capabilities: "Read media capabilities",
 };
-// Not in MEDIA_TITLES: it is the same tool, told apart by its arguments rather
-// than its name (see `resuming` below).
+// Not in MEDIA_TITLES: they are the same tools, told apart by their arguments
+// rather than their names (see `resuming` below).
 const RESUME_VIDEO_TITLE = "Save a video already generated (nothing further is billed)";
+const RESUME_SPRITE_TITLE = "Save a sprite animation already generated (nothing further is billed)";
 
 export function classifyToolCall(
   toolName: string,
@@ -481,14 +482,18 @@ export function classifyToolCall(
   // even when the output lands neatly in cwd.
   if (MEDIA_TOOLS.has(name)) {
     const compose = name === "video_compose";
-    // A generate_video RESUME submits nothing and bills nothing — it goes back to
-    // waiting on a job the account has already paid for and writes the file. So it
-    // is an ordinary write, not a billed one: the title must not claim a charge
-    // that isn't happening, and `alwaysAsk` must not make re-prompting the cheaper
-    // path than re-generating. Getting that backwards is what teaches a model to
-    // pay twice.
-    const resuming = name === "generate_video" && typeof obj.resumeJobId === "string" && !!obj.resumeJobId.trim();
-    const mediaTitle = resuming ? RESUME_VIDEO_TITLE : MEDIA_TITLES[name];
+    // A generate_video or generate_sprite RESUME submits nothing and bills nothing —
+    // it goes back to waiting on a job the account has already paid for and writes the
+    // files. So it is an ordinary write, not a billed one: the title must not claim a
+    // charge that isn't happening, and `alwaysAsk` must not make re-prompting the
+    // cheaper path than re-generating. Getting that backwards is what teaches a model
+    // to pay twice — and it costs the most on a sprite, where the alternative to a
+    // resume is a whole second fan-out of up to five video generations.
+    const resumable = name === "generate_video" || name === "generate_sprite";
+    const resuming = resumable && typeof obj.resumeJobId === "string" && !!obj.resumeJobId.trim();
+    const mediaTitle = resuming
+      ? (name === "generate_sprite" ? RESUME_SPRITE_TITLE : RESUME_VIDEO_TITLE)
+      : MEDIA_TITLES[name];
     const inputs = [
       ...(Array.isArray(obj.inputs) ? (obj.inputs as unknown[]).map(str) : []),
       str(obj.input),

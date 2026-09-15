@@ -18,6 +18,8 @@ import {
   describeSfx,
   extractStoredZip,
   guessResPath,
+  pathInside,
+  spritePollWorthRetrying,
 } from "../src/tools/media.ts";
 import {
   COMPOSE_TOOL_NAMES,
@@ -1096,6 +1098,50 @@ test("extractStoredZip refuses an entry that escapes the destination", () => {
   }
 });
 
+test("extractStoredZip refuses an entry named the Windows way out", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sprite-"));
+  try {
+    // A backslash is an ordinary filename character on posix, so a traversal
+    // spelled `..\\..\\x` sails through a check that only splits on "/".
+    assert.throws(() => extractStoredZip(storedZip([{ name: "..\\escaped.txt", body: "x" }]), dir), /escapes/);
+    // So does an absolute name, which path.resolve would obey rather than nest.
+    assert.throws(() => extractStoredZip(storedZip([{ name: "/etc/passwd", body: "x" }]), dir), /escapes/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the escape refusal names the directory it was unpacking into", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sprite-"));
+  try {
+    // The entry name alone is the half the reader already has; without the
+    // destination there is no way to tell a bad bundle from a bad `dir`.
+    assert.throws(
+      () => extractStoredZip(storedZip([{ name: "../escaped.txt", body: "x" }]), dir),
+      new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a destination that IS the filesystem root is not an escape", () => {
+  // The bug this pins cost five billed clips: with root "/" the old prefix test
+  // asked whether "/hero/hero_sheet.png" starts with "//" — it does not, so every
+  // entry of a perfectly ordinary bundle was refused as zip-slip and the archive,
+  // which the server delivers exactly once, was dropped. An agent whose cwd is "/"
+  // (Electron opened from the Finder, a launchd daemon) and a dir of "." lands
+  // there. Checked as a predicate rather than by unpacking, which would need root.
+  assert.equal(pathInside("/", "/hero/hero_sheet.png"), true);
+  assert.equal(pathInside("/", "/"), true);
+  assert.equal(pathInside("/proj", "/proj/sprites/a.png"), true);
+  assert.equal(pathInside("/proj", "/proj"), true);
+  // Traversal still has to lose, including the sibling that shares a prefix.
+  assert.equal(pathInside("/proj", "/elsewhere/a.png"), false);
+  assert.equal(pathInside("/proj", "/projector/a.png"), false);
+  assert.equal(pathInside("/proj", "/"), false);
+});
+
 test("extractStoredZip refuses a compressed entry rather than writing garbage", () => {
   const zip = storedZip([{ name: "a.txt", body: "x" }]);
   zip.writeUInt16LE(8, 8); // method: deflate
@@ -1117,6 +1163,115 @@ test("guessResPath derives the res:// path from where the files are going", () =
   // letting the server default.
   assert.equal(guessResPath("/proj", "/tmp/elsewhere"), undefined);
   assert.equal(guessResPath("/proj", "."), undefined);
+});
+
+test("generate_sprite refuses a direction set the server would silently downgrade", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    writeFileSync(join(cwd, "knight.png"), "x");
+    // parseSpec falls back to 'one' for anything outside the three words, so
+    // these used to submit, bill ONE clip, and hand back a single-facing sheet
+    // with no error anywhere — the caller asked for a four-way walk cycle and
+    // got one animation. A refusal here costs nothing and names the fix.
+    for (const directions of ["4", "four-way", "eight-way", "FOUR", "down,left,right,up"]) {
+      const out = await callMedia(generateSpriteToolDefinition, cwd, {
+        image: "knight.png", prompt: "walking", dir: "sprites", directions,
+      });
+      assert.match(out, /directions must be 'one', 'four' or 'eight'/, `${directions} must be refused`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("generate_sprite refuses out-of-range numbers instead of letting them be clamped", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    writeFileSync(join(cwd, "knight.png"), "x");
+    const base = { image: "knight.png", prompt: "walking", dir: "sprites" };
+    // The server clamps silently. A caller who asked for 48 frames and is billed
+    // for a 24-frame sheet has no way to tell from the result that the number
+    // they chose was not the number they got.
+    assert.match(await callMedia(generateSpriteToolDefinition, cwd, { ...base, frames: 48 }), /frames must be between 2 and 24/);
+    assert.match(await callMedia(generateSpriteToolDefinition, cwd, { ...base, frames: 1 }), /frames must be between 2 and 24/);
+    assert.match(await callMedia(generateSpriteToolDefinition, cwd, { ...base, frame_size: 1024 }), /frame_size must be between 8 and 512/);
+    assert.match(await callMedia(generateSpriteToolDefinition, cwd, { ...base, fps: 0 }), /fps must be between 1 and 120/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a sprite resume needs only the directory — it generates nothing", async () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    // A resume must not trip the image/prompt checks: the original request is
+    // gone and the point is to collect clips already paid for. `dir` is the one
+    // thing it still needs, because it has to put the bundle somewhere.
+    assert.match(
+      await callMedia(generateSpriteToolDefinition, cwd, { resumeJobId: "sprite_abc", dir: "" }),
+      /dir is required/,
+    );
+    // ...and without a resume id, the ordinary inputs are still required.
+    assert.match(
+      await callMedia(generateSpriteToolDefinition, cwd, { dir: "sprites" }),
+      /image is required/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("a sprite resume classifies as an ordinary write, not a five-clip charge", () => {
+  const { cwd, cleanup } = scratch();
+  try {
+    const fresh = classifyToolCall(
+      "generate_sprite",
+      { image: "knight.png", prompt: "walking", dir: "sprites/knight", directions: "eight" },
+      { cwd },
+    );
+    assert.equal(fresh?.alwaysAsk, true, "a fan-out of five video generations must reach the human");
+    assert.match(String(fresh?.title), /billed/i);
+
+    const resumed = classifyToolCall("generate_sprite", { resumeJobId: "sprite_abc", dir: "sprites/knight" }, { cwd });
+    assert.ok(resumed);
+    // The stakes are higher here than on video: the alternative to a resume is a
+    // whole second fan-out, so a resume that prompts like a fresh generation and
+    // claims a charge it isn't making is actively teaching the model to pay five
+    // times over.
+    assert.notEqual(resumed.alwaysAsk, true, "a resume bills nothing and must not ask above bypass");
+    assert.match(String(resumed.title), /nothing further is billed/i);
+    assert.equal(resumed.kind, "write");
+    assert.equal(resumed.path, join(realpathSync(cwd), "sprites/knight"));
+    assert.equal(decideAuto(resumed, "bypass", []), "allow");
+  } finally {
+    cleanup();
+  }
+});
+
+test("generate_sprite advertises resumeJobId and a closed direction set", () => {
+  // Both are load-bearing and both are easy to loosen back by accident: without
+  // the resume param the timeout message describes a recovery the tool cannot
+  // perform (the exact bug generate_video was fixed for), and a free-string
+  // `directions` puts the silent downgrade back.
+  const props = (generateSpriteToolDefinition.parameters as { properties: Record<string, unknown> }).properties;
+  assert.ok(props.resumeJobId, "a five-clip job must be resumable without paying twice");
+  const directions = props.directions as { anyOf?: { const?: string }[] };
+  assert.deepEqual(directions.anyOf?.map((d) => d.const), ["one", "four", "eight"]);
+  assert.match(generateSpriteToolDefinition.description, /resumeJobId/);
+});
+
+test("a failed sprite poll is only terminal when the job is really gone", () => {
+  // The bundle is delivered ONCE and stored nowhere, so abandoning the poll on a
+  // blip throws away up to five video generations with nothing to go back for.
+  assert.equal(spritePollWorthRetrying(undefined), true, "a transport error is not the job failing");
+  assert.equal(spritePollWorthRetrying(502), true);
+  assert.equal(spritePollWorthRetrying(503), true);
+  assert.equal(spritePollWorthRetrying(429), true, "rate limiting passes");
+  // These do not get better by waiting.
+  assert.equal(spritePollWorthRetrying(404), false);
+  assert.equal(spritePollWorthRetrying(410), false, "already delivered stays delivered");
+  assert.equal(spritePollWorthRetrying(401), false);
+  assert.equal(spritePollWorthRetrying(402), false);
 });
 
 test("generate_sprite is a billed write judged against its output directory", () => {

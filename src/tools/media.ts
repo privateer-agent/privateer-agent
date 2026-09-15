@@ -38,8 +38,9 @@
 // stitch → score → send.
 
 import { Type } from "typebox";
-import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
-import { dirname, extname, isAbsolute, resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync } from "node:fs";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { apiRequest } from "../auth/privateer.ts";
 
 /** Tool names these definitions register, for allow-list construction. */
@@ -79,10 +80,14 @@ const VIDEO_POLL_INTERVAL_MS = 5_000;
 // id is reported on timeout so the caller can resume the poll rather than pay
 // for a second generation.
 const MESH_POLL_TIMEOUT_MS = Number(process.env.PRIVATEER_MESH_TIMEOUT_MS) || 10 * 60_000;
-// A sprite job renders one clip per BILLED facing, sequentially, so an eight-way
-// set waits on five video generations rather than one. The ceiling is
-// correspondingly generous; as with video, the job id is reported on timeout so
-// the caller can resume the poll rather than pay for another run.
+// A sprite job renders one clip per BILLED facing, so an eight-way set waits on
+// five video generations rather than one. They are SUBMITTED in one pass and
+// render together at the provider (spriteApiHandler submits the whole fan-out
+// before returning the 202), so the wait is roughly one clip's — what is serial
+// is the stage BEFORE it, where the picture is turned to face each direction one
+// edit at a time. The ceiling is correspondingly generous; as with video, the job
+// id is reported on timeout and `resumeJobId` is what goes back to it, so a slow
+// job is never a reason to pay for a second fan-out.
 const SPRITE_POLL_TIMEOUT_MS = Number(process.env.PRIVATEER_SPRITE_TIMEOUT_MS) || 25 * 60_000;
 const SPRITE_POLL_INTERVAL_MS = 6_000;
 const MESH_POLL_INTERVAL_MS = 5_000;
@@ -150,6 +155,15 @@ function readInputImage(cwd: string, p: string): { data: string; mimeType: strin
 interface AccountFailure {
   ok: false;
   message: string;
+  /**
+   * The HTTP status behind the failure, or undefined when the request never got
+   * an answer at all (DNS, reset, offline). A POLLER needs this and a one-shot
+   * caller does not: abandoning a paid job because one poll returned 502 throws
+   * the job away, while retrying a 404 or a 410 forever is just as wrong. The
+   * status is the only thing that separates the two, so it is carried rather
+   * than flattened into the message.
+   */
+  status?: number;
 }
 
 /**
@@ -197,31 +211,31 @@ async function callAccount<T>(
   // by the user (not by the model) — say exactly which switch to change and stop.
   if (code === "ZDR_MEDIA_BLOCKED") {
     return {
-      ok: false,
+      ok: false, status: res.status,
       message:
         (serverMessage || "this account requires Zero Data Retention and the media model has no ZDR endpoint") +
         " — this is a privacy setting only the account owner can change (Settings → Privacy), so do not retry.",
     };
   }
   if (code === "ZDR_KEY_UNAVAILABLE") {
-    return { ok: false, message: serverMessage || "no zero-retention provider key is available right now — try again later" };
+    return { ok: false, status: res.status, message: serverMessage || "no zero-retention provider key is available right now — try again later" };
   }
   if (/DAILY_CAP|LIMIT_REACHED/i.test(code) || res.status === 429) {
-    return { ok: false, message: serverMessage || "the account's daily media allowance is used up — it resets tomorrow" };
+    return { ok: false, status: res.status, message: serverMessage || "the account's daily media allowance is used up — it resets tomorrow" };
   }
   if (res.status === 402 || /INSUFFICIENT|QUOTA|TOP_?UP/i.test(code)) {
-    return { ok: false, message: serverMessage || "the account is out of credit for media generation — top up or upgrade to continue" };
+    return { ok: false, status: res.status, message: serverMessage || "the account is out of credit for media generation — top up or upgrade to continue" };
   }
   if (res.status === 401 || res.status === 403) {
     return {
-      ok: false,
+      ok: false, status: res.status,
       message:
         serverMessage ||
         "this agent is not signed in to a Privateer account (or the plan doesn't include this), so it cannot generate media",
     };
   }
   if (res.status === 400 || res.status === 413) {
-    return { ok: false, message: serverMessage || `Privateer rejected the request${code ? ` (${code})` : ""}` };
+    return { ok: false, status: res.status, message: serverMessage || `Privateer rejected the request${code ? ` (${code})` : ""}` };
   }
   // 503/504 are OUR outage or a provider timing out, not a bad request: an unset
   // provider key, our own balance with that provider, or a slow job. Retrying the same
@@ -229,11 +243,11 @@ async function callAccount<T>(
   // good prompt in the belief it caused this.
   if (res.status === 503 || res.status === 504) {
     return {
-      ok: false,
+      ok: false, status: res.status,
       message: `${serverMessage || "that media service is temporarily unavailable"} — this is on Privateer's side, not the prompt's; try again in a few minutes`,
     };
   }
-  return { ok: false, message: serverMessage || `media generation failed (HTTP ${res.status}${code ? ` ${code}` : ""})` };
+  return { ok: false, status: res.status, message: serverMessage || `media generation failed (HTTP ${res.status}${code ? ` ${code}` : ""})` };
 }
 
 // ── Images ───────────────────────────────────────────────────────────────────
@@ -1125,6 +1139,44 @@ interface SpriteStatusResponse {
 }
 
 /**
+ * Is `target` the directory `root` itself, or something inside it?
+ *
+ * Asked through `relative` rather than by comparing string prefixes, because
+ * the obvious `target.startsWith(root + "/")` is WRONG for the one root whose
+ * own spelling already ends in a separator: with root `/`, every entry in a
+ * perfectly ordinary archive resolves to `/thing` and matches no prefix `//`,
+ * so a bundle destined for the filesystem root was rejected entry-by-entry as
+ * an escape attempt. That is not a hypothetical — an agent whose cwd is `/`
+ * (an Electron app opened from the Finder, a daemon started by launchd) and a
+ * `dir` of `.` lands exactly there, and the sprite bundle it had already paid
+ * for was thrown away with a security error that named the wrong problem. The
+ * prefix form is also separator-blind on Windows.
+ */
+export function pathInside(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(".." + sep));
+}
+
+/**
+ * Turn one archive entry name into a path under `root`, or refuse it.
+ *
+ * Separators are normalised first so a `..\\..` written the Windows way is
+ * judged as the traversal it is on every platform. The refusal names the
+ * destination as well as the entry, because the entry name alone is the half
+ * the reader already has: it is WHERE the archive was being unpacked to that
+ * says whether the bundle or the caller's `dir` is the thing at fault.
+ */
+function archiveEntryPath(name: string, root: string): string {
+  const rel = name.split("\\").join("/");
+  const traverses =
+    rel.startsWith("/") || /^[A-Za-z]:/.test(rel) || rel.split("/").some((seg) => seg === "..");
+  if (traverses || !pathInside(root, resolve(root, rel))) {
+    throw new Error(`archive entry "${name}" escapes the destination directory ${root}`);
+  }
+  return rel;
+}
+
+/**
  * Unpack the bundle into a directory.
  *
  * A hand-rolled reader rather than a dependency, and it is about thirty lines
@@ -1132,10 +1184,10 @@ interface SpriteStatusResponse {
  * payload is already PNG, so deflating it twice buys nothing), which means every
  * entry is a header followed by its bytes verbatim.
  *
- * ZIP-SLIP: entry names come off the wire, so each resolved path is checked to
- * be inside the destination before anything is written. A `..` segment here
- * would let a generated archive write anywhere the agent can reach, which on an
- * unattended run is the user's whole machine.
+ * ZIP-SLIP: entry names come off the wire, so each one is checked to be a plain
+ * relative path landing inside the destination before anything is written. A
+ * `..` segment here would let a generated archive write anywhere the agent can
+ * reach, which on an unattended run is the user's whole machine.
  */
 export function extractStoredZip(zip: Buffer, destDir: string): string[] {
   const written: string[] = [];
@@ -1153,10 +1205,7 @@ export function extractStoredZip(zip: Buffer, destDir: string): string[] {
     if (method !== 0) throw new Error(`archive entry "${name}" is compressed; only stored entries are expected`);
     if (dataAt + size > zip.length) throw new Error(`archive entry "${name}" is truncated`);
 
-    const target = resolve(root, name);
-    if (target !== root && !target.startsWith(root + "/")) {
-      throw new Error(`archive entry "${name}" escapes the destination directory`);
-    }
+    const target = resolve(root, archiveEntryPath(name, root));
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, zip.subarray(dataAt, dataAt + size));
     written.push(name);
@@ -1181,8 +1230,205 @@ export function extractStoredZip(zip: Buffer, destDir: string): string[] {
 export function guessResPath(cwd: string, dir: string): string | undefined {
   const target = resolve(abs(cwd, dir));
   const root = resolve(cwd);
-  if (target === root || !target.startsWith(root + "/")) return undefined;
-  return `res://${target.slice(root.length + 1).split("\\").join("/")}/`;
+  if (target === root || !pathInside(root, target)) return undefined;
+  return `res://${relative(root, target).split("\\").join("/")}/`;
+}
+
+/**
+ * The direction sets the server actually recognises, with what each one yields
+ * and what it bills.
+ *
+ * Kept here as a table rather than trusted to the description, because the
+ * server does not reject an unknown set — `parseSpec` falls back to 'one'. So
+ * `directions: "4"`, `"four-way"` or `"down,left,right,up"` used to be accepted
+ * all the way through, bill one clip, and hand back a single-facing sheet with
+ * no error anywhere: the caller asked for a four-way walk cycle and got one
+ * animation, which reads as the feature being broken rather than the argument
+ * being wrong. The schema is a closed set now and this table is what the
+ * unpacked result is checked against.
+ */
+const SPRITE_DIRECTION_SETS = {
+  one: { animations: 1, billed: 1 },
+  four: { animations: 4, billed: 3 },
+  eight: { animations: 8, billed: 5 },
+} as const;
+type SpriteDirections = keyof typeof SPRITE_DIRECTION_SETS;
+
+/**
+ * Whether a failed poll is worth another try.
+ *
+ * A poll that fails is NOT the job failing — the clips are still rendering at
+ * the provider and are still being paid for. A transport error (no status at
+ * all), a 429 or any 5xx is our side or the network having a bad moment, and the
+ * next poll six seconds later will very likely work; abandoning the job on the
+ * first one throws away up to five video generations the account has already
+ * been charged for, and on this path the bundle is delivered ONCE and stored
+ * nowhere, so there is nothing to go back for. A 404/410/401/402 is the
+ * opposite: the job is gone, already delivered, or was never ours, and waiting
+ * changes nothing.
+ */
+export function spritePollWorthRetrying(status?: number): boolean {
+  return status === undefined || status === 429 || status >= 500;
+}
+
+// How many consecutive failed polls to ride out before giving up. Six seconds
+// apart, so this is a minute of Privateer being unreachable — long enough to
+// cover a deploy or a blip, short enough that a genuinely dead endpoint does not
+// hold an unattended run until the 25-minute ceiling.
+const SPRITE_POLL_FAILURE_BUDGET = 10;
+
+/**
+ * Put the delivered archive somewhere safe before unpacking it.
+ *
+ * Returns the path, or null if even this failed — in which case the caller is
+ * out of options and has to say so. Deliberately the temp directory rather than
+ * the destination: the destination is the thing that may be unwritable or wrong,
+ * and a stray .zip inside a Godot project gets picked up by the import scan.
+ */
+function stashBundle(bundle: Buffer, jobId: string): string | null {
+  try {
+    const path = join(tmpdir(), `privateer-sprite-${jobId.replace(/[^A-Za-z0-9_-]/g, "")}.zip`);
+    writeFileSync(path, bundle);
+    return path;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wait on a submitted sprite job, unpack the bundle, and describe what landed.
+ *
+ * Split out of `execute` for the reason `awaitVideoJob` is: `resumeJobId` has to
+ * poll EXACTLY as the original call did, and a resume that polled differently
+ * would be the one path nobody exercises until someone's five-clip job is on the
+ * line.
+ *
+ * `expectedAnimations` is the size of the direction set that was asked for, and
+ * is null on a resume (where the request that chose it is gone). When it is
+ * known it is checked against what actually came back — the server packs a sheet
+ * out of whatever facings rendered and silently drops the rest, so a four-way
+ * set whose "up" clip failed returns three animations, bills three, and says
+ * nothing. That sheet is not the one the caller asked for and the .tres does not
+ * contain the animation their GDScript will play.
+ */
+async function awaitSpriteJob(
+  jobId: string,
+  cwd: string,
+  dir: string,
+  expectedAnimations: number | null,
+  billed: number | null,
+  signal?: AbortSignal,
+) {
+  const deadline = Date.now() + SPRITE_POLL_TIMEOUT_MS;
+  // The clips are charged as they land, so an abandoned poll still costs money —
+  // hence every exit below names the job id and says how to get back to it
+  // without paying twice.
+  const resumeHint =
+    `Resume it with generate_sprite { resumeJobId: "${jobId}", dir: "${dir}" } — ` +
+    "that waits on this same job and bills nothing further.";
+  const cancelled = () =>
+    text(
+      `Sprite job ${jobId} was submitted but the wait was cancelled. Its ${billed ?? "queued"} clip(s) are still rendering and will still be billed. ` +
+        resumeHint,
+    );
+
+  let consecutiveFailures = 0;
+
+  for (;;) {
+    if (signal?.aborted) return cancelled();
+    await sleep(SPRITE_POLL_INTERVAL_MS, signal);
+    if (signal?.aborted) return cancelled();
+
+    const poll = await callAccount<SpriteStatusResponse>(
+      `/api/agent/media/sprites/${encodeURIComponent(jobId)}`,
+      { method: "GET", signal },
+    );
+    if (!poll.ok) {
+      if (!spritePollWorthRetrying(poll.status)) {
+        return text(`Sprite job ${jobId} could not be polled: ${poll.message}`);
+      }
+      if (++consecutiveFailures >= SPRITE_POLL_FAILURE_BUDGET || Date.now() > deadline) {
+        return text(
+          `Sprite job ${jobId} could not be polled ${consecutiveFailures} times in a row: ${poll.message}. ` +
+            `The clips are still rendering and are still billed. ${resumeHint}`,
+        );
+      }
+      continue;
+    }
+    consecutiveFailures = 0;
+
+    const status = String(poll.data.status ?? "").toLowerCase();
+    if (status === "failed") {
+      return text(`Sprite generation failed: ${poll.data.error?.message ?? poll.data.message ?? "the provider reported a failure"}.`);
+    }
+    if (status === "completed") {
+      if (!poll.data.zip_base64) {
+        return text(`Sprite job ${jobId} already delivered its bytes on an earlier poll; they were not saved. Generate again if the files are missing.`);
+      }
+      const destination = abs(cwd, dir);
+      const bundle = Buffer.from(poll.data.zip_base64, "base64");
+      // Keep the bytes BEFORE touching them. This poll is the only delivery the
+      // job will ever make — the server stores nothing for the agent path and
+      // the next poll answers "already delivered" — so anything that throws
+      // between here and the last writeFileSync used to destroy up to five
+      // billed clips with no way back. The copy costs a few hundred kilobytes
+      // in the temp directory and is removed the moment the unpack succeeds.
+      const stash = stashBundle(bundle, jobId);
+      let written: string[];
+      try {
+        written = extractStoredZip(bundle, destination);
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        return text(
+          `Sprite job ${jobId} rendered but the bundle could not be unpacked into ${destination}: ${why}. ` +
+            (stash
+              ? `The archive itself was saved to ${stash} — unzip it there; the clips are already paid for and will not be delivered again.`
+              : "The archive could not be saved either, so the clips are lost."),
+        );
+      }
+      if (stash) {
+        try {
+          unlinkSync(stash);
+        } catch {
+          // Cleaning up a copy nobody needs is not worth failing a good unpack over.
+        }
+      }
+
+      const tres = written.find((f) => f.endsWith(".tres"));
+      const anims = poll.data.animations ?? [];
+      const mirrored = anims.filter((a) => a.origin === "mirrored").length;
+      const sheet = poll.data.sheet;
+      const missing = expectedAnimations != null ? expectedAnimations - anims.length : 0;
+
+      const lines = [
+        `Generated sprite animation: ${written.length} files in ${destination}`,
+        sheet ? `Sheet ${sheet.width}x${sheet.height}px, ${sheet.frame_width}x${sheet.frame_height} cells, ${sheet.columns}x${sheet.rows} grid.` : "",
+        anims.length ? `Animations: ${anims.map((a) => a.name).join(", ")}${mirrored ? ` (${mirrored} mirrored, not billed)` : ""}.` : "",
+        // Said out loud rather than left to be counted: a sheet short a facing is
+        // not the sheet that was asked for, and the animation GDScript plays for
+        // that direction is simply not in the resource.
+        missing > 0
+          ? `WARNING: ${missing} of ${expectedAnimations} facings did not render and are NOT in the sheet or the .tres — playing them will fail in Godot. ` +
+            "The facings that did land were billed. Re-run to try for the missing ones."
+          : "",
+        tres ? `Set an AnimatedSprite2D's Sprite Frames to ${poll.data.res_path ?? "res://"}${tres.split("/").pop()}.` : "",
+        "Set the sheet's texture Filter to Nearest in the Import dock, or the pixel art imports blurry.",
+        // Surfaced rather than swallowed: the flat backdrop the clip was asked
+        // for is a prompt the model can ignore, and when it does the key leaves
+        // a rim. The caller can see it here instead of finding it in-game.
+        poll.data.key_residue != null && poll.data.key_residue > 0.08
+          ? `NOTE: the background did not key cleanly (residue ${poll.data.key_residue.toFixed(2)}) — the frames may have a fringe. Re-run, or clean them up before shipping.`
+          : "",
+      ].filter(Boolean);
+      return text(lines.join("\n"));
+    }
+    if (Date.now() > deadline) {
+      return text(
+        `Sprite job ${jobId} is still ${status || "running"} after ${Math.round(SPRITE_POLL_TIMEOUT_MS / 60000)} minutes. ` +
+          `It will still complete and still be billed; nothing was saved here. ${resumeHint}`,
+      );
+    }
+  }
 }
 
 export const generateSpriteToolDefinition = {
@@ -1202,13 +1448,23 @@ export const generateSpriteToolDefinition = {
     "right-facing ones rather than rendered, which is why eight animations cost five clips and not " +
     "eight. Each clip is charged at the account's video rate, so an eight-way set is genuinely " +
     "expensive; say the total to the user before batching characters.\n" +
-    "TWO models are involved, which matters when one of them is down: an IMAGE model turns the " +
-    "picture to face each direction (only for `directions` 'four' and 'eight'), then a VIDEO model " +
-    "renders the motion per facing. `image_model` and `model` override them separately.\n" +
-    "It takes several minutes (the clips render sequentially) and this tool waits. Frame count, cell " +
-    "size and frame rate are chosen here and cost nothing extra. AVAILABILITY: this needs a video " +
-    "decoder on the Privateer API and some deployments do not have one — call media_capabilities and " +
-    "check `sprites.available` before spending, or you will get a clear refusal instead of a sheet. " +
+    "TWO models are involved, which matters when one of them is down AND when you are quoting a " +
+    "price: an IMAGE model turns the picture to face each direction (only for `directions` 'four' " +
+    "and 'eight'), then a VIDEO model renders the motion per facing. `image_model` and `model` " +
+    "override them separately. The turns are billed too, at the image rate — one still per billed " +
+    "facing after the first, so 'four' draws two and 'eight' draws four. They are small beside a " +
+    "clip, but a total that counts only clips is short; media_capabilities reports both numbers " +
+    "per direction set (`billedClips` and `billedTurnStills`).\n" +
+    "It takes several minutes — the picture is turned to face each direction one at a time before " +
+    "anything is billed, then the clips render together — and this tool waits. Frame count, cell " +
+    "size and frame rate are chosen here and cost nothing extra.\n" +
+    "If a call comes back saying the job is still running, or that it could not be polled, DO NOT " +
+    "call this again with the same image and prompt — that bills a whole second fan-out. Call it " +
+    "with `resumeJobId` set to the job id it reported (and the same `dir`) to keep waiting on the " +
+    "clips the account has already paid for.\n" +
+    "AVAILABILITY: this needs a video decoder on the Privateer API and some deployments do not have " +
+    "one — call media_capabilities and check `sprites.available` before spending, or you will get a " +
+    "clear refusal instead of a sheet. " +
     "PRIVACY: video and image models have no zero-retention option, so this is gated the way 3D is — " +
     "a ZDR account must have enabled non-ZDR media.",
   parameters: Type.Object({
@@ -1231,6 +1487,12 @@ export const generateSpriteToolDefinition = {
         "baked into the .tres is derived from it, so running at your Godot project root means the " +
         "resource resolves with nothing to edit.",
     }),
+    resumeJobId: Type.Optional(Type.String({
+      description:
+        "Resume waiting on a job already submitted (from a previous call that timed out or lost its " +
+        "poll). Nothing is generated and nothing is billed: it only polls and unpacks. `image`, " +
+        "`prompt` and every other setting are ignored — pass the same `dir`.",
+    })),
     action: Type.Optional(
       Type.String({
         description:
@@ -1239,12 +1501,16 @@ export const generateSpriteToolDefinition = {
       }),
     ),
     directions: Type.Optional(
-      Type.String({
-        description:
-          "'one' (default, one animation, ONE clip billed), 'four' (down/right/up/left, THREE billed) " +
-          "or 'eight' (adds the diagonals, FIVE billed). Four is the usual choice for a top-down or " +
-          "2.5D character; eight only if the game actually turns that finely.",
-      }),
+      Type.Union(
+        [Type.Literal("one"), Type.Literal("four"), Type.Literal("eight")],
+        {
+          description:
+            "'one' (default, one animation, ONE clip billed), 'four' (down/right/up/left, THREE billed) " +
+            "or 'eight' (adds the diagonals, FIVE billed). Four is the usual choice for a top-down or " +
+            "2.5D character; eight only if the game actually turns that finely. These three words are " +
+            "the only accepted values — not '4', not 'four-way'.",
+        },
+      ),
     ),
     frames: Type.Optional(
       Type.Number({
@@ -1296,7 +1562,7 @@ export const generateSpriteToolDefinition = {
   async execute(
     _toolCallId: string,
     params: {
-      image: string; prompt: string; dir: string; action?: string; directions?: string;
+      image: string; prompt: string; dir: string; resumeJobId?: string; action?: string; directions?: string;
       frames?: number; frame_size?: number; fps?: number; loop?: boolean;
       name?: string; res_path?: string; model?: string; image_model?: string;
     },
@@ -1305,9 +1571,36 @@ export const generateSpriteToolDefinition = {
     ctx?: { cwd?: string },
   ) {
     const cwd = ctx?.cwd ?? process.cwd();
+    if (!params.dir) return text("Error: dir is required — say where to write the sheet and the .tres.");
+
+    // RESUME. Submit nothing, bill nothing — just go back to waiting on a fan-out
+    // the account has already paid for. The direction set that chose the facing
+    // count is gone with the original request, so the short-sheet check is off.
+    const resumeJobId = String(params.resumeJobId ?? "").trim();
+    if (resumeJobId) return awaitSpriteJob(resumeJobId, cwd, params.dir, null, null, signal);
+
     if (!params.image) return text("Error: image is required — sprite generation derives every facing from one picture.");
     if (!params.prompt?.trim()) return text("Error: prompt is required — describe how the character moves.");
-    if (!params.dir) return text("Error: dir is required — say where to write the sheet and the .tres.");
+
+    // Checked rather than passed through: the server CLAMPS a number out of range
+    // and falls back on an unknown direction set, both silently, so a typo comes
+    // back as a sheet that is quietly not the one that was asked for — after the
+    // clips are billed. Refusing costs nothing and names the fix.
+    const directions = (params.directions ?? "one") as SpriteDirections;
+    if (!Object.prototype.hasOwnProperty.call(SPRITE_DIRECTION_SETS, directions)) {
+      return text(`Error: directions must be 'one', 'four' or 'eight' — got ${JSON.stringify(params.directions)}.`);
+    }
+    const ranges: [string, number | undefined, number, number][] = [
+      ["frames", params.frames, 2, 24],
+      ["frame_size", params.frame_size, 8, 512],
+      ["fps", params.fps, 1, 120],
+    ];
+    for (const [label, value, min, max] of ranges) {
+      if (value == null) continue;
+      if (!Number.isFinite(value) || value < min || value > max) {
+        return text(`Error: ${label} must be between ${min} and ${max} — got ${value}.`);
+      }
+    }
 
     let seed: { data: string; mimeType: string };
     try {
@@ -1324,7 +1617,7 @@ export const generateSpriteToolDefinition = {
         prompt: params.prompt,
         ...(params.action ? { action: params.action } : {}),
         ...(params.name ? { name: params.name } : {}),
-        ...(params.directions ? { directions: params.directions } : {}),
+        directions,
         ...(params.frames != null ? { frames: params.frames } : {}),
         ...(params.frame_size != null ? { frame_size: params.frame_size } : {}),
         ...(params.fps != null ? { fps: params.fps } : {}),
@@ -1345,67 +1638,11 @@ export const generateSpriteToolDefinition = {
     const jobId = submitted.data.id;
     if (!jobId) return text("Sprite generation failed: Privateer did not return a job id.");
 
-    const billed = submitted.data.billed_facings;
-    const deadline = Date.now() + SPRITE_POLL_TIMEOUT_MS;
-    // The clips are charged as they land, so an abandoned poll still costs money —
-    // hence every exit below names the job id and says so plainly.
-    const cancelled = () =>
-      text(`Sprite job ${jobId} was submitted but the wait was cancelled. Its ${billed ?? "queued"} clip(s) are still rendering and will still be billed.`);
-
-    for (;;) {
-      if (signal?.aborted) return cancelled();
-      await sleep(SPRITE_POLL_INTERVAL_MS, signal);
-      if (signal?.aborted) return cancelled();
-
-      const poll = await callAccount<SpriteStatusResponse>(
-        `/api/agent/media/sprites/${encodeURIComponent(jobId)}`,
-        { method: "GET", signal },
-      );
-      if (!poll.ok) return text(`Sprite job ${jobId} could not be polled: ${poll.message}`);
-
-      const status = String(poll.data.status ?? "").toLowerCase();
-      if (status === "failed") {
-        return text(`Sprite generation failed: ${poll.data.error?.message ?? poll.data.message ?? "the provider reported a failure"}.`);
-      }
-      if (status === "completed") {
-        if (!poll.data.zip_base64) {
-          return text(`Sprite job ${jobId} already delivered its bytes on an earlier poll; they were not saved. Generate again if the files are missing.`);
-        }
-        const destination = abs(cwd, params.dir);
-        let written: string[];
-        try {
-          written = extractStoredZip(Buffer.from(poll.data.zip_base64, "base64"), destination);
-        } catch (e) {
-          return text(`Sprite job ${jobId} rendered but the bundle could not be unpacked: ${e instanceof Error ? e.message : String(e)}`);
-        }
-
-        const tres = written.find((f) => f.endsWith(".tres"));
-        const anims = poll.data.animations ?? [];
-        const mirrored = anims.filter((a) => a.origin === "mirrored").length;
-        const sheet = poll.data.sheet;
-
-        const lines = [
-          `Generated sprite animation: ${written.length} files in ${destination}`,
-          sheet ? `Sheet ${sheet.width}x${sheet.height}px, ${sheet.frame_width}x${sheet.frame_height} cells, ${sheet.columns}x${sheet.rows} grid.` : "",
-          anims.length ? `Animations: ${anims.map((a) => a.name).join(", ")}${mirrored ? ` (${mirrored} mirrored, not billed)` : ""}.` : "",
-          tres ? `Set an AnimatedSprite2D's Sprite Frames to ${poll.data.res_path ?? "res://"}${tres.split("/").pop()}.` : "",
-          "Set the sheet's texture Filter to Nearest in the Import dock, or the pixel art imports blurry.",
-          // Surfaced rather than swallowed: the flat backdrop the clip was asked
-          // for is a prompt the model can ignore, and when it does the key leaves
-          // a rim. The caller can see it here instead of finding it in-game.
-          poll.data.key_residue != null && poll.data.key_residue > 0.08
-            ? `NOTE: the background did not key cleanly (residue ${poll.data.key_residue.toFixed(2)}) — the frames may have a fringe. Re-run, or clean them up before shipping.`
-            : "",
-        ].filter(Boolean);
-        return text(lines.join("\n"));
-      }
-      if (Date.now() > deadline) {
-        return text(
-          `Sprite job ${jobId} is still ${status || "running"} after ${Math.round(SPRITE_POLL_TIMEOUT_MS / 60000)} minutes. ` +
-            "It will still complete and still be billed; nothing was saved here.",
-        );
-      }
-    }
+    // The server's own count where it gave one, the table's where it did not —
+    // the point of the check is to notice a SHORT sheet, so guessing high would
+    // invent a failure and guessing low would hide one.
+    const expected = submitted.data.animations ?? SPRITE_DIRECTION_SETS[directions].animations;
+    return awaitSpriteJob(jobId, cwd, params.dir, expected, submitted.data.billed_facings ?? null, signal);
   },
 };
 

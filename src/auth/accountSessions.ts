@@ -5,9 +5,10 @@
 // only a CLEAN exit revoked it (session_shutdown → revokeLocalSessions). A terminal
 // that dies without running its shutdown hook — SIGKILL, a closed window, a crash,
 // `kill` — leaves its session row alive server-side for the rest of its ~24h TTL. Do
-// that a few times and the next spawn is refused with
-// `429 CHILD_SESSION_CAP: Too many active terminals for this device`, which takes the
-// whole account channel down until the rows age out.
+// that a few times and the account accumulates a pile of live rows nobody owns. (There
+// used to be a per-device cap that refused the next spawn outright, which took the whole
+// account channel down until the rows aged out; it is gone, and this is what keeps the
+// row count sane without one.)
 //
 // The fix is to reclaim an orphan instead of stacking another row on top of it. That
 // needs one bit the credential itself can't tell us: is the terminal that owns it

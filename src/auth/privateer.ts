@@ -158,8 +158,9 @@ let _refreshInFlight: Promise<ChildSession> | null = null;
 //
 // That pairing only covers a CLEAN exit, though. A terminal killed without running its
 // shutdown hook leaves its row alive server-side for the full TTL, and the next launch
-// used to spawn another on top of it — enough repeats and the spawn is refused with
-// `429 CHILD_SESSION_CAP`. So every session is also recorded in a pid-keyed registry
+// used to spawn another on top of it — so a few crashes left a pile of live rows nobody
+// owned (which used to be refused outright by a per-device cap the server has since
+// dropped). So every session is also recorded in a pid-keyed registry
 // (auth/accountSessions.ts) and acquireAccountCredential reclaims one whose owning
 // terminal is gone instead of spawning. Keep the registry in step with reality:
 // recordOwnedSession wherever a credential is minted or rotated, forgetOwnedSession
@@ -445,9 +446,8 @@ export async function runDeviceLogin(opts: {
 //
 // A 401 means the parent refresh token is gone — the machine login itself is dead, so
 // clear it and announce (the UI flips to signed-out). EVERY OTHER status used to be
-// reported as an expiry too, which actively misled: the common one is 429
-// `CHILD_SESSION_CAP` ("Too many active terminals for this device. Sign one out and
-// try again"), where /login is not the fix and the credentials are perfectly valid.
+// reported as an expiry too, which actively misled: a rate limit or a server-side
+// refusal is not something /login fixes, and the credentials are perfectly valid.
 // Pass the server's own message through so the user learns what to actually do.
 async function spawnFailure(res: Response): Promise<Error> {
   if (res.status === 401) {
