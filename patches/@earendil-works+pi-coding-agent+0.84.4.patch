@@ -1,9 +1,18 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/config.js b/node_modules/@earendil-works/pi-coding-agent/dist/config.js
-index f04269f..536e030 100644
+index f04269f..7160497 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/config.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/config.js
-@@ -401,6 +401,64 @@ export const APP_NAME = piConfigName || "pi";
- export const APP_TITLE = piConfigName ? APP_NAME : "π";
+@@ -398,9 +398,72 @@ catch (e) {
+ const piConfigName = pkg.piConfig?.name;
+ export const PACKAGE_NAME = pkg.name || "@earendil-works/pi-coding-agent";
+ export const APP_NAME = piConfigName || "pi";
+-export const APP_TITLE = piConfigName ? APP_NAME : "π";
++// Privateer patch: this package's own package.json sets piConfig.configDir but not
++// piConfig.name, so stock Pi's fallback here is the literal "π" glyph — which is what
++// showed up as the OS terminal tab/window title (setTitle(`${APP_TITLE} - session - cwd`)
++// in interactive-mode.js) on almost every terminal, even after privateer-brand's own
++// setTitle("Privateer") ran, because later stock calls stomp it back to "π".
++export const APP_TITLE = piConfigName ? APP_NAME : "⚓ Privateer";
  export const CONFIG_DIR_NAME = pkg.piConfig?.configDir || ".pi";
  export const VERSION = pkg.version || "0.0.0";
 +// --- Privateer patch: dual project config dirs -------------------------------
