@@ -156,6 +156,78 @@ test("models command: headless exact match switches and persists to settings.jso
   assert.equal(resolveDefaultModel({ env: {}, signedIn: true }), "openai/gpt-5.5");
 });
 
+test("models command: switching to a text-only model warns it can't see images", async () => {
+  freshHome();
+  let handler!: (args: string, ctx: any) => Promise<void>;
+
+  privateerModels({
+    registerCommand: (_name: string, opts: any) => {
+      handler = opts.handler;
+    },
+    setModel: async () => true,
+  });
+
+  // gpt-oss is deliberately excluded from vision.ts's allowlist (open-weights, text
+  // only) — see providers/vision.ts's note on the openai pattern.
+  const available = [{ provider: "openai", id: "gpt-oss-120b", name: "GPT-OSS 120B" }];
+
+  const notices: Array<{ text: string; level: string }> = [];
+  const ctx = {
+    ui: {
+      notify: (text: string, level: string) => {
+        notices.push({ text, level });
+      },
+    },
+    modelRegistry: {
+      refresh: () => {},
+      getAvailable: async () => available,
+    },
+    model: available[0],
+  };
+
+  await handler("openai/gpt-oss-120b", ctx);
+
+  assert.ok(
+    notices.some((n) => n.level === "warning" && n.text.includes("can't see images")),
+    "must warn — otherwise a picture just gets dropped silently on the next turn",
+  );
+});
+
+test("models command: switching to a vision model warns nothing extra", async () => {
+  freshHome();
+  let handler!: (args: string, ctx: any) => Promise<void>;
+
+  privateerModels({
+    registerCommand: (_name: string, opts: any) => {
+      handler = opts.handler;
+    },
+    setModel: async () => true,
+  });
+
+  const available = [{ provider: "anthropic", id: "claude-opus-4-8", name: "Claude Opus 4.8" }];
+
+  const notices: Array<{ text: string; level: string }> = [];
+  const ctx = {
+    ui: {
+      notify: (text: string, level: string) => {
+        notices.push({ text, level });
+      },
+    },
+    modelRegistry: {
+      refresh: () => {},
+      getAvailable: async () => available,
+    },
+    model: available[0],
+  };
+
+  await handler("anthropic/claude-opus-4-8", ctx);
+
+  assert.ok(
+    !notices.some((n) => n.level === "warning"),
+    "a vision-capable model must not trigger the can't-see-images warning",
+  );
+});
+
 test("models command: rejected setModel does not persist", async () => {
   freshHome();
   let handler!: (args: string, ctx: any) => Promise<void>;

@@ -55,6 +55,7 @@ async function main() {
   const { pickerCatalog, hiddenAccountNotice, hiddenAccountTitleSuffix } = await import("../providers/modelCatalog.ts");
   const { resolveDefaultModel, resolveSignedInModel, savedPiDefaultSpec, writePiDefaultModel } =
     await import("../providers/defaultModel.ts");
+  const { acceptsImages } = await import("../providers/vision.ts");
   const { postOutbox } = await import("../outbox/cloudOutbox.ts");
   const { addPendingCloud } = await import("../routines/store.ts");
 
@@ -434,6 +435,14 @@ async function main() {
   }
 
   console.log(`${DIM}privateer-agent — lean REPL. Loading ${provider}/${modelId}…${RESET}`);
+  // A saved pick (settings.json) or an old BYO/env default can silently outrank the
+  // vision-capable account default (see defaultModel.ts's precedence). Pi drops image
+  // blocks for a model that doesn't declare the modality with NO error — `read` on a
+  // screenshot just quietly answers about nothing — so make that failure visible
+  // instead of letting a user discover it turn by turn. /model to switch.
+  if (!acceptsImages(spec)) {
+    console.log(`${YELLOW}⚠ ${provider}/${modelId} can't see images — @file/read on a picture or video frame will be dropped silently. Run /model to switch.${RESET}`);
+  }
   if (noQuarterActive()) applyNoQuarter(true); // launched with --no-quarter: say so up front
 
   const services = await createAgentSessionServices({
@@ -732,6 +741,9 @@ async function main() {
       writePiDefaultModel(sp);
       const m = `model → ${sp}`;
       console.log(`${DIM}${m}${RESET}`);
+      if (!acceptsImages(sp)) {
+        console.log(`${YELLOW}⚠ ${sp} can't see images — @file/read on a picture will be dropped silently.${RESET}`);
+      }
       relay?.sendContext({ model: currentSpec, cwd, version: agentVersion() }); // banner follows the switch
       if (remote) relay?.sendNotice(m);
     } catch (e) {

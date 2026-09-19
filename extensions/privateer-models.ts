@@ -31,6 +31,7 @@ import {
   fetchAccountCatalog,
 } from "../src/providers/account.ts";
 import { writePiDefaultModel } from "../src/providers/defaultModel.ts";
+import { acceptsImages } from "../src/providers/vision.ts";
 
 // A minimal view of Pi's theme (passed to the ui.custom factory) — enough to color
 // text without pulling Pi's internal theme types into an extension.
@@ -402,6 +403,9 @@ export default function privateerModels(pi: {
                 `Model: ${match.provider}/${match.id}  ·  ${TIERS[tier].label}`,
                 "info",
               );
+              if (!acceptsImages(`${match.provider}/${match.id}`)) {
+                ui?.notify?.(`${match.provider}/${match.id} can't see images — files will be dropped silently.`, "warning");
+              }
               return;
             } catch (e) {
               ui?.notify?.(`Couldn't switch model: ${(e as Error).message}`, "error");
@@ -448,6 +452,9 @@ export default function privateerModels(pi: {
           `Model: ${chosen.provider}/${chosen.id}  ·  ${TIERS[chosen.tier].label}`,
           "info",
         );
+        if (!acceptsImages(`${chosen.provider}/${chosen.id}`)) {
+          ui.notify?.(`${chosen.provider}/${chosen.id} can't see images — files will be dropped silently.`, "warning");
+        }
       } catch (e) {
         ui.notify?.(`Couldn't switch model: ${(e as Error).message}`, "error");
       }
