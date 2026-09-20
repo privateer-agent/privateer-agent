@@ -53,8 +53,14 @@ async function main() {
   const { modelRegistryOf } = await import("../providers/piAuthStore.ts");
   const { agentVersion } = await import("../config/version.ts");
   const { pickerCatalog, hiddenAccountNotice, hiddenAccountTitleSuffix } = await import("../providers/modelCatalog.ts");
-  const { resolveDefaultModel, resolveSignedInModel, savedPiDefaultSpec, writePiDefaultModel } =
-    await import("../providers/defaultModel.ts");
+  const {
+    resolveDefaultModel,
+    resolveSignedInModel,
+    savedPiDefaultSpec,
+    writePiDefaultModel,
+    visionWarningAcknowledged,
+    acknowledgeVisionWarning,
+  } = await import("../providers/defaultModel.ts");
   const { acceptsImages } = await import("../providers/vision.ts");
   const { postOutbox } = await import("../outbox/cloudOutbox.ts");
   const { addPendingCloud } = await import("../routines/store.ts");
@@ -440,8 +446,11 @@ async function main() {
   // blocks for a model that doesn't declare the modality with NO error — `read` on a
   // screenshot just quietly answers about nothing — so make that failure visible
   // instead of letting a user discover it turn by turn. /model to switch.
-  if (!acceptsImages(spec)) {
+  // Shown once per distinct non-vision spec (visionWarningAcknowledged), not on every
+  // launch — a user who keeps a deliberate non-vision pick already knows the tradeoff.
+  if (!acceptsImages(spec) && !visionWarningAcknowledged(spec)) {
     console.log(`${YELLOW}⚠ ${provider}/${modelId} can't see images — @file/read on a picture or video frame will be dropped silently. Run /model to switch.${RESET}`);
+    acknowledgeVisionWarning(spec);
   }
   if (noQuarterActive()) applyNoQuarter(true); // launched with --no-quarter: say so up front
 

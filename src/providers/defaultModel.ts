@@ -227,6 +227,43 @@ export function resolveSignedInModel(env: NodeJS.ProcessEnv = process.env): stri
   return resolveDefaultModel({ env, signedIn: true, saved: null });
 }
 
+// Whether the startup "can't see images" nag (cli/chat.ts) has already been shown for
+// this exact spec. Without this, a user who deliberately keeps a non-vision saved pick
+// (speed over sight, say) sees the same warning on every single launch forever, which
+// trains people to stop reading warnings at all. Keyed by spec so switching to a
+// DIFFERENT non-vision model warns again once — this tracks "have they seen this
+// specific tradeoff", not "should we ever mention it again".
+export function visionWarningAcknowledged(spec: string): boolean {
+  try {
+    const raw = readFileSync(join(agentDir(), "settings.json"), "utf8").trim();
+    if (!raw) return false;
+    const s = JSON.parse(raw) as Record<string, unknown>;
+    return s.visionWarningAcknowledgedFor === spec;
+  } catch {
+    return false;
+  }
+}
+
+// Record that the nag has been shown for `spec`, so the next launch on the same pick
+// stays quiet. Best-effort and silent like the writers below — losing this write just
+// means the warning repeats once more, never a crash.
+export function acknowledgeVisionWarning(spec: string): void {
+  const dir = agentDir();
+  const settingsPath = join(dir, "settings.json");
+  try {
+    mkdirSync(dir, { recursive: true });
+    let settings: Record<string, unknown> = {};
+    if (existsSync(settingsPath)) {
+      const raw = readFileSync(settingsPath, "utf8").trim();
+      if (raw) settings = JSON.parse(raw) as Record<string, unknown>;
+    }
+    settings.visionWarningAcknowledgedFor = spec;
+    writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  } catch {
+    // best-effort: the warning already printed either way.
+  }
+}
+
 // Split a "provider/id" spec on its first slash (model ids themselves contain "/", so
 // only the first delimiter separates provider from model). Returns null for a spec
 // with no provider prefix.

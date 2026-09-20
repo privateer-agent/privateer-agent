@@ -16,10 +16,12 @@ import {
   LEGACY_BYO_FALLBACK,
   TINFOIL_DEFAULT_SPEC,
   TINFOIL_MODEL_ID,
+  acknowledgeVisionWarning,
   ensurePiDefaultModel,
   resolveDefaultModel,
   resolveSignedInModel,
   savedPiDefaultSpec,
+  visionWarningAcknowledged,
   writePiDefaultModel,
 } from "../src/providers/defaultModel.ts";
 import { acceptsImages, visionInput } from "../src/providers/vision.ts";
@@ -247,6 +249,33 @@ test("writePiDefaultModel: a corrupt settings.json costs the pick, never a throw
   freshHome();
   writeFileSync(join(agentDir(), "settings.json"), "{ not json");
   assert.equal(writePiDefaultModel("openai/gpt-5.5"), null, "best-effort: the switch already happened");
+});
+
+// The nag this fixes: a deliberate non-vision saved pick (e.g. a fast text-only model
+// kept for speed) used to print the "can't see images" warning on EVERY launch,
+// forever. Acknowledging it once should silence it for that spec, but not for a
+// DIFFERENT non-vision spec the user switches to next.
+test("visionWarningAcknowledged: false until acknowledged, then sticks for that spec only", () => {
+  freshHome();
+  assert.equal(visionWarningAcknowledged("privateer/z-ai/glm-5.3-flashx"), false);
+  acknowledgeVisionWarning("privateer/z-ai/glm-5.3-flashx");
+  assert.equal(visionWarningAcknowledged("privateer/z-ai/glm-5.3-flashx"), true);
+  // A different non-vision spec hasn't been seen yet — warn once for it too.
+  assert.equal(visionWarningAcknowledged("openai/gpt-oss-120b"), false);
+});
+
+test("acknowledgeVisionWarning: preserves unrelated settings and survives a missing file", () => {
+  freshHome();
+  writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ theme: "dark" }));
+  acknowledgeVisionWarning("privateer/z-ai/glm-5.3-flashx");
+  const settings = JSON.parse(readFileSync(join(agentDir(), "settings.json"), "utf8"));
+  assert.equal(settings.theme, "dark", "unrelated settings must survive");
+  assert.equal(settings.visionWarningAcknowledgedFor, "privateer/z-ai/glm-5.3-flashx");
+
+  freshHome();
+  rmSync(join(agentDir(), "settings.json"), { force: true });
+  acknowledgeVisionWarning("openai/gpt-oss-120b"); // no settings.json yet — must not throw
+  assert.equal(visionWarningAcknowledged("openai/gpt-oss-120b"), true);
 });
 
 test.after(() => rmSync(process.env.PRIVATEER_HOME!, { recursive: true, force: true }));
