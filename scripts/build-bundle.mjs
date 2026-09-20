@@ -214,7 +214,12 @@ function buildTarget(name) {
   // any host can assemble a correct bundle for any target. (koffi/pi-tui bundle all
   // platforms in one package, so those are handled by pruneNatives instead.)
   log(`Installing prod dependencies (npm ci --omit=dev --os=${t.os} --cpu=${t.arch})`);
-  for (const f of ["package.json", "package-lock.json"]) {
+  // .npmrc travels with the manifest/lockfile: npm reads config from the directory
+  // holding the package.json it's installing (which IS `stage`, since it has its own
+  // copy), not from REPO two levels up. Without this, ignore-scripts/legacy-peer-deps/
+  // save-exact silently stop applying to the one install that actually produces the
+  // shipped bundle.
+  for (const f of ["package.json", "package-lock.json", ".npmrc"]) {
     fs.copyFileSync(path.join(REPO, f), path.join(stage, f));
   }
   fs.cpSync(path.join(REPO, "patches"), path.join(stage, "patches"), { recursive: true });
