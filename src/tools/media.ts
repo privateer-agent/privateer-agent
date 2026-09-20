@@ -738,6 +738,10 @@ interface AudioResponse {
   audioBase64?: string;
   mimeType?: string;
   model?: string;
+  /** The exact wire voice the provider actually received (post-resolution —
+   *  e.g. an aura-2 override of 'jupiter' comes back as 'aura-2-jupiter-en').
+   *  Absent only on models that take no voice at all. */
+  voice?: string;
   /** Present only for the models that take a length — an sfx model always does. */
   durationSeconds?: number;
 }
@@ -749,11 +753,21 @@ export const generateSpeechToolDefinition = {
     "Turn text into spoken audio and save it to disk. Use it to narrate a video you are assembling, or " +
     "to produce a spoken version of a written answer. Billed to the user's Privateer account; the " +
     "account's default voice model is a confidential-compute one, so the text is processed inside an " +
-    "enclave rather than by a retaining provider. Mux the result onto video with video_compose.",
+    "enclave rather than by a retaining provider. Mux the result onto video with video_compose. " +
+    "Call media_capabilities first if you want to override `voice` or `model` — it lists the exact " +
+    "wire voice ids for the account's current TTS model (and any model you pass it), which is not " +
+    "the same as a spoken character or brand name.",
   parameters: Type.Object({
     text: Type.String({ description: "The words to speak. Write them as they should be read aloud." }),
     path: Type.String({ description: "Where to write the audio, relative to cwd or absolute (e.g. 'audio/narration.mp3')." }),
-    voice: Type.Optional(Type.String({ description: "Voice name, if the account's TTS model offers a choice. Leave unset for its default." })),
+    voice: Type.Optional(Type.String({
+      description:
+        "Voice id, if the account's TTS model offers a choice. Leave unset for its default. These are " +
+        "PROVIDER wire ids, not free text — e.g. Deepgram Aura-2 voices are 'aura-2-<name>-<lang>' " +
+        "('aura-2-jupiter-en', not 'jupiter' or 'Jupiter'). Get the exact legal list for the model in " +
+        "play from media_capabilities' `speech.voices` before guessing one; an unrecognised id is " +
+        "refused with VOICE_UNSUPPORTED rather than silently served on a different voice.",
+    })),
     model: Type.Optional(Type.String({ description: "Override the account's text-to-speech model." })),
   }),
   async execute(
@@ -783,7 +797,13 @@ export const generateSpeechToolDefinition = {
     const target = abs(cwd, params.path);
     const ext = extname(target) || extForMime(r.data.mimeType ?? "", ".mp3");
     const out = `${target.slice(0, target.length - extname(target).length)}${ext}`;
-    return text(`Generated speech: ${writeOut(out, Buffer.from(r.data.audioBase64, "base64"))}`);
+    // Report what actually ran, not what was requested — the two can differ
+    // (a resolved default, a normalized voice id) and the caller has no other
+    // way to find out short of listening to the file.
+    const via = [r.data.model, r.data.voice].filter(Boolean).join(" / ");
+    return text(
+      `Generated speech${via ? ` with ${via}` : ""}: ${writeOut(out, Buffer.from(r.data.audioBase64, "base64"))}`,
+    );
   },
 };
 
@@ -951,6 +971,20 @@ interface CapabilitiesResponse {
    *  the account's own privacy setting. They are different refusals with different
    *  remedies, and only one of them is the user's to fix. */
   sfx?: { model?: string; configured?: boolean; blockedByZdr?: boolean; maxDurationSeconds?: number };
+  /** `voices` (on the described model) is populated only for models with an
+   *  enumerable, closed voice set (Deepgram Aura-2, Tinfoil, fal) — pass
+   *  `ttsModel` to describe one other than the account default. Empty for
+   *  models whose voices aren't data this server holds (Gemini, OpenAI-shaped);
+   *  guessing one there is on you. `catalog` is EVERY TTS model this account
+   *  can reach, summarized — the only place other than the default to
+   *  discover an id, since there is no TTS picker in this CLI. */
+  speech?: {
+    model?: string; blockedByZdr?: boolean; voices?: string[];
+    catalog?: {
+      id: string; name?: string; provider?: string;
+      isZdr?: boolean; isTee?: boolean; blockedByZdr?: boolean; voiceCount?: number;
+    }[];
+  };
   privacy?: { requireZdr?: boolean; allowNonZdrMedia?: boolean };
 }
 
@@ -1060,6 +1094,44 @@ export function describeSfx(sfx: CapabilitiesResponse["sfx"]): string[] {
   ];
 }
 
+/**
+ * Speech, worded the same way describeSfx is: a [BLOCKED] model is the
+ * account's own ZDR setting, not something retrying fixes. `voices` prints
+ * only when the model publishes an enumerable set — printing all 90 of
+ * Aura-2's inline is the whole point (a bare character name is not a legal
+ * id on the wire), but a model with none gets no fabricated list either.
+ */
+export function describeSpeech(speech: CapabilitiesResponse["speech"]): string[] {
+  const blocked = speech?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : "";
+  const lines = [`Speech model: ${speech?.model ?? "unknown"}${blocked}`];
+  if (speech?.blockedByZdr) {
+    lines.push(
+      "  This voice model is non-ZDR, so this account cannot use it until its owner enables non-ZDR " +
+        "media (Settings → Privacy). Omit `model` to use the account's confidential-compute default " +
+        "instead of retrying this one.",
+    );
+  }
+  if (speech?.voices?.length) {
+    lines.push(
+      `  ${speech.voices.length} voice id(s) for this model — pass one of these EXACTLY as generate_speech's ` +
+        `\`voice\`, never a guessed name: ${speech.voices.join(", ")}`,
+    );
+  } else {
+    lines.push("  No enumerable voice list for this model; omit `voice` to use its default.");
+  }
+  if (speech?.catalog?.length) {
+    lines.push("  every TTS model available (pass `ttsModel` to this tool to see its voices):");
+    for (const m of speech.catalog) {
+      const tags = [m.isTee ? "confidential" : m.isZdr ? "ZDR" : "non-ZDR", `${m.voiceCount ?? 0} voice(s)`];
+      if (m.blockedByZdr) tags.push("BLOCKED");
+      lines.push(
+        `    ${m.id}  (${tags.join(", ")})${m.id === speech.model ? "  [described above]" : ""}`,
+      );
+    }
+  }
+  return lines;
+}
+
 export const mediaCapabilitiesToolDefinition = {
   name: "media_capabilities",
   label: "Media Capabilities",
@@ -1072,7 +1144,10 @@ export const mediaCapabilitiesToolDefinition = {
     "It is also the ONLY way to find out which 3D models exist and what options each one takes: they " +
     "range from $0.14 to $2.41 a mesh and no two take the same options, so call this with `model` set " +
     "to the id you are considering BEFORE generate_model, or you will pay the default model's price " +
-    "for a job a cheaper one could have done.",
+    "for a job a cheaper one could have done.\n" +
+    "It is also the ONLY way to find a text-to-speech model's real voice ids — Deepgram Aura-2's are " +
+    "'aura-2-<name>-<lang>', not a bare character name — so call this with `ttsModel` set BEFORE " +
+    "generate_speech whenever you plan to pass `voice`.",
   parameters: Type.Object({
     model: Type.Optional(
       Type.String({
@@ -1082,13 +1157,27 @@ export const mediaCapabilitiesToolDefinition = {
           "their legal values and the price — is per-model.",
       }),
     ),
+    ttsModel: Type.Optional(
+      Type.String({
+        description:
+          "A text-to-speech model id to describe instead of the account default (e.g. 'deepgram/aura-2'). " +
+          "The response's `speech.voices` lists every legal voice id for THIS model — voice ids are not " +
+          "shared across models.",
+      }),
+    ),
   }),
-  async execute(_toolCallId: string, params: { model?: string }, signal?: AbortSignal) {
-    const query = params?.model ? `?model=${encodeURIComponent(params.model)}` : "";
-    const r = await callAccount<CapabilitiesResponse>(`/api/agent/media/capabilities${query}`, { method: "GET", signal });
+  async execute(_toolCallId: string, params: { model?: string; ttsModel?: string }, signal?: AbortSignal) {
+    const query = new URLSearchParams();
+    if (params?.model) query.set("model", params.model);
+    if (params?.ttsModel) query.set("ttsModel", params.ttsModel);
+    const qs = query.toString();
+    const r = await callAccount<CapabilitiesResponse>(
+      `/api/agent/media/capabilities${qs ? `?${qs}` : ""}`,
+      { method: "GET", signal },
+    );
     if (!r.ok) return text(`Could not read media capabilities: ${r.message}`);
 
-    const { image, video, model3d, sfx, privacy } = r.data;
+    const { image, video, model3d, sfx, speech, privacy } = r.data;
     const lines = [
       `Image model: ${image?.model ?? "unknown"}${image?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : ""}`,
       `  up to ${image?.maxPerCall ?? 1} image(s) per call`,
@@ -1099,18 +1188,19 @@ export const mediaCapabilitiesToolDefinition = {
 
     lines.push(...describeModel3d(model3d));
     lines.push(...describeSfx(sfx));
+    lines.push(...describeSpeech(speech));
 
     lines.push(`Privacy: requireZdr=${privacy?.requireZdr ?? "?"}, allowNonZdrMedia=${privacy?.allowNonZdrMedia ?? "?"}`);
-    if (image?.blockedByZdr || video?.blockedByZdr || model3d?.blockedByZdr || sfx?.blockedByZdr) {
+    if (image?.blockedByZdr || video?.blockedByZdr || model3d?.blockedByZdr || sfx?.blockedByZdr || speech?.blockedByZdr) {
       lines.push(
         "A [BLOCKED] model means the account requires Zero Data Retention and that model has no ZDR endpoint. " +
           "Only the account owner can change it (Settings → Privacy); do not keep retrying.",
       );
     }
     lines.push(
-      "Speech and music are always available; sound effects are not (see above). Speech runs confidentially, " +
-        "music has no ZDR gate at all, and effects are gated like image and video — so a blocked effect must " +
-        "never be answered with music.",
+      "Music is always available; sound effects and (per above) speech's CURRENT model may not be. Music has " +
+        "no ZDR gate at all; effects are gated like image and video, so a blocked effect must never be " +
+        "answered with music instead.",
     );
     return text(lines.join("\n"));
   },
