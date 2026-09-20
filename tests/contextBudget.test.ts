@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import {
   CONTEXT_SAFETY_TOKENS,
   MIN_ANSWER_TOKENS,
@@ -65,8 +65,12 @@ test("an unknown context window passes the ask through", () => {
 test("the shipped patch matches this module", () => {
   // The pi-ai copy is what actually runs. Patching is best-effort by design
   // (bin/apply-patches.mjs), so a drift between the two is silent — pin the
-  // constants and the shape of the expression that replaced the `1`.
-  const patch = readFileSync("patches/@earendil-works+pi-ai+0.84.4.patch", "utf8");
+  // constants and the shape of the expression that replaced the `1`. The
+  // filename's version suffix moves as pi-ai is upgraded, so find it by prefix
+  // rather than pinning a version here too.
+  const patchFile = readdirSync("patches").find((f) => f.startsWith("@earendil-works+pi-ai+") && f.endsWith(".patch"));
+  assert.ok(patchFile, "no @earendil-works+pi-ai patch found in patches/");
+  const patch = readFileSync(`patches/${patchFile}`, "utf8");
   const code = (prefix: string) =>
     patch
       .split("\n")

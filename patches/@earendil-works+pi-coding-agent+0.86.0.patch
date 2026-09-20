@@ -1,8 +1,8 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/config.js b/node_modules/@earendil-works/pi-coding-agent/dist/config.js
-index f04269f..7160497 100644
+index 872dd55..edd61db 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/config.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/config.js
-@@ -398,9 +398,72 @@ catch (e) {
+@@ -399,9 +399,72 @@ catch (e) {
  const piConfigName = pkg.piConfig?.name;
  export const PACKAGE_NAME = pkg.name || "@earendil-works/pi-coding-agent";
  export const APP_NAME = piConfigName || "pi";
@@ -77,10 +77,10 @@ index f04269f..7160497 100644
  export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
  export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index fd82b71..7c10ba9 100644
+index 638646d..ba1da98 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -38,6 +38,122 @@ import { createLocalBashOperations } from "./tools/bash.js";
+@@ -39,6 +39,129 @@ import { createLocalBashOperations } from "./tools/bash.js";
  import { createAllToolDefinitions } from "./tools/index.js";
  import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
  import { addUsageToTotals, createUsageTotals } from "./usage-totals.js";
@@ -192,7 +192,14 @@ index fd82b71..7c10ba9 100644
 +// A server-stated delay wins outright — it is the only number here that is a fact.
 +// The jitter is the point of the rest: without it every parallel request that tripped
 +// the same limit wakes at the identical millisecond and trips it again.
-+export function retryDelayMs(errorText, attempt, baseDelayMs) {
++//
++// Privateer patch: named pvRetryDelayMs, not retryDelayMs — pi-ai now ships its OWN
++// `retryDelayMs(policy, attempt)` (plain exponential backoff, no retry-after, no
++// jitter), imported by this file below. A same-named top-level function here would be
++// a SyntaxError (duplicate declaration) that takes the whole CLI down at launch,
++// exactly the failure mode the MIN_ANSWER_TOKENS comment in the pi-ai patch warns
++// about. Ours still fully supersedes pi-ai's at the one call site that mattered.
++export function pvRetryDelayMs(errorText, attempt, baseDelayMs) {
 +    const stated = retryAfterMs(errorText);
 +    if (stated != null)
 +        return stated;
@@ -203,7 +210,7 @@ index fd82b71..7c10ba9 100644
  /**
   * Parse a skill block from message text.
   * Returns null if the text doesn't contain a skill block.
-@@ -102,6 +218,8 @@ export class AgentSession {
+@@ -101,6 +224,8 @@ export class AgentSession {
      // Retry state
      _retryAbortController = undefined;
      _retryAttempt = 0;
@@ -212,7 +219,7 @@ index fd82b71..7c10ba9 100644
      // Bash execution state
      _bashAbortControllers = new Set();
      _pendingBashMessages = [];
-@@ -186,6 +304,14 @@ export class AgentSession {
+@@ -192,6 +317,14 @@ export class AgentSession {
          }
          const isOAuth = this._modelRuntime.isUsingOAuth(model.provider);
          if (isOAuth) {
@@ -227,7 +234,7 @@ index fd82b71..7c10ba9 100644
              throw new Error(`Authentication failed for "${model.provider}". ` +
                  `Credentials may have expired or network is unavailable. ` +
                  `Run '/login ${model.provider}' to re-authenticate.`);
-@@ -380,6 +506,16 @@ export class AgentSession {
+@@ -401,6 +534,16 @@ export class AgentSession {
                  }
              }
          }
@@ -244,7 +251,7 @@ index fd82b71..7c10ba9 100644
          // Emit to extensions first
          await this._emitExtensionEvent(event);
          // Notify all listeners
-@@ -801,6 +937,33 @@ export class AgentSession {
+@@ -904,6 +1047,33 @@ export class AgentSession {
                  finalError: msg.errorMessage,
              });
              this._retryAttempt = 0;
@@ -277,8 +284,8 @@ index fd82b71..7c10ba9 100644
 +            return false;
          }
          if (await this._checkCompaction(msg)) {
-             return true;
-@@ -882,6 +1045,14 @@ export class AgentSession {
+             return !this._agentRunAbortRequested;
+@@ -991,6 +1161,14 @@ export class AgentSession {
              if (!hasConfiguredAuth) {
                  const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
                  if (isOAuth) {
@@ -293,7 +300,7 @@ index fd82b71..7c10ba9 100644
                      throw new Error(`Authentication failed for "${this.model.provider}". ` +
                          `Credentials may have expired or network is unavailable. ` +
                          `Run '/login ${this.model.provider}' to re-authenticate.`);
-@@ -891,7 +1062,13 @@ export class AgentSession {
+@@ -1000,7 +1178,13 @@ export class AgentSession {
              // Check if we need to compact before sending (catches aborted responses).
              // The user's new prompt is sent below, so do not call agent.continue() here.
              const lastAssistant = this._findLastAssistantMessage();
@@ -308,7 +315,7 @@ index fd82b71..7c10ba9 100644
                  await this._checkCompaction(lastAssistant, false);
              }
              // Build messages array (custom message if any, then user message)
-@@ -2242,6 +2419,34 @@ export class AgentSession {
+@@ -2351,6 +2535,34 @@ export class AgentSession {
          // Context overflow is handled by compaction, not retry.
          if (isContextOverflow(message, this.model?.contextWindow ?? 0))
              return false;
@@ -343,16 +350,15 @@ index fd82b71..7c10ba9 100644
          return isRetryableAssistantError(message);
      }
      /**
-@@ -2287,7 +2492,11 @@ export class AgentSession {
+@@ -2408,7 +2620,10 @@ export class AgentSession {
              this._retryAttempt--;
              return false;
          }
--        const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+-        const delayMs = retryDelayMs(settings, this._retryAttempt);
 +        // Privateer patch: honour a server-stated `retry-after` and jitter the fallback.
-+        // Stock Pi's fixed 2s/4s/8s ladder spends its whole budget inside a rate-limit
-+        // window it was never long enough to outlast, and fires every parallel retry at
-+        // the same instant. See retryDelayMs above.
-+        const delayMs = retryDelayMs(message.errorMessage, this._retryAttempt, settings.baseDelayMs);
++        // Stock Pi's own retryDelayMs (imported above, from pi-ai) is a fixed 2s/4s/8s
++        // ladder with no jitter and no retry-after — see pvRetryDelayMs above.
++        const delayMs = pvRetryDelayMs(message.errorMessage, this._retryAttempt, settings.baseDelayMs);
          this._emit({
              type: "auto_retry_start",
              attempt: this._retryAttempt,
@@ -402,35 +408,37 @@ index 197bccc..bc9ac3f 100644
  //# sourceMappingURL=auth-guidance.js.map
 \ No newline at end of file
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-index bb022d4..207f3ba 100644
+index be748bf..378f4c7 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-@@ -18,7 +18,7 @@ import { createJiti } from "jiti/static";
- import * as _bundledTypebox from "typebox";
- import * as _bundledTypeboxCompile from "typebox/compile";
- import * as _bundledTypeboxValue from "typebox/value";
--import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.js";
-+import { getAgentDir, isBunBinary, projectConfigDirCandidates } from "../../config.js";
- // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
- // avoiding a circular dependency. Extensions can import from @earendil-works/pi-coding-agent.
- import * as _bundledPiCodingAgent from "../../index.js";
-@@ -419,11 +419,14 @@ async function loadExtensionModule(extensionPath, cacheToken) {
-         // Compiled binaries and the bundled Node distribution use embedded modules.
-         // Source TypeScript reuses host modules and root tsconfig paths. Unbundled
-         // Node builds use dist aliases.
-+        // Privateer: reuse the host's Pi/Typebox namespaces in Node builds too.
-+        // Otherwise each extension can reload that graph through Jiti. Aliases
-+        // remain a fallback for non-virtual imports; extension reload is unchanged.
-         ...(isBunBinary || isNodeSeaBinary || isBundledNode
-             ? { virtualModules: VIRTUAL_MODULES, tryNative: false }
-             : isTypeScriptSourceRuntime
-                 ? { virtualModules: VIRTUAL_MODULES, tsconfigPaths: true }
--                : { alias: getAliases() }),
-+                : { virtualModules: VIRTUAL_MODULES, alias: getAliases() }),
-     });
-     const module = await jiti.import(extensionPath, { default: true });
-     const factory = module;
-@@ -621,9 +624,23 @@ export async function discoverAndLoadExtensions(configuredPaths, cwd, agentDir =
+@@ -6,7 +6,7 @@ import * as fs from "node:fs";
+ import { createRequire } from "node:module";
+ import * as path from "node:path";
+ import { fileURLToPath } from "node:url";
+-import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.js";
++import { getAgentDir, isBunBinary, isBundledNode, projectConfigDirCandidates } from "../../config.js";
+ import { resolvePath } from "../../utils/paths.js";
+ import { createEventBus } from "../event-bus.js";
+ import { execCommand } from "../exec.js";
+@@ -401,12 +401,15 @@ async function loadExtensionModule(extensionPath, cacheToken) {
+     const createJitiImpl = await getCreateJiti();
+     // Compiled binaries and the bundled Node distribution use embedded modules.
+     // Source TypeScript reuses host modules and root tsconfig paths. Unbundled
+-    // Node builds use dist aliases and do not need the bundled virtual modules.
++    // Node builds use dist aliases.
++    // Privateer: reuse the host's Pi/Typebox namespaces in Node builds too.
++    // Otherwise each extension can reload that graph through Jiti. Aliases
++    // remain a fallback for non-virtual imports; extension reload is unchanged.
+     const resolutionOptions = usesEmbeddedModules
+         ? { virtualModules: await getVirtualModules(), tryNative: false }
+         : isTypeScriptSourceRuntime
+             ? { virtualModules: await getVirtualModules(), tsconfigPaths: true }
+-            : { alias: getAliases() };
++            : { virtualModules: await getVirtualModules(), alias: getAliases() };
+     const jiti = createJitiImpl(import.meta.url, {
+         moduleCache: false,
+         ...resolutionOptions,
+@@ -607,9 +610,23 @@ export async function discoverAndLoadExtensions(configuredPaths, cwd, agentDir =
              }
          }
      };
@@ -810,10 +818,10 @@ index c5ed4d7..d9f50ae 100644
          }
          const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
-index f0f936e..ad164d2 100644
+index ed9d8d2..34d344c 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
-@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
+@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
  import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
  import { dirname, join } from "path";
  import lockfile from "proper-lockfile";
@@ -822,7 +830,7 @@ index f0f936e..ad164d2 100644
  import { normalizePath, resolvePath } from "../utils/paths.js";
  import { stripBom } from "../utils/text.js";
  import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.js";
-@@ -45,14 +45,112 @@ function toSettingsError(scope, error, path) {
+@@ -52,14 +52,112 @@ function toSettingsError(scope, error, path) {
          error: error instanceof Error ? error : new Error(String(error)),
      };
  }
@@ -936,7 +944,7 @@ index f0f936e..ad164d2 100644
      }
      acquireLockSyncWithRetry(path) {
          const maxAttempts = 10;
-@@ -79,7 +177,13 @@ export class FileSettingsStorage {
+@@ -86,7 +184,13 @@ export class FileSettingsStorage {
          throw lastError ?? new Error("Failed to acquire settings lock");
      }
      withLock(scope, fn) {
@@ -951,7 +959,7 @@ index f0f936e..ad164d2 100644
          const dir = dirname(path);
          let release;
          try {
-@@ -157,7 +261,7 @@ export class SettingsManager {
+@@ -164,7 +268,7 @@ export class SettingsManager {
          const storage = new FileSettingsStorage(resolvedCwd, resolvedAgentDir);
          return SettingsManager.fromStorageWithPaths(storage, options, {
              global: join(resolvedAgentDir, "settings.json"),
@@ -960,7 +968,7 @@ index f0f936e..ad164d2 100644
          });
      }
      /** Create a SettingsManager from an arbitrary storage backend */
-@@ -610,7 +714,15 @@ export class SettingsManager {
+@@ -646,7 +750,15 @@ export class SettingsManager {
      getProviderRetrySettings() {
          return {
              timeoutMs: this.settings.retry?.provider?.timeoutMs,
@@ -978,7 +986,7 @@ index f0f936e..ad164d2 100644
          };
      }
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
-index 56cf7a3..2a32170 100644
+index d101003..540b972 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
 @@ -1,7 +1,7 @@
@@ -990,7 +998,7 @@ index 56cf7a3..2a32170 100644
  import { parseFrontmatter } from "../utils/frontmatter.js";
  import { canonicalizePath, resolvePath } from "../utils/paths.js";
  import { createSyntheticSourceInfo } from "./source-info.js";
-@@ -346,10 +346,15 @@ export function loadSkills(options) {
+@@ -348,10 +348,15 @@ export function loadSkills(options) {
      }
      if (includeDefaults) {
          addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
@@ -1008,7 +1016,7 @@ index 56cf7a3..2a32170 100644
      const isUnderPath = (target, root) => {
          const normalizedRoot = resolve(root);
          if (target === normalizedRoot) {
-@@ -362,7 +367,7 @@ export function loadSkills(options) {
+@@ -364,7 +369,7 @@ export function loadSkills(options) {
          if (!includeDefaults) {
              if (isUnderPath(resolvedPath, userSkillsDir))
                  return "user";
@@ -1161,7 +1169,7 @@ index 0877ee7..faa2559 100644
      while (true) {
          const agentsSkillsDir = join(currentDir, ".agents", "skills");
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts b/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts
-index 3e9241d..bfbfcbf 100644
+index 205144d..14080a2 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts
 @@ -1,7 +1,7 @@
@@ -1170,9 +1178,9 @@ index 3e9241d..bfbfcbf 100644
  export { AgentSession, type AgentSessionConfig, type AgentSessionEvent, type AgentSessionEventListener, type ModelCycleResult, type ParsedSkillBlock, type PromptOptions, parseSkillBlock, type SessionStats, } from "./core/agent-session.ts";
 -export { readStoredCredential } from "./core/auth-storage.ts";
 +export { AuthStorage, readStoredCredential } from "./core/auth-storage.ts";
+ export type { CacheWarmingDecision, CacheWarmingStatus } from "./core/cache-warmer.ts";
  export { type BranchPreparation, type BranchSummaryResult, type CollectEntriesResult, type CompactionResult, type CutPointResult, calculateContextTokens, collectEntriesForBranchSummary, compact, DEFAULT_COMPACTION_SETTINGS, estimateTokens, type FileOperations, findCutPoint, findTurnStartIndex, type GenerateBranchSummaryOptions, generateBranchSummary, generateSummary, generateSummaryWithUsage, getLastAssistantUsage, prepareBranchEntries, serializeConversation, shouldCompact, } from "./core/compaction/index.ts";
  export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
- export type { AgentEndEvent, AgentSettledEvent, AgentStartEvent, AgentToolResult, AgentToolUpdateCallback, AppKeybinding, AutocompleteProviderFactory, BashToolCallEvent, BeforeAgentStartEvent, BeforeAgentStartEventResult, BeforeProviderHeadersEvent, BeforeProviderRequestEvent, BeforeProviderRequestEventResult, BuildSystemPromptOptions, CompactOptions, ContextEvent, ContextUsage, CustomToolCallEvent, EditToolCallEvent, EntryRenderer, EntryRenderOptions, ExecOptions, ExecResult, Extension, ExtensionActions, ExtensionAPI, ExtensionCommandContext, ExtensionCommandContextActions, ExtensionContext, ExtensionContextActions, ExtensionError, ExtensionEvent, ExtensionFactory, ExtensionFlag, ExtensionHandler, ExtensionRuntime, ExtensionShortcut, ExtensionUIContext, ExtensionUIDialogOptions, ExtensionWidgetOptions, FindToolCallEvent, GrepToolCallEvent, InlineExtension, InputEvent, InputEventResult, InputSource, KeybindingsManager, LoadExtensionsResult, LsToolCallEvent, MarkdownTransformContext, MarkdownTransformer, MessageEndEvent, MessageRenderer, MessageRenderOptions, MessageStartEvent, MessageUpdateEvent, PowerShellToolCallEvent, ProjectTrustContext, ProjectTrustEvent, ProjectTrustEventDecision, ProjectTrustEventResult, ProjectTrustHandler, ProviderConfig, ProviderModelConfig, ReadToolCallEvent, RegisteredCommand, RegisteredTool, ResolvedCommand, SessionBeforeCompactEvent, SessionBeforeForkEvent, SessionBeforeSwitchEvent, SessionBeforeTreeEvent, SessionCompactEvent, SessionInfoChangedEvent, SessionShutdownEvent, SessionStartEvent, SessionTreeEvent, SlashCommandInfo, SlashCommandSource, SourceInfo, TerminalInputHandler, ToolCallEvent, ToolCallEventResult, ToolDefinition, ToolExecutionEndEvent, ToolExecutionMode, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolInfo, ToolRenderResultOptions, ToolResultEvent, TurnEndEvent, TurnStartEvent, UIPromptEndEvent, UIPromptKind, UIPromptStartEvent, UserBashEvent, UserBashEventResult, WidgetPlacement, WorkingIndicatorOptions, WriteToolCallEvent, } from "./core/extensions/index.ts";
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/index.js b/node_modules/@earendil-works/pi-coding-agent/dist/index.js
 index 01017cd..c2b8722 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/index.js
@@ -1187,10 +1195,10 @@ index 01017cd..c2b8722 100644
  export { calculateContextTokens, collectEntriesForBranchSummary, compact, DEFAULT_COMPACTION_SETTINGS, estimateTokens, findCutPoint, findTurnStartIndex, generateBranchSummary, generateSummary, generateSummaryWithUsage, getLastAssistantUsage, prepareBranchEntries, serializeConversation, shouldCompact, } from "./core/compaction/index.js";
  export { createEventBus } from "./core/event-bus.js";
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/main.js b/node_modules/@earendil-works/pi-coding-agent/dist/main.js
-index 940e0f4..c0f3d11 100644
+index be10307..636fbf4 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/main.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/main.js
-@@ -795,7 +795,58 @@ export async function main(args, options) {
+@@ -802,7 +802,58 @@ export async function main(args, options) {
          if (exitCode !== 0) {
              process.exitCode = exitCode;
          }
@@ -1251,7 +1259,7 @@ index 940e0f4..c0f3d11 100644
  //# sourceMappingURL=main.js.map
 \ No newline at end of file
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/migrations.js b/node_modules/@earendil-works/pi-coding-agent/dist/migrations.js
-index 072268a..472ee6d 100644
+index c30d6b8..ad1654a 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/migrations.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/migrations.js
 @@ -4,7 +4,7 @@
@@ -1262,7 +1270,7 @@ index 072268a..472ee6d 100644
 +import { getAgentDir, getBinDir, projectConfigDirs } from "./config.js";
  import { migrateKeybindingsConfig } from "./core/keybindings.js";
  import { stripBom } from "./utils/text.js";
- const MIGRATION_GUIDE_URL = "https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/CHANGELOG.md#extensions-migration";
+ const MIGRATION_GUIDE_URL = "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/CHANGELOG.md#extensions-migration";
 @@ -231,14 +231,17 @@ function checkDeprecatedExtensionDirs(baseDir, label) {
   */
  function migrateExtensionSystem(cwd) {
@@ -1330,7 +1338,7 @@ index 6f7ed6a..b0ed0ae 100644
      getResourcePattern(item) {
          const scope = item.metadata.scope;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
-index 1d9f046..c0326e3 100644
+index 0e2811e..c0326e3 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
 @@ -1,7 +1,6 @@
@@ -1400,7 +1408,7 @@ index 1d9f046..c0326e3 100644
   */
  export class FooterComponent {
      autoCompactEnabled = true;
-@@ -74,29 +113,9 @@ export class FooterComponent {
+@@ -74,32 +113,9 @@ export class FooterComponent {
      }
      render(width) {
          const state = this.session.state;
@@ -1408,7 +1416,10 @@ index 1d9f046..c0326e3 100644
 -        const usageTotals = createUsageTotals();
 -        let latestCacheHitRate;
 -        for (const entry of this.session.sessionManager.getEntries()) {
--            if (entry.type === "message" && entry.message.role === "assistant") {
+-            if (entry.type === "usage") {
+-                addUsageToTotals(usageTotals, entry.usage);
+-            }
+-            else if (entry.type === "message" && entry.message.role === "assistant") {
 -                addUsageToTotals(usageTotals, entry.message.usage);
 -                const latestPromptTokens = entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
 -                latestCacheHitRate =
@@ -1433,7 +1444,7 @@ index 1d9f046..c0326e3 100644
          // Replace home directory with ~
          let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
          // Add git branch if available
-@@ -109,56 +128,24 @@ export class FooterComponent {
+@@ -112,56 +128,24 @@ export class FooterComponent {
          if (sessionName) {
              pwd = `${pwd} • ${sessionName}`;
          }
@@ -1505,7 +1516,7 @@ index 1d9f046..c0326e3 100644
          const minPadding = 2;
          // Add thinking level indicator if model supports reasoning
          let rightSideWithoutProvider = modelName;
-@@ -171,50 +158,48 @@ export class FooterComponent {
+@@ -174,50 +158,48 @@ export class FooterComponent {
          let rightSide = rightSideWithoutProvider;
          if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
              rightSide = `(${state.model.provider}) ${rightSideWithoutProvider}`;
@@ -1575,13 +1586,12 @@ index 1d9f046..c0326e3 100644
          return lines;
      }
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
-index c33fc39..060a38f 100644
+index 6d0356c..ca0aa98 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
-@@ -1,10 +1,37 @@
--import { Box, Container, getCapabilities, Image, Spacer, Text } from "@earendil-works/pi-tui";
-+import { Box, Container, getCapabilities, Image, Spacer, visibleWidth, Text } from "@earendil-works/pi-tui";
- import { createAllToolDefinitions } from "../../../core/tools/index.js";
+@@ -1,9 +1,36 @@
+-import { Box, Container, getCapabilities, Image, MouseRegion, Spacer, Text, } from "@earendil-works/pi-tui";
++import { Box, Container, getCapabilities, Image, MouseRegion, Spacer, visibleWidth, Text, } from "@earendil-works/pi-tui";
  import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.js";
  import { convertToPng } from "../../../utils/image-convert.js";
  import { theme } from "../theme/theme.js";
@@ -1617,7 +1627,7 @@ index c33fc39..060a38f 100644
  export class ToolExecutionComponent extends Container {
      contentBox;
      contentText;
-@@ -45,8 +72,13 @@ export class ToolExecutionComponent extends Container {
+@@ -44,8 +71,13 @@ export class ToolExecutionComponent extends Container {
          // Always create all shell variants. contentBox is used for default renderer-based composition.
          // selfRenderContainer is used when the tool renders its own framing.
          // contentText is reserved for generic fallback rendering when no tool definition exists.
@@ -1630,10 +1640,10 @@ index c33fc39..060a38f 100644
 +        // matches what the self-render path above emits (a single lines.push("")).
 +        this.contentBox = new Box(1, 0, (text) => theme.bg("toolPendingBg", text));
 +        this.contentText = new Text("", 1, 0, (text) => theme.bg("toolPendingBg", text));
+         this.contentTextRegion = this.createResultRegion(this.contentText);
          this.selfRenderContainer = new Container();
          if (this.hasRendererDefinition()) {
-             this.addChild(this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox);
-@@ -108,6 +140,13 @@ export class ToolExecutionComponent extends Container {
+@@ -90,6 +122,13 @@ export class ToolExecutionComponent extends Container {
      createCallFallback() {
          return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
      }
@@ -1647,12 +1657,12 @@ index c33fc39..060a38f 100644
      createResultFallback() {
          const output = this.getTextOutput();
          if (!output) {
-@@ -227,19 +266,22 @@ export class ToolExecutionComponent extends Container {
+@@ -237,19 +276,22 @@ export class ToolExecutionComponent extends Container {
              renderContainer.clear();
              const callRenderer = this.getCallRenderer();
              if (!callRenderer) {
--                renderContainer.addChild(this.createCallFallback());
-+                renderContainer.addChild(this.decorateCall(this.createCallFallback()));
+-                renderContainer.addChild(this.createResultRegion(this.createCallFallback()));
++                renderContainer.addChild(this.createResultRegion(this.decorateCall(this.createCallFallback())));
                  hasContent = true;
              }
              else {
@@ -1662,18 +1672,18 @@ index c33fc39..060a38f 100644
 +                    // next render and the tool's renderer calls its own methods on it,
 +                    // so handing it a wrapper would break every stateful renderer.
                      this.callRendererComponent = component;
--                    renderContainer.addChild(component);
-+                    renderContainer.addChild(this.decorateCall(component));
+-                    renderContainer.addChild(this.createResultRegion(component));
++                    renderContainer.addChild(this.createResultRegion(this.decorateCall(component)));
                      hasContent = true;
                  }
                  catch {
                      this.callRendererComponent = undefined;
--                    renderContainer.addChild(this.createCallFallback());
-+                    renderContainer.addChild(this.decorateCall(this.createCallFallback()));
+-                    renderContainer.addChild(this.createResultRegion(this.createCallFallback()));
++                    renderContainer.addChild(this.createResultRegion(this.decorateCall(this.createCallFallback())));
                      hasContent = true;
                  }
              }
-@@ -311,7 +353,8 @@ export class ToolExecutionComponent extends Container {
+@@ -322,7 +364,8 @@ export class ToolExecutionComponent extends Container {
          return getRenderedTextOutput(this.result, this.showImages);
      }
      formatToolExecution() {
@@ -1684,11 +1694,11 @@ index c33fc39..060a38f 100644
          if (content) {
              text += `\n\n${content}`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index a27754f..3403ca8 100644
+index d82182c..41426bc 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 @@ -10,7 +10,7 @@ import * as TuiLayouts from "@earendil-works/pi-tui";
- import { CombinedAutocompleteProvider, Container, fuzzyFilter, getCapabilities, hyperlink, Markdown, matchesKey, ProcessTerminal, Spacer, setCapabilityOverrides, setKeybindings, Text, TruncatedText, TuiAltScreen, TuiMainScreen, visibleWidth, } from "@earendil-works/pi-tui";
+ import { CombinedAutocompleteProvider, Container, fuzzyFilter, getCapabilities, hyperlink, Markdown, matchesKey, Spacer, setCapabilityOverrides, setKeybindings, Text, TruncatedText, TuiAltScreen, TuiMainScreen, visibleWidth, } from "@earendil-works/pi-tui";
  import chalk from "chalk";
  import { spawn } from "child_process";
 -import { APP_NAME, APP_TITLE, CONFIG_DIR_NAME, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, VERSION, } from "../../config.js";
@@ -1696,7 +1706,7 @@ index a27754f..3403ca8 100644
  import { parseSkillBlock } from "../../core/agent-session.js";
  import { SessionImportFileNotFoundError } from "../../core/agent-session-runtime.js";
  import { CACHE_TTL_MS, collectCacheMisses, computeCacheWaste, detectCacheMiss, } from "../../core/cache-stats.js";
-@@ -126,7 +126,12 @@ export function formatResumeCommand(sessionManager) {
+@@ -141,7 +141,12 @@ export function formatResumeCommand(sessionManager) {
      const sessionFile = sessionManager.getSessionFile();
      if (!sessionFile || !fs.existsSync(sessionFile))
          return undefined;
@@ -1710,9 +1720,9 @@ index a27754f..3403ca8 100644
      if (!sessionManager.usesDefaultSessionDir()) {
          args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
      }
-@@ -232,6 +237,64 @@ export function createInteractiveTuiReference(getTui) {
-         getPrototypeOf: () => Reflect.getPrototypeOf(getTui()),
-     });
+@@ -192,6 +197,64 @@ function formatLoginProviderCompletionDescription(provider) {
+     const authTypes = provider.authTypes.map(formatAuthSelectorProviderType).join("/");
+     return provider.name === provider.id ? authTypes : `${provider.name} · ${authTypes}`;
  }
 +// Privateer patch: describe an error we only have the TEXT of. Mirrors
 +// describeErrorText in src/engine/errors.ts — see the incident note there.
@@ -1775,7 +1785,7 @@ index a27754f..3403ca8 100644
  export class InteractiveMode {
      runtimeHost;
      renderer;
-@@ -439,9 +502,15 @@ export class InteractiveMode {
+@@ -404,9 +467,15 @@ export class InteractiveMode {
      }
      getBuiltInCommandConflictDiagnostics(extensionRunner) {
          const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
@@ -1792,7 +1802,7 @@ index a27754f..3403ca8 100644
              .map((command) => ({
              type: "warning",
              message: command.invocationName === command.name
-@@ -815,20 +884,18 @@ export class InteractiveMode {
+@@ -775,20 +844,18 @@ export class InteractiveMode {
                  this.showNewVersionNotification(newRelease);
              }
          });
@@ -1825,7 +1835,7 @@ index a27754f..3403ca8 100644
          // Check tmux keyboard setup asynchronously
          this.checkTmuxKeyboardSetup().then((warning) => {
              if (warning) {
-@@ -2393,7 +2460,17 @@ export class InteractiveMode {
+@@ -2419,7 +2486,17 @@ export class InteractiveMode {
              if (text === "/model" || text.startsWith("/model ")) {
                  const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -1844,7 +1854,7 @@ index a27754f..3403ca8 100644
                  return;
              }
              if (text === "/thinking" || text.startsWith("/thinking ")) {
-@@ -2465,12 +2542,42 @@ export class InteractiveMode {
+@@ -2497,12 +2574,42 @@ export class InteractiveMode {
              if (text === "/login" || text.startsWith("/login ")) {
                  const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -1889,7 +1899,7 @@ index a27754f..3403ca8 100644
                  return;
              }
              if (text === "/new") {
-@@ -2788,9 +2895,19 @@ export class InteractiveMode {
+@@ -2827,9 +2934,19 @@ export class InteractiveMode {
                      if (entries[0]?.type !== "compaction") {
                          throw new Error("Completed compaction is missing from the session context");
                      }
@@ -1912,7 +1922,7 @@ index a27754f..3403ca8 100644
                      this.addMessageToChat(createCompactionSummaryMessage(event.result.summary, event.result.tokensBefore, new Date().toISOString()));
                      if (event.result.usage) {
                          this.addCompactionCostNotice({
-@@ -3164,7 +3281,7 @@ export class InteractiveMode {
+@@ -3253,7 +3370,7 @@ export class InteractiveMode {
          if (this.chatContainer.children.length > 0) {
              this.chatContainer.addChild(new Spacer(1));
          }
@@ -1921,7 +1931,7 @@ index a27754f..3403ca8 100644
      }
      async getUserInput() {
          const queuedInput = this.pendingUserInputs.shift();
-@@ -3504,7 +3621,17 @@ export class InteractiveMode {
+@@ -3597,7 +3714,17 @@ export class InteractiveMode {
      }
      showError(errorMessage) {
          this.chatContainer.addChild(new Spacer(1));
@@ -1941,10 +1951,10 @@ index a27754f..3403ca8 100644
      }
      showWarning(warningMessage) {
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
-index 01d1e02..c591e1d 100644
+index 3f4c698..e0152d0 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
-@@ -41,9 +41,9 @@
+@@ -42,9 +42,9 @@
  		"customMessageBg": "customMsgBg",
  		"customMessageText": "text",
  		"customMessageLabel": "#9575cd",
@@ -1958,10 +1968,10 @@ index 01d1e02..c591e1d 100644
  		"toolOutput": "gray",
  
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
-index 0fde42b..cc3b7c5 100644
+index 20f6783..49fc151 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
-@@ -40,9 +40,9 @@
+@@ -41,9 +41,9 @@
  		"customMessageBg": "customMsgBg",
  		"customMessageText": "text",
  		"customMessageLabel": "#7e57c2",

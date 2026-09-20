@@ -2,7 +2,7 @@
 //
 // Mirrors the patched clampMaxTokensToContext in pi-ai (api/simple-options.js) —
 // that copy is what actually runs; this one is where the behaviour is specified and
-// tested. See patches/@earendil-works+pi-ai+0.84.4.patch.
+// tested. See patches/@earendil-works+pi-ai+*.patch.
 //
 // ── The bug this exists to fix ───────────────────────────────────────────────
 //
