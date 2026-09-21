@@ -1025,6 +1025,19 @@ index d101003..540b972 100644
                  return "project";
          }
          return "path";
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/slash-commands.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/slash-commands.js
+index 170a066..b535f72 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/slash-commands.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/slash-commands.js
+@@ -8,7 +8,7 @@ export const BUILTIN_SLASH_COMMANDS = [
+     { name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
+     { name: "import", description: "Import and resume a session from a JSONL file" },
+     { name: "share", description: "Share session as a secret GitHub gist" },
+-    { name: "bug", description: "Report a bug to the Pi developers", argumentHint: "<description>" },
++    { name: "bug", description: "Export a bug report to email to Privateer support", argumentHint: "<description>" },
+     { name: "copy", description: "Copy last agent message to clipboard" },
+     { name: "name", description: "Set session display name" },
+     { name: "session", description: "Show session info and stats" },
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/output-accumulator.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/output-accumulator.js
 index 7241668..7b79305 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/output-accumulator.js
@@ -1292,6 +1305,123 @@ index c30d6b8..ad1654a 100644
      ];
      return warnings;
  }
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.d.ts b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.d.ts
+index 7eae594..b21fae3 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.d.ts
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.d.ts
+@@ -8,7 +8,7 @@ interface BugReportContext {
+     showStatus: (message: string) => void;
+     showError: (message: string) => void;
+ }
+-/** Run the `/bug` flow: consent, optional summary, then upload or export. */
++/** Run the `/bug` flow: consent, optional summary, then export a zip to email to support. */
+ export declare function reportBug(context: BugReportContext, initialHint?: string): Promise<void>;
+ export {};
+ //# sourceMappingURL=bug-report.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.js
+index 59ae447..68cf842 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.js
+@@ -1,18 +1,21 @@
+ import * as path from "node:path";
+-import { getAuthCredential } from "../../cli/auth-command.js";
+ import { BUG_REPORT_CUSTOM_ENTRY_TYPE, bugReportArchiveFileName, collectBugReportDiagnostics, collectBugReportMetadata, writeBugReportArchive, } from "../../core/bug-report.js";
+-import { uploadBugReport } from "../../core/bug-report-upload.js";
+ import { clearCrashLog, readCrashLog } from "../../core/crash-log.js";
+-import { getRadiusGatewayUrl, RADIUS_PROVIDER_ID } from "../../core/radius.js";
+ import { serializeSessionBranch } from "../../core/session-export.js";
+ import { BorderedLoader } from "./components/bordered-loader.js";
+ import { ExtensionInputComponent } from "./components/extension-input.js";
+ import { ExtensionSelectorComponent } from "./components/extension-selector.js";
+ import { createShareTrailingEntries } from "./session-share.js";
+ import { theme } from "./theme/theme.js";
+-const DISCLAIMER = "This report goes to the Pi developers (Earendil) and is not shared publicly. It includes your pi version, operating system, the current model and provider configuration (without API keys), loaded extensions, settings, and provider error diagnostics from this session.";
++// Privateer patch: stock Pi's `/bug` uploads this bundle straight to Earendil's Radius
++// Gateway (session transcript, settings, environment) with no Privateer-controlled
++// endpoint in between — not acceptable for a privacy-first tool. We keep the same
++// consent/redaction flow but the only delivery is a local zip the user emails to us
++// themselves, so nothing leaves the machine without them explicitly attaching it.
++const SUPPORT_EMAIL = "support@privateer.pro";
++const DISCLAIMER = `This report is written to a zip file on your machine only — nothing is uploaded automatically. It includes your Privateer version, operating system, the current model and provider configuration (without API keys), loaded extensions, settings, and provider error diagnostics from this session. Email the file to ${SUPPORT_EMAIL} to send it to us.`;
+ const TRANSCRIPT_NOTE = "The transcript contains your messages, model output, tool calls and their results, including file contents and command output read during this session.";
+-/** Run the `/bug` flow: consent, optional summary, then upload or export. */
++/** Run the `/bug` flow: consent, optional summary, then export a zip for the user to email us. */
+ export async function reportBug(context, initialHint) {
+     const options = await promptForOptions(context, initialHint);
+     if (!options) {
+@@ -47,16 +50,6 @@ export async function reportBug(context, initialHint) {
+         context.showError(`Failed to build bug report: ${errorMessage(error)}`);
+         return;
+     }
+-    if (options.delivery === "upload") {
+-        const failure = await upload(context, bundle);
+-        if (failure === undefined)
+-            return;
+-        const fallback = await choose(context, "Upload failed", ["Export as Zip", "Cancel"], `${failure}\n\nExport the report as a zip archive instead?`);
+-        if (fallback !== "Export as Zip") {
+-            context.showStatus("Bug report cancelled");
+-            return;
+-        }
+-    }
+     await exportZip(context, bundle);
+ }
+ async function promptForOptions(context, initialHint) {
+@@ -76,14 +69,13 @@ async function promptForOptions(context, initialHint) {
+         includeSummary = summary !== "No";
+     }
+     const description = hint.trim();
+-    const delivery = await choose(context, "Bug report", ["Upload Report", "Export as Zip", "Cancel"], `Description: ${description || "none"}\nTranscript: ${includeSession ? "included" : "not included"}\nSummary: ${includeSummary ? `written by ${context.session.model?.name ?? "the current model"}` : "none"}\n\nUpload sends the report to ${new URL(getRadiusGatewayUrl()).host}. Export writes a zip archive to the current directory instead.`);
+-    if (!delivery || delivery === "Cancel")
++    const confirmed = await choose(context, "Bug report", ["Export Report", "Cancel"], `Description: ${description || "none"}\nTranscript: ${includeSession ? "included" : "not included"}\nSummary: ${includeSummary ? `written by ${context.session.model?.name ?? "the current model"}` : "none"}\n\nWrites a zip archive to the current directory. Email it to ${SUPPORT_EMAIL}.`);
++    if (!confirmed || confirmed === "Cancel")
+         return undefined;
+     return {
+         hint: description || undefined,
+         includeSession,
+         includeSummary,
+-        delivery: delivery === "Upload Report" ? "upload" : "zip",
+     };
+ }
+ function buildBundle(session, options, summary) {
+@@ -111,28 +103,6 @@ function buildBundle(session, options, summary) {
+             : undefined,
+     };
+ }
+-async function upload(context, bundle) {
+-    const loader = showLoader(context, "Uploading bug report...");
+-    try {
+-        const provider = context.session.modelRuntime.getProvider(RADIUS_PROVIDER_ID);
+-        const token = provider
+-            ? getAuthCredential(await context.session.modelRuntime.getAuth(RADIUS_PROVIDER_ID, { minOAuthValidityMs: 5 * 60_000 }))
+-            : undefined;
+-        const result = await uploadBugReport(bundle, { token, signal: loader.signal });
+-        restoreEditor(context, loader);
+-        recordInSession(context.session, bundle, { delivery: "upload" });
+-        context.showStatus(`Bug report uploaded. Report ID: ${result.id}`);
+-        return undefined;
+-    }
+-    catch (error) {
+-        restoreEditor(context, loader);
+-        if (loader.signal.aborted) {
+-            context.showStatus("Bug report cancelled");
+-            return undefined;
+-        }
+-        return errorMessage(error);
+-    }
+-}
+ async function exportZip(context, bundle) {
+     const archivePath = path.join(process.cwd(), bugReportArchiveFileName(bundle.metadata.id));
+     try {
+@@ -143,7 +113,7 @@ async function exportZip(context, bundle) {
+         return;
+     }
+     recordInSession(context.session, bundle, { delivery: "zip", path: archivePath });
+-    context.showStatus(`Bug report exported to: ${archivePath}\nReport ID: ${bundle.metadata.id}`);
++    context.showStatus(`Bug report exported to: ${archivePath}\nReport ID: ${bundle.metadata.id}\n\nEmail this file to ${SUPPORT_EMAIL} to reach support.`);
+ }
+ function recordInSession(session, bundle, delivery) {
+     session.sessionManager.appendCustomEntry(BUG_REPORT_CUSTOM_ENTRY_TYPE, {
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js
 index 6f7ed6a..b0ed0ae 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js
@@ -1694,7 +1824,7 @@ index 6d0356c..ca0aa98 100644
          if (content) {
              text += `\n\n${content}`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index d82182c..41426bc 100644
+index d82182c..2764952 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 @@ -10,7 +10,7 @@ import * as TuiLayouts from "@earendil-works/pi-tui";
@@ -1835,6 +1965,15 @@ index d82182c..41426bc 100644
          // Check tmux keyboard setup asynchronously
          this.checkTmuxKeyboardSetup().then((warning) => {
              if (warning) {
+@@ -1568,7 +1635,7 @@ export class InteractiveMode {
+         if (this.bugReportHintShown)
+             return;
+         this.bugReportHintShown = true;
+-        this.chatContainer.addChild(new Text(theme.fg("muted", `If this looks like a ${APP_NAME} bug, /bug sends a report to the developers.`), this.outputPad, 0));
++        this.chatContainer.addChild(new Text(theme.fg("muted", `If this looks like a ${APP_NAME} bug, /bug exports a report you can email to support@privateer.pro.`), this.outputPad, 0));
+         this.ui.requestRender();
+     }
+     renderCurrentSessionState() {
 @@ -2419,7 +2486,17 @@ export class InteractiveMode {
              if (text === "/model" || text.startsWith("/model ")) {
                  const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;

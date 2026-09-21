@@ -359,8 +359,11 @@ export function describeError(err: unknown): DescribedError {
     });
   }
   if (status === 429) {
+    // Never name the upstream provider here — OpenRouter is an implementation
+    // detail behind the Privateer account channel, and a plain "rate limited"
+    // is all a user needs to know regardless of who's actually throttling us.
     return out({
-      message: `Rate limited${forProvider} (429).`,
+      message: `Rate limited (429).`,
       hint: "Wait a moment and try again.",
       retryable: true,
     });
