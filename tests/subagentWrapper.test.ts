@@ -22,6 +22,7 @@ const FALLBACK = [
   "/repo/extensions/privateer-privacy.ts",
   "/repo/extensions/privateer-account.ts",
   "/repo/extensions/privateer-media.ts",
+  "/repo/extensions/privateer-vision.ts",
 ];
 
 test("injects --no-extensions and one -e per moat extension, before the originals", () => {

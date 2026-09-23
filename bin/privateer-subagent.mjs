@@ -55,6 +55,7 @@ export function moatExtensionPaths(repoRoot = REPO, env = process.env) {
     join(repoRoot, "extensions", "privateer-privacy.ts"),
     join(repoRoot, "extensions", "privateer-account.ts"),
     join(repoRoot, "extensions", "privateer-media.ts"),
+    join(repoRoot, "extensions", "privateer-vision.ts"),
   ];
 }
 

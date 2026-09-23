@@ -284,6 +284,11 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   }
   factories.push(makeAccountProvider()); // must follow pi-privacy — see header
 
+  // Every kind: a text-only model gets image descriptions from a vision model on the
+  // same key instead of silently losing the image. See providers/visionDelegate.ts.
+  const { default: privateerVision } = await import("../../extensions/privateer-vision.ts");
+  factories.push(privateerVision);
+
   if (caps.context) {
     const { default: privateerContext } = await import("../../extensions/privateer-context.ts");
     factories.push(privateerContext);

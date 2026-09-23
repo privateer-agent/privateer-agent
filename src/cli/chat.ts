@@ -449,7 +449,7 @@ async function main() {
   // Shown once per distinct non-vision spec (visionWarningAcknowledged), not on every
   // launch — a user who keeps a deliberate non-vision pick already knows the tradeoff.
   if (!acceptsImages(spec) && !visionWarningAcknowledged(spec)) {
-    console.log(`${YELLOW}⚠ ${provider}/${modelId} can't see images — @file/read on a picture or video frame will be dropped silently. Run /model to switch.${RESET}`);
+    console.log(`${YELLOW}⚠ ${provider}/${modelId} can't see images — a vision model on the same key will describe them for it (none available → they're dropped). Run /model to switch.${RESET}`);
     acknowledgeVisionWarning(spec);
   }
   if (noQuarterActive()) applyNoQuarter(true); // launched with --no-quarter: say so up front
