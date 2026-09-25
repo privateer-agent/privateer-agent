@@ -35,6 +35,8 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import * as priv from "../src/auth/privateer.ts";
 import { paletteFor } from "../src/ui/palette.ts";
 import { noQuarterActive, setNoQuarter } from "../src/permissions/noQuarter.ts";
+import { privacyDisabled } from "../src/config/privacyDisabled.ts";
+import { updatePostureBadge } from "./privateer-posture.ts";
 import { childSpendAllows } from "../src/permissions/childSpend.ts";
 import type { PermissionMode } from "../src/config/permissionMode.ts";
 
@@ -245,6 +247,10 @@ function advertiseCommands(): { name: string; description?: string }[] {
 // own connect/disconnect callbacks can refresh the indicator, not just the command.
 const REMOTE_STATUS_KEY = "privateer:remote-access";
 let uiRef: any = null;
+// The live model, for repainting the privacy badge when no quarter moves the filter —
+// privateer-posture's own watcher sits on ITS copy of privacyDisabled.ts (see
+// noQuarter.ts on per-extension module copies), so a flip from here never reaches it.
+let modelRef: { provider?: string; id?: string } | undefined;
 // "off" → no indicator; "connecting" → relay starting or reconnecting (yellow);
 // "connected" → socket open, controller reachable (green).
 let remoteState: "off" | "connecting" | "connected" = "off";
@@ -299,12 +305,17 @@ function refreshNoQuarterStatus(): void {
 // Flip the state and tell the user, loudly on the way down. Takes effect from the
 // next gated action — an approval already on screen still needs an answer.
 function applyNoQuarter(on: boolean, ui: any): void {
-  setNoQuarter(on);
+  const privacyWasOff = privacyDisabled();
+  setNoQuarter(on); // also `/privacy off` on the way down, and back on the way up if it did that
   refreshNoQuarterStatus();
+  const privacyMoved = privacyDisabled() !== privacyWasOff;
+  if (privacyMoved) void updatePostureBadge({ ui, model: modelRef });
   ui?.notify?.(
     on
-      ? "⚑ No quarter — the permission gate is OFF for this session. Every action (shell, edits, destructive tools, out-of-cwd, protected files) now runs without asking. shift+tab to raise the moat again."
-      : "⚓ Moat raised — the permission gate is back on.",
+      ? "⚑ No quarter — the permission gate is OFF for this session. Every action (shell, edits, destructive tools, out-of-cwd, protected files) now runs without asking" +
+          (privacyMoved ? ", and the privacy filter is off: outbound requests are not scanned for PII" : "") +
+          ". shift+tab to raise the moat again."
+      : "⚓ Moat raised — the permission gate is back on" + (privacyMoved ? ", and so is the privacy filter." : "."),
     on ? "warning" : "info",
   );
 }
@@ -550,6 +561,7 @@ export default function privateerControl(pi: any): void {
     // machine's real catalog and the banner shows the current spec from the start.
     if (ctx?.modelRegistry) modelReg = ctx.modelRegistry;
     if (!currentSpec && ctx?.model) currentSpec = modelSpec(ctx.model);
+    if (ctx?.model) modelRef = ctx.model;
     refreshRemoteStatus();
     // shift+tab → no quarter, and the red footer indicator when it's already on (a
     // `--no-quarter` launch, or a session replacement mid-run). Interactive TUI only:
@@ -567,6 +579,7 @@ export default function privateerControl(pi: any): void {
   // currentSpec current and push context so a driving app's banner stays in sync.
   pi.on("model_select", (ev: any) => {
     if (ev?.model) {
+      modelRef = ev.model;
       currentSpec = modelSpec(ev.model);
       relay?.sendContext({ model: currentSpec, cwd: process.cwd(), version: agentVersion() });
     }

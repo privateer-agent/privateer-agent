@@ -89,7 +89,9 @@ export function sharedPrivacyOptions() {
     // ZDR-channel models stay at their honest floor. The live verdict still comes from
     // resolveTier above on select — this only lifts the label.
     privateerVerifiedTee: (m: any) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
-    // No quarter = unattended. The PII send-or-redact question would stall a session the
+    // No quarter = unattended. No quarter also takes the whole filter down (noQuarter.ts),
+    // so this only answers when the operator has run `/privacy on` with the moat down.
+    // The PII send-or-redact question would stall a session the
     // operator explicitly stepped away from, so pi-privacy swallows it the SAFE way —
     // redact, then send — and reports what it masked as output instead of asking. A live
     // function, not a boolean: shift+tab / `/no-quarter` flips this mid-session and the

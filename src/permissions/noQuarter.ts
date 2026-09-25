@@ -27,8 +27,19 @@
 //     process.env is the one thing all those copies share, so the state lives there and
 //     nowhere else: every reader, in every extension, sees every toggle.
 //
+// NO QUARTER ALSO TAKES THE PRIVACY FILTER DOWN. Lowering the moat is the "step away"
+// switch, and a turn that runs to completion unattended must not stall on pi-privacy's
+// PII prompt either — so going to no quarter is also `/privacy off`. Raising the moat
+// puts the filter back, but ONLY if no quarter is what took it down: a session already
+// running with `/privacy off` (or `--no-privacy`) stays off. The marker that records
+// "no quarter did this" lives in the env for the same cross-copy reasons as the flag,
+// and setPrivacyDisabled clears it — so an explicit `/privacy on|off` mid-no-quarter
+// is the operator's word and a later shift+tab doesn't overrule it.
+//
 // IMPORT-SAFETY: no Pi imports, no node builtins — safe to load from anywhere,
 // including boot-ordered entrypoints (see boot.ts's ORDERING CONTRACT).
+
+import { NO_QUARTER_PRIVACY_MARK, privacyDisabled, setPrivacyDisabled } from "../config/privacyDisabled.ts";
 
 const ENV = "PRIVATEER_NO_QUARTER";
 
@@ -39,8 +50,16 @@ export function noQuarterActive(): boolean {
 
 /** Set the state — in the env, so every copy of this module and every child agrees. Returns the new state. */
 export function setNoQuarter(on: boolean): boolean {
-  if (on) process.env[ENV] = "1";
-  else delete process.env[ENV];
+  if (on) {
+    process.env[ENV] = "1";
+    if (!privacyDisabled()) {
+      setPrivacyDisabled(true);
+      process.env[NO_QUARTER_PRIVACY_MARK] = "1";
+    }
+  } else {
+    delete process.env[ENV];
+    if (process.env[NO_QUARTER_PRIVACY_MARK] === "1") setPrivacyDisabled(false); // clears the mark
+  }
   return on;
 }
 

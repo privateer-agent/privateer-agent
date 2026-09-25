@@ -158,11 +158,19 @@ const NO_QUARTER = args.some((a) => a === "--no-quarter");
 if (NO_QUARTER) {
   for (let i = args.length - 1; i >= 0; i--) if (args[i] === "--no-quarter") args.splice(i, 1);
   process.env.PRIVATEER_NO_QUARTER = "1";
+  // No quarter is also `/privacy off` (src/permissions/noQuarter.ts). Marked, unless the
+  // filter was already off, so shift+tab back to the moat restores it.
+  if (process.env.PRIVATEER_PRIVACY_OFF !== "1" && process.env.PI_PRIVACY_OFF !== "1") {
+    process.env.PRIVATEER_PRIVACY_OFF = "1";
+    process.env.PI_PRIVACY_OFF = "1";
+    process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER = "1";
+  }
   process.stderr.write(
     [
       "",
-      "  ⚓ \x1b[1;31mNo quarter\x1b[0m — permission gate DISABLED for this session.",
-      "     Every action (shell, edits, destructive tools, out-of-cwd) runs WITHOUT a prompt.",
+      "  ⚓ \x1b[1;31mNo quarter\x1b[0m — permission gate AND privacy filter DISABLED for this session.",
+      "     Every action (shell, edits, destructive tools, out-of-cwd) runs WITHOUT a prompt,",
+      "     and outbound requests are not scanned for PII.",
       "     Only use this in a directory and with a task you fully trust.",
       "     shift+tab (or /no-quarter off) raises the moat again.",
       "",
@@ -178,6 +186,7 @@ if (NO_PRIVACY) {
   for (let i = args.length - 1; i >= 0; i--) if (args[i] === "--no-privacy" || args[i] === "--privacy-off") args.splice(i, 1);
   process.env.PRIVATEER_PRIVACY_OFF = "1";
   process.env.PI_PRIVACY_OFF = "1";
+  delete process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER; // asked for outright — raising the moat keeps it off
   process.stderr.write(
     [
       "",

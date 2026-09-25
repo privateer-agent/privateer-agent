@@ -94,3 +94,56 @@ test("a live gate follows the toggle mid-session", async () => {
   assert.equal(await gate.request(edit), "deny");
   assert.equal(asks, 2);
 });
+
+// No quarter is also `/privacy off`: a turn left to run unattended must not stall on the
+// PII prompt either. Raising the moat restores the filter — but only when no quarter is
+// what took it down.
+test("no quarter takes the privacy filter down and raising the moat restores it", async () => {
+  const { privacyDisabled, setPrivacyDisabled } = await import("../src/config/privacyDisabled.ts");
+  setNoQuarter(false);
+  setPrivacyDisabled(false);
+  try {
+    setNoQuarter(true);
+    assert.equal(privacyDisabled(), true);
+    assert.equal(process.env.PI_PRIVACY_OFF, "1", "subagent children inherit it too");
+    copy.setNoQuarter(false); // shift+tab from another extension's copy of the module
+    assert.equal(privacyDisabled(), false);
+  } finally {
+    setNoQuarter(false);
+    setPrivacyDisabled(false);
+  }
+});
+
+test("a filter that was already off stays off when the moat comes back up", async () => {
+  const { privacyDisabled, setPrivacyDisabled } = await import("../src/config/privacyDisabled.ts");
+  setNoQuarter(false);
+  setPrivacyDisabled(true); // `/privacy off` (or --no-privacy) before no quarter
+  try {
+    setNoQuarter(true);
+    setNoQuarter(false);
+    assert.equal(privacyDisabled(), true);
+  } finally {
+    setPrivacyDisabled(false);
+  }
+});
+
+test("an explicit /privacy mid-no-quarter is the operator's word", async () => {
+  const { privacyDisabled, setPrivacyDisabled } = await import("../src/config/privacyDisabled.ts");
+  setNoQuarter(false);
+  setPrivacyDisabled(false);
+  try {
+    setNoQuarter(true);
+    setPrivacyDisabled(true); // `/privacy off` typed while already off — now it's deliberate
+    setNoQuarter(false);
+    assert.equal(privacyDisabled(), true, "raising the moat must not overrule an explicit /privacy off");
+
+    setPrivacyDisabled(false);
+    setNoQuarter(true);
+    setPrivacyDisabled(false); // `/privacy on` during no quarter
+    setNoQuarter(false);
+    assert.equal(privacyDisabled(), false);
+  } finally {
+    setNoQuarter(false);
+    setPrivacyDisabled(false);
+  }
+});

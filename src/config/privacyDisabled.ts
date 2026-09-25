@@ -19,6 +19,9 @@
 const ENV = "PRIVATEER_PRIVACY_OFF";
 const ALT_ENV = "PI_PRIVACY_OFF";
 
+/** Set while the filter is off BECAUSE no quarter took it down (src/permissions/noQuarter.ts). */
+export const NO_QUARTER_PRIVACY_MARK = "PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER";
+
 /** True while pi-privacy is completely disabled for this session. Read live, never cached. */
 export function privacyDisabled(): boolean {
   return process.env[ENV] === "1" || process.env[ALT_ENV] === "1";
@@ -41,10 +44,12 @@ export function onPrivacyDisabledChange(fn: (disabled: boolean) => void): () => 
 
 /**
  * Set the disabled state. Modifies process.env so every module copy and child process agrees.
- * Returns the new state.
+ * Returns the new state. Clears the no-quarter mark: an explicit set is the operator's call,
+ * so raising the moat later won't flip it back (noQuarter.ts re-sets the mark after its own call).
  */
 export function setPrivacyDisabled(disabled: boolean): boolean {
   const before = privacyDisabled();
+  delete process.env[NO_QUARTER_PRIVACY_MARK];
   if (disabled) {
     process.env[ENV] = "1";
     process.env[ALT_ENV] = "1";

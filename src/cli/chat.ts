@@ -12,6 +12,7 @@ import "../boot.ts"; // env + attestation dispatcher, before any Pi import
 import { fileURLToPath } from "node:url"; // builtin, safe pre-boot
 import { cliPalette } from "../ui/palette.ts"; // no Pi deps → safe pre-boot
 import { noQuarterActive, setNoQuarter } from "../permissions/noQuarter.ts"; // no Pi deps → safe pre-boot
+import { privacyDisabled } from "../config/privacyDisabled.ts"; // no Pi deps → safe pre-boot
 import type { GateController } from "../ext/permissionGate.ts"; // type-only → erased, safe pre-boot
 import { createUIContext } from "../ext/headlessUi.ts"; // no Pi deps → safe pre-boot
 import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts"; // node:child_process only → safe pre-boot
@@ -419,14 +420,17 @@ async function main() {
   // same key; takes effect from the next gated action, so an approval already on
   // screen still needs an answer.
   function applyNoQuarter(on: boolean): void {
-    setNoQuarter(on);
+    const privacyWasOff = privacyDisabled();
+    setNoQuarter(on); // also `/privacy off` on the way down (src/permissions/noQuarter.ts)
+    const privacyMoved = privacyDisabled() !== privacyWasOff;
     flushOut(); // land streamed output above the notice
     console.log(
       on
         ? `\n${RED}⚑ No quarter — the permission gate is OFF for this session.${RESET}\n` +
           `${DIM}  Every action (shell, edits, destructive tools, out-of-cwd, protected files) runs without asking.\n` +
+          (privacyMoved ? `  The privacy filter is off too: outbound requests are not scanned for PII.\n` : "") +
           `  shift+tab (or /no-quarter off) raises the moat again.${RESET}`
-        : `\n${GREEN}⚓ Moat raised — the permission gate is back on.${RESET}`,
+        : `\n${GREEN}⚓ Moat raised — the permission gate is back on${privacyMoved ? ", and so is the privacy filter" : ""}.${RESET}`,
     );
   }
 

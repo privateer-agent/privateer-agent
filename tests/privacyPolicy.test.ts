@@ -204,13 +204,36 @@ for (const [route, factories] of [
 }
 
 // ── no quarter vs. the PII gate ──────────────────────────────────────────────────────
+//
+// No quarter is also `/privacy off` (src/permissions/noQuarter.ts), so by default the
+// PII gate isn't consulted at all. The unattended redact-then-send answer still matters
+// for an operator who runs `/privacy on` with the moat down — the tests below that pin
+// it do exactly that, via noQuarterWithFilter().
+function noQuarterWithFilter(set: (on: boolean) => boolean = setNoQuarter): void {
+  set(true);
+  setPrivacyDisabled(false); // `/privacy on` with the moat down
+}
 
 for (const [route, factories] of [
   ["discovered extension", async () => [privateerPrivacy]],
   ["moat-built session", moatFactories],
 ] as [string, () => Promise<ExtensionFactory[]>][]) {
-  test(`${route}: no quarter answers the PII gate instead of asking`, async () => {
+  test(`${route}: no quarter takes the filter down — PII goes as-is, nobody asked`, async () => {
     setNoQuarter(true);
+    try {
+      const s = session(await factories());
+      const out = await s.request(payloadWithPii());
+
+      assert.deepEqual(s.selects, [], "no quarter must not raise a privacy prompt");
+      assert.ok(payloadText(out).includes(EMAIL), "no quarter is /privacy off: sent untouched");
+    } finally {
+      setNoQuarter(false);
+    }
+    assert.equal(privacyDisabled(), false, "raising the moat restores the filter");
+  });
+
+  test(`${route}: no quarter with the filter back on answers the PII gate instead of asking`, async () => {
+    noQuarterWithFilter();
     try {
       const s = session(await factories());
       const out = await s.request(payloadWithPii());
@@ -243,7 +266,7 @@ const gateCopy: typeof import("../src/permissions/noQuarter.ts") = await import(
 
 test("a toggle from the GATE extension's copy of the state reaches the privacy gate", async () => {
   assert.notEqual(gateCopy.setNoQuarter, setNoQuarter, "the copies must really be distinct");
-  gateCopy.setNoQuarter(true); // shift+tab, as extensions/privateer-gate.ts applies it
+  noQuarterWithFilter(gateCopy.setNoQuarter); // shift+tab, as extensions/privateer-gate.ts applies it
   try {
     const s = session([privateerPrivacy]);
     const out = await s.request(payloadWithPii());
@@ -262,7 +285,7 @@ test("a toggle from the GATE extension's copy of the state reaches the privacy g
 // session already running: "restart to stop masking your own asset filenames" is not one.
 test("an allowlisted value is not PII — and the entry applies mid-session", async () => {
   mkdirSync(process.env.PRIVATEER_HOME!, { recursive: true });
-  setNoQuarter(true); // auto-redact, so the gate's answer is observable without a prompt
+  noQuarterWithFilter(); // auto-redact, so the gate's answer is observable without a prompt
   try {
     const s = session([privateerPrivacy]);
 
