@@ -167,13 +167,6 @@ if (NO_QUARTER) {
     process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER = "1";
   }
   process.stderr.write(
-  // No quarter is also `/privacy off` (src/permissions/noQuarter.ts). Marked, unless the
-  // filter was already off, so shift+tab back to the moat restores it.
-  if (process.env.PRIVATEER_PRIVACY_OFF !== "1" && process.env.PI_PRIVACY_OFF !== "1") {
-    process.env.PRIVATEER_PRIVACY_OFF = "1";
-    process.env.PI_PRIVACY_OFF = "1";
-    process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER = "1";
-  }
     [
       "",
       "  ⚓ \x1b[1;31mNo quarter\x1b[0m — permission gate AND privacy filter DISABLED for this session.",
@@ -196,7 +189,6 @@ if (NO_PRIVACY) {
   process.env.PI_PRIVACY_OFF = "1";
   delete process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER; // asked for outright — raising the moat keeps it off
   process.stderr.write(
-  delete process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER; // asked for outright — raising the moat keeps it off
     [
       "",
       "  ⚓ \x1b[1;33mPrivacy off\x1b[0m — pi-privacy DISABLED for this session.",

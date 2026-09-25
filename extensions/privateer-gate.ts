@@ -261,10 +261,6 @@ let modelRef: { provider?: string; id?: string } | undefined;
 let remoteState: "off" | "connecting" | "connected" = "off";
 
 function refreshRemoteStatus(): void {
-// The live model, for repainting the privacy badge when no quarter moves the filter —
-// privateer-posture's own watcher sits on ITS copy of privacyDisabled.ts (see
-// noQuarter.ts on per-extension module copies), so a flip from here never reaches it.
-let modelRef: { provider?: string; id?: string } | undefined;
   const ui = uiRef;
   if (!ui?.setStatus) return;
   if (remoteState === "off") {
@@ -326,8 +322,6 @@ function applyNoQuarter(on: boolean, ui: any): void {
           ". shift+tab to raise the moat again."
       : "⚓ Moat raised — the permission gate is back on" + (privacyMoved ? ", and so is the privacy filter." : "."),
     on ? "warning" : "info",
-  const privacyMoved = privacyDisabled() !== privacyWasOff;
-  if (privacyMoved) void updatePostureBadge({ ui, model: modelRef });
   );
 }
 
@@ -840,7 +834,6 @@ export default function privateerControl(pi: any): void {
     handler: async (args: string, ctx: any) => {
       if (ctx?.ui) uiRef = ctx.ui; // keep the handle fresh for relay-driven refreshes
       const off = String(args ?? "").trim().toLowerCase() === "off";
-    if (ctx?.model) modelRef = ctx.model;
       if (off) {
         disableRemote();
         return ctx.ui?.notify?.("remote access off", "info");
@@ -855,4 +848,3 @@ export default function privateerControl(pi: any): void {
     },
   });
 }
-      modelRef = ev.model;
