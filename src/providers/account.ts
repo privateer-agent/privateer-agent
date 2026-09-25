@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { globalDir } from "../config/paths.ts";
 import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts";
 import { installGzipRequestBodies } from "../util/gzipRequestBody.ts";
-import { describeAccountBalanceError } from "../engine/errors.ts";
+import { describeAccountBalanceError, isConnectionFailureText } from "../engine/errors.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
 import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
@@ -38,6 +38,7 @@ import {
   sealedProviderFor,
   sealedShimBase,
   ensureSealedShim,
+  stopSealedShim,
   attestSealed,
 } from "./sealedShim.ts";
 import type { PhalaEnclaveIdentity } from "./phalaSeal.ts";
@@ -897,6 +898,10 @@ export function makeAccountProvider() {
       // An auth failure, unlike a balance failure, needs a fresh child session.
       // Pi has no reactive-401 refresh; see recoverAccountSession.
       void recoverAccountSession(ctx, msg.errorMessage);
+      // A request that got no response at all. See recoverAccountConnection.
+      if (isConnectionFailureText(msg.errorMessage)) {
+        void recoverAccountConnection(ctx, (msg as { model?: string }).model ?? "", () => register(lastIds));
+      }
     });
   };
 }
@@ -1124,6 +1129,89 @@ const ACCOUNT_AUTH_FAILURE =
 // Don't spin: if the account itself is gone, one replacement attempt per window is
 // plenty, and the user gets a clear message instead of a retry loop.
 const RECOVERY_COOLDOWN_MS = 30_000;
+
+// Ask the server whether an account access token is still accepted. The status, or
+// null when there was no answer at all (which says nothing about the token).
+async function probeAccountToken(access: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${serverBaseUrl()}/auth/me`, {
+      headers: { Authorization: `Bearer ${access}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    void res.body?.cancel().catch(() => {});
+    return res.status;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get a session that answers "Connection error." on every message working again.
+ *
+ * The report this exists for: a session started while a sign-in was failing kept
+ * failing with the SDK's bare "Connection error." on every retry, while a fresh
+ * `privateer` on the same machine worked. Nothing noticed, because the only recovery
+ * the account channel had keyed on a 401 (recoverAccountSession), and a request that
+ * never gets an HTTP response carries no status at all. Two pieces of per-SESSION state
+ * can strand requests that way while the machine's login is fine, and both are cheap
+ * to renew:
+ *
+ *   • the sealed shim (tinfoil/phala): the model's baseUrl points at a loopback port
+ *     for the life of the process. Restart the shim and re-register — Pi re-reads the
+ *     live model's baseUrl from the registry on registration — so the next request
+ *     goes to a listener that exists;
+ *   • the credential: probe the token this process holds; if the server now refuses it,
+ *     mint a fresh session exactly as a 401 would. A probe that gets NO answer is a real
+ *     outage, and replacing a good session over it would only leak a Linked Devices row.
+ *
+ * Bounded by the same cooldown as recoverAccountSession, so a dead network costs one
+ * probe per window, not one per retry. Returns what it renewed.
+ */
+export async function recoverAccountConnection(
+  ctx: unknown,
+  modelId: string,
+  reRegister: () => void,
+  probe: (access: string) => Promise<number | null> = probeAccountToken,
+): Promise<{ shim: boolean; session: boolean }> {
+  const renewed = { shim: false, session: false };
+  if (!hasCredentials()) return renewed;
+  const slot = armSlot() as ReturnType<typeof armSlot> & { connectionRecoveredAt?: number };
+  const now = Date.now();
+  if (slot.connectionRecoveredAt !== undefined && now - slot.connectionRecoveredAt < RECOVERY_COOLDOWN_MS) return renewed;
+  slot.connectionRecoveredAt = now;
+
+  if (sealedEnabled() && sealedProviderFor(modelId)) {
+    try {
+      await stopSealedShim();
+      await ensureSealedShim();
+      reRegister();
+      renewed.shim = true;
+    } catch {
+      /* the shim won't start → sealed models fall back to the cleartext path on re-register */
+      try {
+        reRegister();
+      } catch {
+        /* nothing more to do from here */
+      }
+    }
+  }
+
+  const held = slot.cred;
+  const status = held ? await probe(held.access) : null;
+  if (status === 401 || status === 403) {
+    slot.cred = undefined;
+    renewed.session = await armAccountCredential(ctx, { notify: false });
+  }
+
+  const c = ctx as SeedContext;
+  if (c?.hasUI && (renewed.shim || renewed.session)) {
+    c.ui?.notify?.(
+      `Couldn't reach Privateer — renewed this session's ${[renewed.shim ? "sealed connection" : "", renewed.session ? "credential" : ""].filter(Boolean).join(" and ")}. Send that message again.`,
+      "warning",
+    );
+  }
+  return renewed;
+}
 
 // Replace a dead account session after an auth failure, so the NEXT prompt works.
 //

@@ -38,6 +38,11 @@ import { noQuarterActive, setNoQuarter } from "../src/permissions/noQuarter.ts";
 import { privacyDisabled } from "../src/config/privacyDisabled.ts";
 import { updatePostureBadge } from "./privateer-posture.ts";
 import { childSpendAllows } from "../src/permissions/childSpend.ts";
+import { CliSpendLedger, headlessSpendGuidance, isSpendRequest, readCliSpendGrant } from "../src/permissions/cliSpend.ts";
+import { BILLED_MEDIA_TOOLS } from "../src/permissions/classify.ts";
+import type { PermissionRequest } from "../src/permissions/gate.ts";
+import { HeadlessAppApprover } from "../src/remote/headlessApproval.ts";
+import { describeErrorText } from "../src/engine/errors.ts";
 import type { PermissionMode } from "../src/config/permissionMode.ts";
 
 const MODES: PermissionMode[] = ["default", "acceptEdits", "bypass", "plan"];
@@ -256,6 +261,10 @@ let modelRef: { provider?: string; id?: string } | undefined;
 let remoteState: "off" | "connecting" | "connected" = "off";
 
 function refreshRemoteStatus(): void {
+// The live model, for repainting the privacy badge when no quarter moves the filter —
+// privateer-posture's own watcher sits on ITS copy of privacyDisabled.ts (see
+// noQuarter.ts on per-extension module copies), so a flip from here never reaches it.
+let modelRef: { provider?: string; id?: string } | undefined;
   const ui = uiRef;
   if (!ui?.setStatus) return;
   if (remoteState === "off") {
@@ -317,6 +326,8 @@ function applyNoQuarter(on: boolean, ui: any): void {
           ". shift+tab to raise the moat again."
       : "⚓ Moat raised — the permission gate is back on" + (privacyMoved ? ", and so is the privacy filter." : "."),
     on ? "warning" : "info",
+  const privacyMoved = privacyDisabled() !== privacyWasOff;
+  if (privacyMoved) void updatePostureBadge({ ui, model: modelRef });
   );
 }
 
@@ -466,7 +477,78 @@ const bridge = new RemoteBridge({
 // otherwise keep the fail-closed defaultLocalAsk (headless deny). A top-level TUI keeps
 // its own interactive/remote gate.
 const childChannel = isSubagentChild() ? inheritedChannelDir() : undefined;
-const localAsk = childChannel ? makeChildGateAsk(childChannel) : defaultLocalAsk;
+
+// ── headless (`-p` / `--mode json`) runs ─────────────────────────────────────────
+//
+// A top-level headless run has no screen, so the default asker denies. Two launch flags
+// change that, both typed per invocation and neither ever persisted (bin/headless-flags.mjs):
+//   --allow-spend … --max-calls/--max-spend  pre-approves named billing tools, capped
+//                                            (src/permissions/cliSpend.ts)
+//   --approve-in-app                          puts what's left to the Privateer app
+//                                            (src/remote/headlessApproval.ts)
+// Neither applies in a subagent child (its grant comes only from childSpend.ts) nor in
+// the TUI; `headlessRun` is set from Pi's own mode at session_start.
+let headlessRun = false;
+const cliGrant = isSubagentChild() ? null : readCliSpendGrant();
+const approveInAppMs = isSubagentChild() ? 0 : Number(process.env.PRIVATEER_APPROVE_IN_APP) || 0;
+
+// Price a billed call from the server's capability report — the same reservation
+// figure the server holds (tools/media.ts). Loaded on first use: most runs never price
+// anything, and media.ts has no business in the TUI's startup graph.
+async function quoteMediaCall(tool: string, input: unknown, signal?: AbortSignal): Promise<number | null> {
+  const { readMediaCapabilities, quoteMediaCallUsd } = await import("../src/tools/media.ts");
+  const a = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const model = typeof a.model === "string" && a.model ? a.model : undefined;
+  const query = tool === "generate_video" || tool === "generate_sprite" ? { videoModel: model } : tool === "generate_model" ? { model } : {};
+  const caps = await readMediaCapabilities(query, signal);
+  return caps.ok ? quoteMediaCallUsd(tool, input, caps.data) : null;
+}
+
+const cliLedger = cliGrant ? new CliSpendLedger(cliGrant, quoteMediaCall) : null;
+
+// Why a particular request was denied, for the model. Keyed by the request object the
+// gate builds per call, so parallel calls never read each other's reason.
+const denialNotes = new WeakMap<PermissionRequest, string>();
+// The call's own arguments, seen by the spend check, so an app prompt can be priced
+// for THIS call rather than the dearest one the model could make.
+const requestInputs = new WeakMap<PermissionRequest, unknown>();
+
+const appApprover = approveInAppMs
+  ? new HeadlessAppApprover({
+      timeoutMs: approveInAppMs,
+      log: (line) => process.stderr.write(`${line}\n`),
+      signedIn: () => priv.hasCredentials(),
+      label: "privateer -p",
+      makeRelay: (callbacks) => new RelayClient(callbacks as any, { label: "privateer -p" }) as any,
+    })
+  : null;
+
+async function headlessAsk(req: PermissionRequest, ctx: any) {
+  if (appApprover) {
+    // Put the price on the question — "about $0.50" is what makes a phone approval an
+    // informed one. Best-effort and bounded: a slow quote must not eat the timeout.
+    let note: string | undefined;
+    if (isSpendRequest(req)) {
+      const usd = await Promise.race([
+        quoteMediaCall(req.tool, requestInputs.get(req), ctx?.signal).catch(() => null),
+        new Promise<null>((r) => setTimeout(() => r(null), 5_000)),
+      ]);
+      if (typeof usd === "number") note = `about $${usd.toFixed(2)}`;
+    }
+    const out = await appApprover.ask(req, ctx?.signal, note);
+    if (out === "deny" && !denialNotes.has(req)) {
+      denialNotes.set(req, "It was not approved in the Privateer app. Stop and report this rather than retrying.");
+    }
+    return out;
+  }
+  const out = await defaultLocalAsk(req, ctx);
+  if (out === "deny" && isSpendRequest(req) && !denialNotes.has(req)) denialNotes.set(req, headlessSpendGuidance(req.tool));
+  return out;
+}
+
+const localAsk = childChannel
+  ? makeChildGateAsk(childChannel)
+  : (req: PermissionRequest, ctx: any) => (headlessRun ? headlessAsk(req, ctx) : defaultLocalAsk(req, ctx));
 
 const gate = makePermissionGate({
   getMode: () => mode,
@@ -488,7 +570,28 @@ const gate = makePermissionGate({
   // when pi-subagents has marked us a child), so a terminal keeps asking its human. This
   // is what lets an unattended run delegate a shot to a subagent: without it the child's
   // gate denies every generate_* call, having no one to ask.
-  isSpendPreauthorized: (req) => childSpendAllows(req.tool),
+  //
+  // Plus, in a top-level headless run only, the `--allow-spend` ledger: capped, per
+  // invocation, and priced before each call when there's a --max-spend.
+  isSpendPreauthorized: async (req, input, signal) => {
+    requestInputs.set(req, input);
+    if (childSpendAllows(req.tool)) return true;
+    if (!cliLedger || !headlessRun) return false;
+    const d = await cliLedger.authorize(req.tool, input, signal);
+    if (d.ok) {
+      process.stderr.write(
+        `⚓ --allow-spend: running ${req.tool}${d.usd !== null ? ` (about $${d.usd.toFixed(2)})` : ""} — ${cliLedger.summary()}\n`,
+      );
+      return true;
+    }
+    denialNotes.set(
+      req,
+      `Not covered by this run's spend pre-approval: ${d.reason}. ` +
+        (appApprover ? "" : "Stop and report this to the user rather than retrying."),
+    );
+    return false;
+  },
+  explainDenial: (req) => denialNotes.get(req),
 });
 
 export default function privateerControl(pi: any): void {
@@ -573,6 +676,83 @@ export default function privateerControl(pi: any): void {
     if (ctx?.mode && HEADLESS.has(ctx.mode) && (process.env.PRIVATEER_MODE ?? "") === "") {
       mode = "bypass";
     }
+    headlessRun = !isSubagentChild() && (ctx?.mode === "print" || ctx?.mode === "json");
+    if (headlessRun) announceHeadlessSpend();
+  });
+
+  // Say it UP FRONT. An agent driving `privateer -p` used to plan a whole job and only
+  // hit the billing wall at the last step, because nothing said a -p run can't approve a
+  // billed call. Tell the person (stderr, before any work) and the model (its system
+  // prompt, before it plans). Quiet when nothing billable is enabled, or when no quarter
+  // lifts the gate anyway.
+  function uncoveredBilledTools(): string[] {
+    if (noQuarterActive()) return [];
+    const active: string[] = (() => {
+      try {
+        return pi.getActiveTools?.() ?? [];
+      } catch {
+        return [];
+      }
+    })();
+    return active.filter((t) => BILLED_MEDIA_TOOLS.has(t) && !cliGrant?.tools.includes(t));
+  }
+  function announceHeadlessSpend(): void {
+    const cmd = process.env.PRIVATEER_CMD || "privateer";
+    const out: string[] = [];
+    if (cliGrant) {
+      const caps = [
+        cliGrant.maxCalls !== undefined ? `at most ${cliGrant.maxCalls} call(s)` : "",
+        cliGrant.maxSpendUsd !== undefined ? `$${cliGrant.maxSpendUsd.toFixed(2)} estimated` : "",
+      ].filter(Boolean);
+      out.push(`⚓ Spend pre-approved for this run: ${cliGrant.tools.join(", ")} — ${caps.join(", ")}.`);
+    }
+    const uncovered = uncoveredBilledTools();
+    if (uncovered.length) {
+      out.push(
+        appApprover
+          ? `⚓ Billed tools (${uncovered.join(", ")}) will ask for approval in the Privateer app — up to ${Math.round(approveInAppMs / 1000)}s each.`
+          : `⚓ Heads-up: billed tools (${uncovered.join(", ")}) are enabled, but a -p run can't approve them — any call will be denied.\n` +
+              `   To allow them: --allow-spend <tool> --max-calls <n> [--max-spend <usd>], or --approve-in-app, or drive Privateer over ACP (\`${cmd} acp\`).`,
+      );
+    }
+    if (out.length) process.stderr.write(out.join("\n") + "\n");
+  }
+  pi.on("before_agent_start", (event: any) => {
+    if (!headlessRun) return;
+    const uncovered = uncoveredBilledTools();
+    const lines: string[] = [];
+    if (cliGrant) {
+      lines.push(
+        `This run may call ${cliGrant.tools.join(", ")} without further approval, within its caps` +
+          `${cliGrant.maxCalls !== undefined ? ` (at most ${cliGrant.maxCalls} call(s) in total)` : ""}` +
+          `${cliGrant.maxSpendUsd !== undefined ? ` (at most $${cliGrant.maxSpendUsd.toFixed(2)}, estimated before each call — check prices with media_capabilities)` : ""}.`,
+      );
+    }
+    if (uncovered.length) {
+      lines.push(
+        appApprover
+          ? `Calls to ${uncovered.join(", ")} bill the user's account and must be approved by them in the Privateer app; each waits for that approval.`
+          : `This is a non-interactive run with nobody to approve spending: ${uncovered.join(", ")} will be DENIED if called. ` +
+              "Do not plan work that depends on them. If the task needs one, say so up front and tell the user to re-run with " +
+              "--allow-spend <tool> --max-calls <n>, or --approve-in-app.",
+      );
+    }
+    if (!lines.length) return;
+    return { systemPrompt: `${event.systemPrompt}\n\n# Billing in this run\n${lines.join("\n")}` };
+  });
+  pi.on("session_shutdown", () => appApprover?.close());
+
+  // Print mode prints a failed turn's raw SDK text — "401 status code (no body)",
+  // "Connection error." — and exits. Follow it with what that means and what to do,
+  // on stderr so stdout stays the answer (or the JSON stream).
+  pi.on("agent_end", (ev: any) => {
+    if (!headlessRun) return;
+    const msgs: any[] = Array.isArray(ev?.messages) ? ev.messages : [];
+    const last = [...msgs].reverse().find((m) => m?.role === "assistant");
+    if (last?.stopReason !== "error" || typeof last.errorMessage !== "string") return;
+    const described = describeErrorText(last.errorMessage, { provider: last.provider });
+    if (!described) return;
+    process.stderr.write(`privateer: ${described.message}${described.hint ? `\n  ${described.hint}` : ""}\n`);
   });
 
   // Follow local model switches too (the user picking a model in the TUI): keep
@@ -660,6 +840,7 @@ export default function privateerControl(pi: any): void {
     handler: async (args: string, ctx: any) => {
       if (ctx?.ui) uiRef = ctx.ui; // keep the handle fresh for relay-driven refreshes
       const off = String(args ?? "").trim().toLowerCase() === "off";
+    if (ctx?.model) modelRef = ctx.model;
       if (off) {
         disableRemote();
         return ctx.ui?.notify?.("remote access off", "info");
@@ -674,3 +855,4 @@ export default function privateerControl(pi: any): void {
     },
   });
 }
+      modelRef = ev.model;

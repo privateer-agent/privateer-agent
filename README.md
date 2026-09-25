@@ -507,6 +507,30 @@ Honest caveat for Buzz: **Buzz currently auto-approves permission prompts**, so 
 the tool ceiling *is* the control — which is exactly why the default is read-only. Full
 setup, config, and limitations: [`docs/acp.md`](docs/acp.md).
 
+Driving Privateer from **your own program or agent**? ACP is how that program gets asked:
+every approval arrives as a `session/request_permission` call it answers. The wire format,
+option ids and a minimal client are in [`docs/acp.md`](docs/acp.md#driving-privateer-from-another-agent).
+
+### One-shot runs (`-p`) and spending
+
+A `privateer -p "…"` run has no screen, so anything that needs approval is **denied**. That
+includes every billed media tool, and the run says so when it starts. Two flags change it,
+and both apply to that one invocation only. Nothing is saved, and an exported environment
+variable can't turn either on.
+
+```bash
+# pre-approve named billed tools, capped by calls and/or estimated dollars
+privateer -p --allow-spend generate_video --max-calls 1 --max-spend 1.00 "make a 6s intro clip"
+
+# or ask on your phone: approvals go to the Privateer app, denied if unanswered in time
+privateer -p --approve-in-app --approval-timeout 300 "make a 6s intro clip"
+```
+
+`--max-spend` is checked before each call against the server's own estimate for that exact
+call. `media_capabilities` shows the same prices. A call that can't be priced is refused
+under a dollar cap rather than let through. `--approve-in-app` reaches the app while it's
+open or running in the background.
+
 ## Connectors — MCP
 
 Privateer is an **MCP client**. Point it at a [Model Context Protocol](https://modelcontextprotocol.io)
@@ -672,7 +696,10 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 
 Shell subcommands: `privateer` (interactive), `privateer update`, `privateer harbor …`,
 `privateer acp` (serve the agent to an ACP host like Buzz or Zed — see
-[`docs/acp.md`](docs/acp.md)), `privateer --no-quarter`, `privateer --version`.
+[`docs/acp.md`](docs/acp.md)), `privateer auth status` (is this machine signed in?),
+`privateer -p … [--allow-spend …] [--approve-in-app]` (see
+[one-shot runs](#one-shot-runs--p-and-spending)), `privateer --no-quarter`, `privateer --version`.
+An unknown subcommand of `auth` is an error. It is never sent to the model as a prompt.
 
 ## Develop
 

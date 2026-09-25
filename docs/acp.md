@@ -79,6 +79,131 @@ The root is process-wide, not per-session, by design: the gate and the tools mus
 one root. The `cwd` a host offers in `session/new` is accepted but does not move the
 confinement root.
 
+## Driving Privateer from another agent
+
+ACP is the right surface when **a program, not a person, is in charge of the run**: an
+orchestrator agent, a CI job, a script that hands Privateer a task and needs to answer its
+questions. Pick by one thing — does anything need approving?
+
+| You want to… | Use |
+|---|---|
+| Run a task that needs no approvals (reads, or writes already allowed) | `privateer -p "…"` |
+| Let a one-shot run spend on named billing tools, capped | `privateer -p --allow-spend generate_video --max-calls 1 --max-spend 1.00 "…"` |
+| Have a person approve from their phone while a one-shot runs | `privateer -p --approve-in-app "…"` |
+| **Have your program answer each approval itself** | `privateer acp` (this page) |
+
+A `-p` run with none of those flags **denies** every approval, because nobody is there to
+ask. It says so at startup (on stderr) and in the model's instructions, so neither you nor
+the model finds out at the last step.
+
+### The session, on the wire
+
+Your program spawns `privateer acp` and speaks ACP v1 — newline-delimited JSON-RPC over the
+child's stdin/stdout. Everything Privateer logs goes to **stderr**; stdout is only the protocol.
+
+```text
+you → initialize          { protocolVersion: 1, clientCapabilities: {} }
+you → session/new         { cwd, mcpServers: [] }            ← returns sessionId + model list
+you → session/prompt      { sessionId, prompt: [{ type: "text", text: "…" }] }
+    ← session/update      agent_message_chunk / tool_call / tool_call_update (streamed)
+    ← session/request_permission   ← when the gate needs a decision (below)
+you → (answer it)
+    ← session/prompt result { stopReason: "end_turn" | "cancelled" | … }
+```
+
+### How a permission request reaches you
+
+When Privateer's gate decides an action needs a decision, the running `session/prompt` is
+**suspended** and Privateer sends your program a `session/request_permission` **request**
+(a JSON-RPC call with an `id` — it expects a reply):
+
+```json
+{
+  "jsonrpc": "2.0", "id": 7, "method": "session/request_permission",
+  "params": {
+    "sessionId": "…",
+    "toolCall": {
+      "toolCallId": "perm-5f0c…",
+      "title": "Generate a video (billed to your Privateer account) — clips/intro.mp4",
+      "kind": "edit",
+      "status": "pending",
+      "rawInput": { "tool": "generate_video", "detail": "clips/intro.mp4", "path": "/work/clips/intro.mp4" }
+    },
+    "options": [
+      { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+      { "optionId": "deny",  "name": "Deny",  "kind": "reject_once" }
+    ]
+  }
+}
+```
+
+Reply with the option you chose:
+
+```json
+{ "jsonrpc": "2.0", "id": 7, "result": { "outcome": { "outcome": "selected", "optionId": "allow" } } }
+```
+
+- **`toolCall.title`** is a one-line human summary; **`rawInput.tool`** is the tool name to
+  make policy decisions on, `detail` the command or path, `path` the absolute target if any.
+  `kind` is ACP's vocabulary: `read`, `edit`, `execute` (shell), `fetch`, `other`.
+- **Options vary per request.** `always` ("Allow for the rest of this session") is offered only
+  when it is safe to remember. It is never offered for billed tools, protected files, or
+  dangerous shell. Answer only with an `optionId` you were offered.
+- **Anything else is a denial.** `{ "outcome": { "outcome": "cancelled" } }`, an unknown
+  `optionId`, an error response, or a dropped connection all deny. The model is told the action
+  was denied and not to retry it.
+- **There is no timeout on Privateer's side.** The turn waits for your answer. To give up,
+  send `session/cancel` for that session and answer the pending request with
+  `{ "outcome": { "outcome": "cancelled" } }` (the ACP spec requires the client to). The action
+  is denied and the turn ends with `stopReason: "cancelled"`.
+- **`always` is scoped to the session.** It lives in memory for that one ACP session and is
+  never written to disk. Another session, or the next process, asks again.
+- **Requests are per session.** With several sessions open, each request carries its own
+  `sessionId`. Route it to whatever is driving that session.
+
+Which actions ask at all depends on `acp.posture`. `approve` asks for everything the gate
+would ask a person. `auto` asks only for dangerous shell and destructive or billed actions.
+`readonly` never asks and denies instead.
+
+### Billed tools over ACP
+
+Media generation is off the ACP tool list unless you add it: list the tools in `acp.tools`
+(e.g. `"generate_video", "media_capabilities"`) on a signed-in machine. Every billed call then
+arrives as a permission request, one per call and never "always". Call `media_capabilities`
+first: it reports what an image and a clip cost (per length, resolution and audio), so your
+program can decide against a budget before it answers `allow`.
+
+### A minimal Node client
+
+```js
+import { spawn } from "node:child_process";
+import { Readable, Writable } from "node:stream";
+import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } from "@zed-industries/agent-client-protocol";
+
+const child = spawn("privateer", ["acp"], { stdio: ["pipe", "pipe", "inherit"] });
+const stream = ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout));
+
+const conn = new ClientSideConnection(() => ({
+  async sessionUpdate({ update }) {
+    if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") process.stdout.write(update.content.text);
+  },
+  // Every approval Privateer needs lands here. Decide, then answer with an offered optionId.
+  async requestPermission({ toolCall, options }) {
+    const ok = toolCall.rawInput?.tool !== "generate_video" || budgetAllows(toolCall);
+    const pick = options.find((o) => o.optionId === (ok ? "allow" : "deny"));
+    return { outcome: pick ? { outcome: "selected", optionId: pick.optionId } : { outcome: "cancelled" } };
+  },
+  async readTextFile() { throw new Error("not supported"); },
+  async writeTextFile() { throw new Error("not supported"); },
+}), stream);
+
+await conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+const { sessionId } = await conn.newSession({ cwd: process.cwd(), mcpServers: [] });
+const { stopReason } = await conn.prompt({ sessionId, prompt: [{ type: "text", text: "Make a 6s intro clip" }] });
+console.error("\nturn ended:", stopReason);
+child.stdin.end(); // closing stdin shuts Privateer down cleanly
+```
+
 ## The security model
 
 What actually happens when a host drives the agent:
@@ -134,6 +259,9 @@ Stated plainly so nobody discovers them in production:
   non-protocol byte to stdout. Stdout is the protocol; all diagnostics go to stderr,
   which your host captures as the agent log. If you wrapped `privateer acp` in a script,
   make sure the wrapper prints nothing.
+- **A turn fails with "Connection error." or "401 …"** — the error now carries a hint saying
+  what was refused and what to do. On the account channel a refused session is renewed on the
+  next turn; if every turn still fails, check `privateer auth status` on that machine.
 - **Every action is denied and no prompt appears anywhere** — the agent is running with a
   second, unattached permission gate in front of ours. Run the stock `privateer acp`
   entry point rather than loading the agent into a custom Pi session with discovered

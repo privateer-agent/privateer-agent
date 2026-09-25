@@ -266,7 +266,30 @@ test("an error we only have the text of still gets a useful description", () => 
   assert.match(describeErrorText("413 Payload Too Large")!.hint!, /\/new/);
   assert.match(describeErrorText("503 upstream unavailable")!.hint!, /transient/i);
 
-  // No leading status → nothing to add; the caller prints the original.
-  assert.equal(describeErrorText("fetch failed"), null);
+  // No leading status and nothing recognisable → nothing to add; the caller prints the original.
+  assert.equal(describeErrorText("the model refused to continue"), null);
   assert.equal(describeErrorText(undefined), null);
+});
+
+// The two strings an agent driving `privateer -p` actually saw, neither of which said
+// what was rejected or what to do. Both now name the endpoint and the next step.
+test("a bare connection failure and a bodiless 401 say what failed and what to do", () => {
+  const conn = describeErrorText("Connection error.", { provider: "privateer" });
+  assert.match(conn!.message, /Couldn't reach Privateer/);
+  assert.match(conn!.hint!, /\/new/);
+  assert.equal(conn!.retryable, true);
+  assert.match(describeErrorText("fetch failed")!.message, /Couldn't reach the model provider/);
+  assert.match(describeErrorText("connect ECONNREFUSED 127.0.0.1:1234")!.message, /no response/);
+
+  const unauth = describeErrorText("401 status code (no body)", { provider: "privateer" });
+  assert.equal(unauth!.message, "Privateer rejected the credential this request was sent with (401).");
+  assert.match(unauth!.hint!, /renewed automatically/);
+  assert.match(unauth!.hint!, /\/login/);
+
+  const byo = describeErrorText("401 status code (no body)", { provider: "openrouter" });
+  assert.match(byo!.message, /^OpenRouter rejected the credential/);
+  assert.match(byo!.hint!, /API key for OpenRouter/);
+
+  // A 401 that DID carry the provider's own words keeps them.
+  assert.match(describeErrorText("401 Invalid API key provided", { provider: "openai" })!.message, /Invalid API key provided/);
 });

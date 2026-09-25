@@ -57,7 +57,13 @@ export interface GateController {
   // session can spend what it was told it may spend instead of denying every media
   // call for want of a human. Lifts `alwaysAsk` and nothing else — see
   // ModeGate.isSpendPreauthorized for the guards.
-  isSpendPreauthorized?(req: PermissionRequest): boolean;
+  // `input` and `signal` are the call's own, for a grant that prices the call before
+  // answering (the `--max-spend` ledger, permissions/cliSpend.ts).
+  isSpendPreauthorized?(req: PermissionRequest, input?: unknown, signal?: AbortSignal): boolean | Promise<boolean>;
+  // Extra words for the model when the gate denies `req` — WHY, and what would allow it
+  // (e.g. a headless run explaining --allow-spend). Appended to the denial; absent ⇒ the
+  // generic denial text alone.
+  explainDenial?(req: PermissionRequest): string | undefined;
   // Block a tool outright while the turn is remote-driven (only consulted when
   // getRemote() is true). For tools whose own prompts render on the host terminal
   // rather than the relay — e.g. pi-subagents — so a driven turn can't wedge on an
@@ -174,8 +180,21 @@ export async function decideToolCall(
     getNoQuarter: ctrl.getNoQuarter,
     getAutoApprove: ctrl.getAutoApprove,
     getSkipAllPermissions: ctrl.getSkipAllPermissions,
-    isSpendPreauthorized: ctrl.isSpendPreauthorized,
+    isSpendPreauthorized: ctrl.isSpendPreauthorized
+      ? (r: PermissionRequest) => ctrl.isSpendPreauthorized!(r, input, ctx.signal)
+      : undefined,
   });
+
+  // Why, when there is more to say than "denied" — read at denial time, so it reflects
+  // what the ask learned (a spend ledger's refusal reason, say).
+  const why = (): string => {
+    try {
+      const extra = ctrl.explainDenial?.(req);
+      return extra ? ` ${extra}` : "";
+    } catch {
+      return "";
+    }
+  };
 
   let decision: "allow" | "deny";
   try {
@@ -186,13 +205,13 @@ export async function decideToolCall(
     // tell the model to stop retrying and take a different path (or ask the user).
     return {
       block: true,
-      reason: `Approval unavailable (${(err as Error)?.message ?? "error"}) — blocked by default. Do not retry the same command; it will be blocked again. Try a different approach or ask the user to run it.`,
+      reason: `Approval unavailable (${(err as Error)?.message ?? "error"}) — blocked by default. Do not retry the same command; it will be blocked again. Try a different approach or ask the user to run it.${why()}`,
     };
   }
   if (decision === "deny") {
     return {
       block: true,
-      reason: `${req.title} was denied by the permission gate. Do not retry the same command; it will be denied again. Take a different approach or ask the user to run it themselves.`,
+      reason: `${req.title} was denied by the permission gate. Do not retry the same command; it will be denied again. Take a different approach or ask the user to run it themselves.${why()}`,
     };
   }
   return undefined;

@@ -145,7 +145,7 @@ export function createEngineEventAdapter() {
         // until retries/overflow recovery are exhausted, but never hide it.
         if (msg?.stopReason === "error") {
           const raw = typeof msg.errorMessage === "string" ? msg.errorMessage : "";
-          const described = describeErrorText(raw);
+          const described = describeErrorText(raw, { provider: typeof msg.provider === "string" ? msg.provider : undefined });
           return [{
             type: "error",
             error: described?.message ?? redactText(raw || "The model call failed."),

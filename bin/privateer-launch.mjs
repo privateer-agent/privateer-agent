@@ -29,6 +29,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 import { routeUpdate } from "./update-route.mjs";
+import { APPROVE_IN_APP_ENV, CLI_SPEND_ENV, PI_SUBCOMMANDS, authProblem, extractHeadlessFlags } from "./headless-flags.mjs";
 import { runToCompletion } from "./run-to-completion.mjs";
 import { configureCompileCache } from "./startup-cache.mjs";
 
@@ -166,6 +167,13 @@ if (NO_QUARTER) {
     process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER = "1";
   }
   process.stderr.write(
+  // No quarter is also `/privacy off` (src/permissions/noQuarter.ts). Marked, unless the
+  // filter was already off, so shift+tab back to the moat restores it.
+  if (process.env.PRIVATEER_PRIVACY_OFF !== "1" && process.env.PI_PRIVACY_OFF !== "1") {
+    process.env.PRIVATEER_PRIVACY_OFF = "1";
+    process.env.PI_PRIVACY_OFF = "1";
+    process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER = "1";
+  }
     [
       "",
       "  ⚓ \x1b[1;31mNo quarter\x1b[0m — permission gate AND privacy filter DISABLED for this session.",
@@ -188,6 +196,7 @@ if (NO_PRIVACY) {
   process.env.PI_PRIVACY_OFF = "1";
   delete process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER; // asked for outright — raising the moat keeps it off
   process.stderr.write(
+  delete process.env.PRIVATEER_PRIVACY_OFF_BY_NO_QUARTER; // asked for outright — raising the moat keeps it off
     [
       "",
       "  ⚓ \x1b[1;33mPrivacy off\x1b[0m — pi-privacy DISABLED for this session.",
@@ -226,6 +235,25 @@ if (ALLOW_COMPUTER) {
       .filter(Boolean)
       .join("\n") + "\n",
   );
+}
+
+// Headless-run flags — spend pre-approval and app approvals for `-p` runs. Stripped
+// before Pi sees them, exactly like the flags above; grammar in bin/headless-flags.mjs.
+//
+// THE ENV IS OURS, NEVER THE SHELL'S. The grant reaches the gate as an env var (the only
+// channel into Pi's process), so an inherited value is deleted FIRST: a
+// PRIVATEER_CLI_SPEND left exported in someone's shell must never pre-approve a run
+// they didn't type the flag for. Only this invocation's argv can set it.
+delete process.env[CLI_SPEND_ENV];
+delete process.env[APPROVE_IN_APP_ENV];
+{
+  const headless = extractHeadlessFlags(args);
+  if (headless.error) {
+    process.stderr.write(`privateer: ${headless.error}\n`);
+    process.exit(2);
+  }
+  if (headless.spend) process.env[CLI_SPEND_ENV] = JSON.stringify(headless.spend);
+  if (headless.approveInAppMs) process.env[APPROVE_IN_APP_ENV] = String(headless.approveInAppMs);
 }
 
 const sub = args[0];
@@ -548,6 +576,38 @@ else if (sub === "acp") {
   // Long-lived and driven over stdio by an editor, which stops it by terminating
   // the process rather than by a keystroke. Same leak, same fix.
   runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-acp.mjs"), ...args.slice(1)], { forwardSignals: true });
+}
+
+// --- Pi's own subcommands: `auth`, and the package commands -------------------
+// Pi matches these only as args[0]. The normal launch below prepends --model, -e and
+// --skill, so every one of them used to fall through as a CHAT MESSAGE — `privateer
+// auth list` was answered by the model, which listed the project folders in the
+// user's home directory. Hand them over bare instead, and refuse an `auth` Pi doesn't
+// know rather than let it become a prompt.
+else if (PI_SUBCOMMANDS.includes(sub)) {
+  const cmd = process.env.PRIVATEER_CMD || "privateer";
+  const problem = authProblem(args, cmd);
+  if (problem) {
+    process.stderr.write(problem + "\n");
+    process.exit(2);
+  }
+  if (sub === "auth" && args[1] === "status") {
+    printAuthStatus(cmd);
+    process.exit(0);
+  }
+  const CLI = resolveDep(REPO, "@earendil-works/pi-coding-agent", "dist", "cli.js");
+  if (!CLI || !fs.existsSync(CLI)) {
+    console.error(
+      "privateer: couldn't find pi-coding-agent — the install looks incomplete.\n" +
+        "  Try reinstalling: npm install -g privateer-agent@latest",
+    );
+    process.exit(1);
+  }
+  configureCompileCache(PRIVATEER_HOME); // same Pi module graph as a launch — reuse its compiled code
+  ensurePatches(); // project `.privateer/` config dirs are a patch; -l scope needs them
+  process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
+  const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
+  runToCompletion(NODE_BIN, [...nodeArgs, CLI, ...args]);
 }
 
 // --- normal launch: resolve the moat, then exec Pi's TUI with it -----------
@@ -881,6 +941,28 @@ function warnKeylessLaunch() {
   process.stderr.write(lines.join("\n") + "\n");
 }
 
+// `privateer auth status` — the question people (and agents) actually ask, answered
+// from local state only: no network, nothing sent anywhere, and no secret printed.
+function printAuthStatus(cmd) {
+  let creds = null;
+  try {
+    creds = JSON.parse(fs.readFileSync(path.join(PRIVATEER_HOME, "credentials.json"), "utf8"));
+  } catch { /* absent or unreadable → signed out */ }
+  const lines = [];
+  if (creds && typeof creds.accessToken === "string") {
+    const who = creds.user?.email || "your account";
+    lines.push(`Privateer account: signed in as ${who}${creds.serverBaseUrl ? ` (${creds.serverBaseUrl})` : ""}`);
+    lines.push("  This checks the local login only; a session revoked from the app shows up on the next request.");
+  } else {
+    lines.push("Privateer account: not signed in");
+    lines.push(`  Run \`${cmd}\` and type /login, then approve the code in the Privateer app.`);
+  }
+  const keys = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "TINFOIL_API_KEY", "PRIVATEER_API_KEY"].filter(haveKey);
+  lines.push(`Provider keys in the environment: ${keys.length ? keys.join(", ") : "none"}`);
+  lines.push(`To check one provider end to end: ${cmd} auth check --provider <name>`);
+  console.log(lines.join("\n"));
+}
+
 function printPrivateerHelp(cmd = process.env.PRIVATEER_CMD || "privateer") {
   console.log(
     [
@@ -900,7 +982,8 @@ function printPrivateerHelp(cmd = process.env.PRIVATEER_CMD || "privateer") {
       `  ${cmd} uninstall <source>   Alias for remove`,
       `  ${cmd} list                 List installed extensions from settings`,
       `  ${cmd} config               Open TUI to enable/disable package resources`,
-      `  ${cmd} auth <command>       Print credentials or check provider readiness`,
+      `  ${cmd} auth status          Show whether this machine is signed in`,
+      `  ${cmd} auth <command>       Check provider readiness or print credentials (check, print-api-key, print-bearer-token)`,
       `  ${cmd} <command> --help     Show help for a specific command`,
       "",
       "Options:",
@@ -911,6 +994,12 @@ function printPrivateerHelp(cmd = process.env.PRIVATEER_CMD || "privateer") {
       "  --append-system-prompt <text>  Append text or file contents to the system prompt",
       "  --mode <mode>                  Output mode: text (default), json, or rpc",
       "  --print, -p                    Non-interactive mode: process prompt and exit",
+      "  --allow-spend <tools>          -p only: pre-approve billed tools for this run (e.g. generate_video)",
+      "  --max-calls <n>                …at most n billed calls (a cap is required)",
+      "  --max-spend <usd>              …at most this much, estimated before each call",
+      "  --approve-in-app               -p only: send approvals to the Privateer app instead of denying",
+      "  --approval-timeout <seconds>   How long --approve-in-app waits (default 300)",
+      "  --no-quarter                   Run with NO approval prompts at all (trusted tasks only)",
       "  --continue, -c                 Continue previous session",
       "  --resume, -r                   Select a session to resume",
       "  --session <path|id>            Use specific session file or partial UUID",

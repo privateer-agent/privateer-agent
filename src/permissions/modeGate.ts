@@ -63,7 +63,12 @@ export interface ModeGateDeps {
   // Consulted ONLY to lift `alwaysAsk`, and only under the guards in ModeGate.request.
   // Absent ⇒ nothing is pre-authorized, which is the posture every interactive session
   // keeps: a terminal always asks its human, however cheap the call.
-  isSpendPreauthorized?: (req: PermissionRequest) => boolean;
+  //
+  // May be async: a `--max-spend` grant prices the call before answering (cliSpend.ts).
+  // It is consulted LAST, after every other guard has passed, because a grant with a
+  // budget RECORDS what it allows — asking it about a call the mode would refuse anyway
+  // would spend budget on nothing.
+  isSpendPreauthorized?: (req: PermissionRequest) => boolean | Promise<boolean>;
 }
 
 // The permission gate used by the live TUI. It first applies the mode/allowlist
@@ -129,8 +134,9 @@ export class ModeGate implements PermissionGate {
       req.alwaysAsk &&
       !req.outside &&
       !req.protected &&
-      this.deps.isSpendPreauthorized?.(req) === true &&
-      decideAuto({ ...req, alwaysAsk: false }, this.deps.getMode(), this.deps.allowlist, denylist) === "allow"
+      this.deps.isSpendPreauthorized &&
+      decideAuto({ ...req, alwaysAsk: false }, this.deps.getMode(), this.deps.allowlist, denylist) === "allow" &&
+      (await this.deps.isSpendPreauthorized(req)) === true
     ) {
       return "allow";
     }

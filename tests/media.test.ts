@@ -1300,3 +1300,55 @@ test("generate_sprite outside the working directory is flagged as such", () => {
   assert.equal(decision?.outside, true);
   assert.match(String(decision?.title), /outside working directory/);
 });
+
+// ── prices in media_capabilities, and the quote a --max-spend cap is built on ──────
+//
+// The report: media_capabilities priced 3D and sound effects but not the Seedance clip
+// the agent actually wanted, so it could neither weigh the job nor set a cap.
+{
+  const { describeImageVideo, quoteMediaCallUsd } = await import("../src/tools/media.ts");
+  const caps = {
+    image: { model: "img/x", maxPerCall: 4, priceUsdEach: 0.04 },
+    video: {
+      model: "bytedance/seedance-2.0-fast",
+      durations: [4, 6, 8],
+      priceUsd: { min: 0.3, max: 1.2 },
+      priceSource: "table" as const,
+      priceTable: [
+        { seconds: 4, resolution: null, audio: false, usd: 0.5 },
+        { seconds: 6, resolution: null, audio: false, usd: 0.7 },
+        { seconds: 8, resolution: null, audio: false, usd: 0.9 },
+        { seconds: 8, resolution: "480p", audio: false, usd: 0.3 },
+        { seconds: 8, resolution: "1080p", audio: false, usd: 1.2 },
+      ],
+    },
+    model3d: { priceUsd: { min: 0.2, max: 3.37 } },
+    sprites: { directionSets: [{ id: "four", billedClips: 3, billedTurnStills: 2 }] },
+  };
+
+  test("media_capabilities prices images and every clip length", () => {
+    const text = describeImageVideo(caps.image, caps.video).join("\n");
+    assert.match(text, /about \$0\.04 each/);
+    assert.match(text, /cost: \$0\.30-\$1\.20 a clip/);
+    assert.match(text, /4s \$0\.50, 6s \$0\.70, 8s \$0\.90/);
+    assert.match(text, /480p, 1080p/);
+    // An older server: say so, never print $0.00.
+    const old = describeImageVideo({ model: "img/x" }, { model: "v/x" }).join("\n");
+    assert.match(old, /price not reported/);
+    assert.match(old, /not reported by this server/);
+    assert.doesNotMatch(old, /\$0\.00/);
+  });
+
+  test("a call is quoted from its own arguments, and high when it has to guess", () => {
+    assert.equal(quoteMediaCallUsd("generate_video", { seconds: 6 }, caps), 0.7);
+    assert.equal(quoteMediaCallUsd("generate_video", { seconds: 8, resolution: "480p" }, caps), 0.3);
+    assert.equal(quoteMediaCallUsd("generate_video", {}, caps), 0.9, "no length → the dearest default-resolution row");
+    assert.equal(quoteMediaCallUsd("generate_video", { seconds: 7 }, caps), 0.9, "an illegal length never quotes low");
+    assert.equal(quoteMediaCallUsd("generate_image", { count: 3 }, caps), 0.12);
+    assert.equal(quoteMediaCallUsd("generate_image", { model: "other/img" }, caps), null, "another model's price is unknown");
+    assert.equal(quoteMediaCallUsd("generate_model", {}, caps), 3.37);
+    assert.equal(quoteMediaCallUsd("generate_sprite", { directions: "four" }, caps), 1.2 * 3 + 0.04 * 2);
+    assert.equal(quoteMediaCallUsd("generate_music", {}, caps), null);
+    assert.equal(quoteMediaCallUsd("generate_video", {}, { video: {} }), null, "an older server can't be quoted");
+  });
+}

@@ -505,6 +505,36 @@ export function retryDelayMs(
   return Math.round(backoff * (1 - rand() * 0.25));
 }
 
+/** What the caller of describeErrorText knows about the failing request, if anything. */
+export interface ErrorTextContext {
+  /** Pi's provider id for the model that failed (e.g. "privateer", "openrouter"). */
+  provider?: string;
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  privateer: "Privateer",
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  openrouter: "OpenRouter",
+  google: "Google",
+  tinfoil: "Tinfoil",
+  ollama: "Ollama",
+};
+
+function providerLabel(provider: string | undefined): string {
+  if (!provider) return "the model provider";
+  return PROVIDER_LABELS[provider] ?? provider;
+}
+
+// A request that never got an HTTP response, in the words the SDKs actually use:
+// OpenAI's APIConnectionError is the bare "Connection error.", undici's is "fetch
+// failed" / "other side closed", Node's are the errno names.
+const CONNECTION_FAILURE = /^\s*(?:connection error\.?|fetch failed|other side closed|socket hang up|(?:read |connect )?(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)\b)/i;
+
+export function isConnectionFailureText(text: string | null | undefined): boolean {
+  return CONNECTION_FAILURE.test(typeof text === "string" ? text : "");
+}
+
 /**
  * Describe an error we only have the TEXT of, for the one place that has nothing else.
  *
@@ -515,9 +545,14 @@ export function retryDelayMs(
  * and say the same thing `describeError` would. Returns null when there is no leading
  * status to read, so ordinary messages print unchanged.
  */
-export function describeErrorText(text: string | null | undefined): DescribedError | null {
+export function describeErrorText(
+  text: string | null | undefined,
+  context: ErrorTextContext = {},
+): DescribedError | null {
   const s = typeof text === "string" ? text : "";
   const status = Number(/^\s*(\d{3})\b/.exec(s)?.[1] ?? NaN);
+  const account = context.provider === "privateer";
+  const who = providerLabel(context.provider);
   if (!Number.isFinite(status)) {
     // No leading status: the one message we can still describe with certainty is a
     // transport idle timeout, which undici names exactly. Everything else is printed
@@ -526,6 +561,17 @@ export function describeErrorText(text: string | null | undefined): DescribedErr
       return {
         message: redactText(IDLE_TIMEOUT_DESCRIPTION.message),
         hint: IDLE_TIMEOUT_DESCRIPTION.hint,
+      };
+    }
+    // The OpenAI SDK's whole message for a request that never got a response. It
+    // says nothing about WHERE, so name the endpoint and the next step.
+    if (isConnectionFailureText(s)) {
+      return {
+        message: redactText(`Couldn't reach ${who} — the request got no response ("${s.trim().slice(0, 80)}").`),
+        hint: account
+          ? "Check this machine's connection. If it started around a sign-in, the session reconnects on your next message; if every message fails while a fresh `privateer` works, start a new session with /new."
+          : "Check your connection and the provider's base URL, then send it again — or run /model to switch providers.",
+        retryable: true,
       };
     }
     return null;
@@ -542,9 +588,17 @@ export function describeErrorText(text: string | null | undefined): DescribedErr
     };
   }
   if (status === 401 || status === 403) {
+    // "401 status code (no body)" names neither what was refused nor what to do. The
+    // status is enough to say both.
+    const bare = /\(no body\)\s*$/i.test(s) || s.trim() === String(status);
+    const refused = status === 401 ? "rejected the credential" : "refused access";
     return {
-      message: redactText(compactProviderError(s)),
-      hint: "Check your credentials — run /login to re-authenticate.",
+      message: redactText(
+        bare ? `${who} ${refused} this request was sent with (${status}).` : compactProviderError(s),
+      ),
+      hint: account
+        ? "This terminal's Privateer session was refused. It is renewed automatically on your next message; if it keeps failing, run /login (or `privateer auth status` to see whether this machine is signed in)."
+        : `Check the API key for ${who} — run /login, or set the provider's API key env var.`,
     };
   }
   if (status === 404) {

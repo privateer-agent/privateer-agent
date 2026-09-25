@@ -947,9 +947,32 @@ export const generateSfxToolDefinition = {
 
 // ── Capabilities ─────────────────────────────────────────────────────────────
 
-interface CapabilitiesResponse {
-  image?: { model?: string; blockedByZdr?: boolean; maxPerCall?: number };
-  video?: { model?: string; blockedByZdr?: boolean; durations?: number[] | null; aspectRatios?: string[] | null };
+/** One priced video call shape. `resolution: null` is a call that sends none. */
+export interface VideoPriceRow {
+  seconds: number | null;
+  resolution: string | null;
+  audio: boolean;
+  usd: number;
+}
+
+export interface CapabilitiesResponse {
+  /** `priceUsdEach` is what one image costs the account; null when the server couldn't price it. */
+  image?: { model?: string; blockedByZdr?: boolean; maxPerCall?: number; priceUsdEach?: number | null };
+  /** `priceUsd`/`priceTable` are the server's RESERVATION figures — worst-case-biased, so
+   *  a budget built on them can only come in under. Absent on a server older than them. */
+  video?: {
+    model?: string;
+    blockedByZdr?: boolean;
+    durations?: number[] | null;
+    aspectRatios?: string[] | null;
+    priceUsd?: { min?: number; max?: number } | null;
+    priceTable?: VideoPriceRow[] | null;
+    priceSource?: "table" | "fallback";
+  };
+  sprites?: {
+    available?: boolean;
+    directionSets?: { id: string; billedClips?: number; billedTurnStills?: number }[];
+  };
   model3d?: {
     model?: string;
     configured?: boolean;
@@ -1066,6 +1089,119 @@ function describeAxis(a: MeshAxis): string {
   return `    ${a.name}: ${(a.values ?? []).join(" | ")} (default ${String(a.default)})${cost}`;
 }
 
+const usd = (n: number | undefined | null): string => `$${(n ?? 0).toFixed(2)}`;
+
+/**
+ * The image and video sections of the capability report.
+ *
+ * Exported and pure for the reason describeModel3d is. The prices are the point: an
+ * agent planning a film used to see what a mesh or an effect cost and nothing at all
+ * for a clip — the dearest call it can make — so it could neither weigh the job nor
+ * set a sensible `--max-spend`. A server too old to report a price gets that said
+ * plainly rather than a $0.00 that reads as free.
+ */
+export function describeImageVideo(image: CapabilitiesResponse["image"], video: CapabilitiesResponse["video"]): string[] {
+  const imagePrice =
+    typeof image?.priceUsdEach === "number" ? `, about ${usd(image.priceUsdEach)} each` : ", price not reported";
+  const lines = [
+    `Image model: ${image?.model ?? "unknown"}${image?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : ""}`,
+    `  up to ${image?.maxPerCall ?? 1} image(s) per call${imagePrice}`,
+    `Video model: ${video?.model ?? "unknown"}${video?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : ""}`,
+    `  clip lengths: ${video?.durations?.length ? `${video.durations.join(", ")}s` : "model default only"}`,
+    `  aspect ratios: ${video?.aspectRatios?.length ? video.aspectRatios.join(", ") : "model default only"}`,
+  ];
+  const table = video?.priceTable ?? [];
+  if (video?.priceUsd && table.length) {
+    const fallback = video.priceSource === "fallback" ? " (no price row for this model — a conservative estimate)" : "";
+    lines.push(`  cost: ${usd(video.priceUsd.min)}-${usd(video.priceUsd.max)} a clip${fallback}, reserved up front and settled at the real cost`);
+    // Per length at the call's default (no resolution sent, no audio): that is the
+    // call an agent makes unless it asks for more, and the line it budgets from.
+    const plain = table.filter((r) => r.resolution === null && !r.audio && r.seconds !== null);
+    if (plain.length) lines.push(`  by length (default resolution, no audio): ${plain.map((r) => `${r.seconds}s ${usd(r.usd)}`).join(", ")}`);
+    const resolutions = [...new Set(table.map((r) => r.resolution).filter((r): r is string => !!r))];
+    if (resolutions.length) lines.push(`  resolution changes the price: ${resolutions.join(", ")} (pass generate_video's \`resolution\`)`);
+    if (table.some((r) => r.audio)) lines.push("  audio: true costs more on this model");
+  } else {
+    lines.push("  cost: not reported by this server — roughly $0.10-$1 a clip, more for long or high-resolution clips");
+  }
+  return lines;
+}
+
+/**
+ * What one call of a billed tool is expected to cost, in USD — or null when it can't
+ * be priced from what the server reports. Pure over a capability report, for the
+ * `--max-spend` budget (permissions/cliSpend.ts): it prices the call the model is
+ * ABOUT to make from that call's own arguments, and it errs high everywhere it has
+ * to choose, because a cap that under-counts is not a cap.
+ */
+export function quoteMediaCallUsd(tool: string, input: unknown, caps: CapabilitiesResponse): number | null {
+  const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const clip = (seconds: number | undefined, resolution: string | undefined, audio: boolean): number | null => {
+    const table = caps.video?.priceTable ?? [];
+    if (!table.length) return null;
+    const exact = table.find(
+      (r) => r.seconds === (seconds ?? r.seconds) && r.resolution === (resolution ?? null) && r.audio === audio,
+    );
+    // An exact row when the call names a legal length; otherwise the dearest row that
+    // still matches what we do know — never a cheaper guess.
+    if (exact && seconds !== undefined) return exact.usd;
+    // `resolution: null` rows are the server's price for a call that sends none, so
+    // that's the set an unspecified resolution is quoted from.
+    const candidates = table.filter((r) => r.resolution === (resolution ?? null) && (audio || !r.audio));
+    const pool = candidates.length ? candidates : table;
+    return Math.max(...pool.map((r) => r.usd));
+  };
+  switch (tool) {
+    case "generate_image": {
+      // The report prices the ACCOUNT's image model; a call naming another one would
+      // be quoted at the wrong model's rate, so it isn't quoted at all.
+      if (typeof args.model === "string" && args.model) return null;
+      const each = caps.image?.priceUsdEach;
+      if (typeof each !== "number") return null;
+      const n = Math.min(Math.max(Math.trunc(num(args.count) ?? 1), 1), caps.image?.maxPerCall ?? 4);
+      return each * n;
+    }
+    case "generate_video":
+      return clip(num(args.seconds), typeof args.resolution === "string" ? args.resolution : undefined, args.audio === true);
+    case "generate_model":
+      return typeof caps.model3d?.priceUsd?.max === "number" ? caps.model3d.priceUsd.max : null;
+    case "generate_sprite": {
+      const set = typeof args.directions === "string" ? args.directions : "one";
+      const row = caps.sprites?.directionSets?.find((d) => d.id === set);
+      // The sprite pipeline picks each clip's length and resolution itself, so every
+      // clip is quoted at the dearest silent row.
+      const silent = (caps.video?.priceTable ?? []).filter((r) => !r.audio);
+      const clipUsd = silent.length ? Math.max(...silent.map((r) => r.usd)) : null;
+      if (!row || clipUsd === null) return null;
+      const stills = row.billedTurnStills ?? 0;
+      const each = caps.image?.priceUsdEach;
+      if (stills > 0 && (typeof each !== "number" || (typeof args.image_model === "string" && args.image_model))) return null;
+      return clipUsd * (row.billedClips ?? 1) + stills * (each ?? 0);
+    }
+    case "generate_sfx":
+      // No server figure; the tool's own documented ceiling for a single effect.
+      return 0.02;
+    default:
+      // Speech and music: the server reports no price, and a guess would be a cap in
+      // name only.
+      return null;
+  }
+}
+
+/** Read the capability report (optionally describing a specific video / 3D model). */
+export async function readMediaCapabilities(
+  query: { videoModel?: string; model?: string } = {},
+  signal?: AbortSignal,
+): Promise<{ ok: true; data: CapabilitiesResponse } | { ok: false; message: string }> {
+  const q = new URLSearchParams();
+  if (query.videoModel) q.set("videoModel", query.videoModel);
+  if (query.model) q.set("model", query.model);
+  const qs = q.toString();
+  const r = await callAccount<CapabilitiesResponse>(`/api/agent/media/capabilities${qs ? `?${qs}` : ""}`, { method: "GET", signal });
+  return r.ok ? { ok: true, data: r.data } : { ok: false, message: r.message };
+}
+
 /**
  * The sound-effect section of the capability report.
  *
@@ -1137,7 +1273,7 @@ export const mediaCapabilitiesToolDefinition = {
   label: "Media Capabilities",
   description:
     "Report what this Privateer account can generate right now: which image and video models it " +
-    "resolves to, the clip lengths and aspect ratios that video model accepts, and whether the " +
+    "resolves to, what an image and a clip cost, the clip lengths and aspect ratios that video model accepts, and whether the " +
     "account's privacy settings currently block media generation. Free and instant. Call it before " +
     "planning a multi-clip video so you pick a legal clip length instead of discovering it through a " +
     "rejected — or worse, billed — call.\n" +
@@ -1157,6 +1293,14 @@ export const mediaCapabilitiesToolDefinition = {
           "their legal values and the price — is per-model.",
       }),
     ),
+    videoModel: Type.Optional(
+      Type.String({
+        description:
+          "A video model id to describe instead of the account default (e.g. 'bytedance/seedance-2.0'). " +
+          "Clip lengths, aspect ratios and the price per clip are all per-model — check the one you will " +
+          "pass as generate_video's `model` before you spend on it.",
+      }),
+    ),
     ttsModel: Type.Optional(
       Type.String({
         description:
@@ -1166,9 +1310,10 @@ export const mediaCapabilitiesToolDefinition = {
       }),
     ),
   }),
-  async execute(_toolCallId: string, params: { model?: string; ttsModel?: string }, signal?: AbortSignal) {
+  async execute(_toolCallId: string, params: { model?: string; ttsModel?: string; videoModel?: string }, signal?: AbortSignal) {
     const query = new URLSearchParams();
     if (params?.model) query.set("model", params.model);
+    if (params?.videoModel) query.set("videoModel", params.videoModel);
     if (params?.ttsModel) query.set("ttsModel", params.ttsModel);
     const qs = query.toString();
     const r = await callAccount<CapabilitiesResponse>(
@@ -1178,13 +1323,7 @@ export const mediaCapabilitiesToolDefinition = {
     if (!r.ok) return text(`Could not read media capabilities: ${r.message}`);
 
     const { image, video, model3d, sfx, speech, privacy } = r.data;
-    const lines = [
-      `Image model: ${image?.model ?? "unknown"}${image?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : ""}`,
-      `  up to ${image?.maxPerCall ?? 1} image(s) per call`,
-      `Video model: ${video?.model ?? "unknown"}${video?.blockedByZdr ? "  [BLOCKED by this account's ZDR setting]" : ""}`,
-      `  clip lengths: ${video?.durations?.length ? `${video.durations.join(", ")}s` : "model default only"}`,
-      `  aspect ratios: ${video?.aspectRatios?.length ? video.aspectRatios.join(", ") : "model default only"}`,
-    ];
+    const lines = describeImageVideo(image, video);
 
     lines.push(...describeModel3d(model3d));
     lines.push(...describeSfx(sfx));

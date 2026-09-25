@@ -304,7 +304,9 @@ export async function runAcp(): Promise<void> {
     session.subscribe((ev: any) => {
       for (const ee of adapter.toEngineEvents(ev)) {
         if (ee.type === "text") holder.events.onText(ee.text);
-        else if (ee.type === "error") holder.error = ee.error;
+        // With the hint: the host shows this string and nothing else, and "Connection
+        // error." alone says neither what failed nor what to do (engine/errors.ts).
+        else if (ee.type === "error") holder.error = (ee as { hint?: string }).hint ? `${ee.error} ${(ee as { hint?: string }).hint}` : ee.error;
         // Tool activity goes BOTH to the host (rendered as live progress — without
         // it a minute of tool work looks like a hang) and to stderr, where it is
         // the only way to tell a gate denial apart from the model simply choosing

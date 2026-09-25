@@ -1824,7 +1824,7 @@ index 6d0356c..ca0aa98 100644
          if (content) {
              text += `\n\n${content}`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index d82182c..2764952 100644
+index d82182c..08bec2d 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 @@ -10,7 +10,7 @@ import * as TuiLayouts from "@earendil-works/pi-tui";
@@ -1850,7 +1850,7 @@ index d82182c..2764952 100644
      if (!sessionManager.usesDefaultSessionDir()) {
          args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
      }
-@@ -192,6 +197,64 @@ function formatLoginProviderCompletionDescription(provider) {
+@@ -192,6 +197,77 @@ function formatLoginProviderCompletionDescription(provider) {
      const authTypes = provider.authTypes.map(formatAuthSelectorProviderType).join("/");
      return provider.name === provider.id ? authTypes : `${provider.name} · ${authTypes}`;
  }
@@ -1893,6 +1893,13 @@ index d82182c..2764952 100644
 +                message: "The provider stopped responding — the connection went idle.",
 +                hint: "No data arrived for the whole idle-timeout window, so the turn was cut off. Send it again, or run /model to switch providers (a slow model can be given longer in /settings → HTTP idle timeout).",
 +            };
++        // Privateer patch: the OpenAI SDK's whole message for a request that never got
++        // a response. Mirrors isConnectionFailureText in src/engine/errors.ts.
++        if (/^\s*(?:connection error\.?|fetch failed|other side closed|socket hang up|(?:read |connect )?(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)\b)/i.test(s))
++            return {
++                message: `Couldn't reach the model provider — the request got no response ("${s.trim().slice(0, 80)}").`,
++                hint: "Check your connection and send it again. If every message fails while a fresh `privateer` works, start a new session with /new.",
++            };
 +        return null;
 +    }
 +    if (status === 429) {
@@ -1905,7 +1912,13 @@ index d82182c..2764952 100644
 +        };
 +    }
 +    if (status === 401 || status === 403)
-+        return { message: s, hint: "Check your credentials — run /login to re-authenticate." };
++        return {
++            // "401 status code (no body)" names neither what was refused nor what to do.
++            message: /\(no body\)\s*$/i.test(s)
++                ? `The model provider ${status === 401 ? "rejected the credential" : "refused access"} this request was sent with (${status}).`
++                : s,
++            hint: "Check your credentials — run /login to re-authenticate.",
++        };
 +    if (status === 404)
 +        return { message: s, hint: "Check the model id — run /model to switch." };
 +    if (status >= 500)
@@ -1915,7 +1928,7 @@ index d82182c..2764952 100644
  export class InteractiveMode {
      runtimeHost;
      renderer;
-@@ -404,9 +467,15 @@ export class InteractiveMode {
+@@ -404,9 +480,15 @@ export class InteractiveMode {
      }
      getBuiltInCommandConflictDiagnostics(extensionRunner) {
          const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
@@ -1932,7 +1945,7 @@ index d82182c..2764952 100644
              .map((command) => ({
              type: "warning",
              message: command.invocationName === command.name
-@@ -775,20 +844,18 @@ export class InteractiveMode {
+@@ -775,20 +857,18 @@ export class InteractiveMode {
                  this.showNewVersionNotification(newRelease);
              }
          });
@@ -1965,7 +1978,7 @@ index d82182c..2764952 100644
          // Check tmux keyboard setup asynchronously
          this.checkTmuxKeyboardSetup().then((warning) => {
              if (warning) {
-@@ -1568,7 +1635,7 @@ export class InteractiveMode {
+@@ -1568,7 +1648,7 @@ export class InteractiveMode {
          if (this.bugReportHintShown)
              return;
          this.bugReportHintShown = true;
@@ -1974,7 +1987,7 @@ index d82182c..2764952 100644
          this.ui.requestRender();
      }
      renderCurrentSessionState() {
-@@ -2419,7 +2486,17 @@ export class InteractiveMode {
+@@ -2419,7 +2499,17 @@ export class InteractiveMode {
              if (text === "/model" || text.startsWith("/model ")) {
                  const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -1993,7 +2006,7 @@ index d82182c..2764952 100644
                  return;
              }
              if (text === "/thinking" || text.startsWith("/thinking ")) {
-@@ -2497,12 +2574,42 @@ export class InteractiveMode {
+@@ -2497,12 +2587,42 @@ export class InteractiveMode {
              if (text === "/login" || text.startsWith("/login ")) {
                  const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -2038,7 +2051,7 @@ index d82182c..2764952 100644
                  return;
              }
              if (text === "/new") {
-@@ -2827,9 +2934,19 @@ export class InteractiveMode {
+@@ -2827,9 +2947,19 @@ export class InteractiveMode {
                      if (entries[0]?.type !== "compaction") {
                          throw new Error("Completed compaction is missing from the session context");
                      }
@@ -2061,7 +2074,7 @@ index d82182c..2764952 100644
                      this.addMessageToChat(createCompactionSummaryMessage(event.result.summary, event.result.tokensBefore, new Date().toISOString()));
                      if (event.result.usage) {
                          this.addCompactionCostNotice({
-@@ -3253,7 +3370,7 @@ export class InteractiveMode {
+@@ -3253,7 +3383,7 @@ export class InteractiveMode {
          if (this.chatContainer.children.length > 0) {
              this.chatContainer.addChild(new Spacer(1));
          }
@@ -2070,7 +2083,7 @@ index d82182c..2764952 100644
      }
      async getUserInput() {
          const queuedInput = this.pendingUserInputs.shift();
-@@ -3597,7 +3714,17 @@ export class InteractiveMode {
+@@ -3597,7 +3727,17 @@ export class InteractiveMode {
      }
      showError(errorMessage) {
          this.chatContainer.addChild(new Spacer(1));

@@ -18,6 +18,7 @@ import {
   seedCatalogIds,
   ownedAccountCredential,
   recoverAccountSession,
+  recoverAccountConnection,
   rememberAccountCredential,
   verificationLink,
   accountProviderConfig,
@@ -930,4 +931,45 @@ test("the registered model entries carry the profile through to pi", () => {
 test.after(() => {
   rmSync("/private/tmp/claude-501/pv-account-test", { recursive: true, force: true });
   rmSync(CACHE_HOME, { recursive: true, force: true });
+});
+
+// Regression: a session started while a sign-in was failing answered "Connection error."
+// on every message, while a fresh `privateer` worked. A request with no HTTP response
+// has no 401 to key recovery on, so recoverAccountConnection asks the server about the
+// token itself — and only replaces the session when the server actually refuses it.
+test("a connection failure renews a refused session, and leaves a live one alone", async () => {
+  const prevUrl = process.env.PRIVATEER_SERVER_URL;
+  process.env.PRIVATEER_SERVER_URL = "https://stub.privateer.test";
+  const stub = stubServer();
+  clearCredentials();
+  saveCredentials(PARENT);
+  const slot = (globalThis as any)[Symbol.for("privateer.accountCredential")];
+  const held = { access: "stale", refresh: "stale-r", expires: Date.now() + 3_600_000 };
+  const s = fakeStore({ privateer: { type: "oauth", ...held } });
+  rememberAccountCredential(held);
+  let reRegistered = 0;
+  try {
+    delete slot.connectionRecoveredAt;
+    // No answer from the server: a real outage. Replacing the session would only leak a row.
+    const offline = await recoverAccountConnection(s.ctx, "near/some-model", () => reRegistered++, async () => null);
+    assert.deepEqual(offline, { shim: false, session: false });
+    assert.equal(s.data.privateer.access, "stale");
+    assert.equal(reRegistered, 0, "a non-sealed model has no shim to restart");
+
+    // Within the cooldown, nothing is even probed.
+    let probed = 0;
+    await recoverAccountConnection(s.ctx, "near/some-model", () => {}, async () => (probed++, 401));
+    assert.equal(probed, 0);
+
+    // The server refuses the token: renew it, as a 401 would have.
+    delete slot.connectionRecoveredAt;
+    const refused = await recoverAccountConnection(s.ctx, "near/some-model", () => {}, async (access) => (access === "stale" ? 401 : 200));
+    assert.deepEqual(refused, { shim: false, session: true });
+    assert.equal(s.data.privateer.access, "child-access");
+  } finally {
+    stub.restore();
+    clearCredentials();
+    if (prevUrl === undefined) delete process.env.PRIVATEER_SERVER_URL;
+    else process.env.PRIVATEER_SERVER_URL = prevUrl;
+  }
 });
