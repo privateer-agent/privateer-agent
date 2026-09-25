@@ -688,6 +688,8 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/remote-access` | link this terminal to the app and allow it to drive (off by default) |
 | `/connect` · `/mcp` | add, enable, or remove MCP connectors / see what actually connected |
 | `/speak` · `/talk` | read answers aloud / voice input (**alt+t** is push-to-talk) |
+| `/mood` | pick a voice mood (focused, relaxed, hands-free, quiet, or your own; `/mood save <name>` keeps the current setup) |
+| `/fresh` | replace this agent with a new process: everything it started (dev servers, watchers, subagents) is stopped, and the new agent has no link to the old one (`/resume` still reaches the old session). Saying "fresh start" does the same |
 | `/extensions` | list loaded Pi extensions |
 | `/web-tools` | point `web_search`/`web_fetch` at a search provider of your own (signed in, they already work on your account) |
 | `/init` | scaffold a starter `PRIVATEER.md` in this directory |
@@ -695,6 +697,8 @@ drop your own into `~/.privateer/agent/extensions/` and it loads the same way, g
 | `/update` · `/privateer` | update to the latest release / Privateer status and posture |
 
 Shell subcommands: `privateer` (interactive), `privateer update`, `privateer harbor …`,
+`privateer fresh [n]` (swap a running terminal's agent from another terminal, even when that
+agent is stuck),
 `privateer acp` (serve the agent to an ACP host like Buzz or Zed — see
 [`docs/acp.md`](docs/acp.md)), `privateer auth status` (is this machine signed in?),
 `privateer -p … [--allow-spend …] [--approve-in-app]` (see

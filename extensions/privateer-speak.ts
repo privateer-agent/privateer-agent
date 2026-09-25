@@ -120,5 +120,21 @@ export default function privateerSpeak(pi: any): void {
   // with the generic package keeps two independent setups instead of a fought-over
   // file. globalDir() is read here, not at module load, so PRIVATEER_HOME set around
   // session creation (tests, the daemon) is honoured.
-  makePiSpeakExtension({ configFile: join(globalDir(), "speak.json") })(pi);
+  //
+  // voiceCommands: saying one of these AS THE WHOLE UTTERANCE runs /fresh (see
+  // extensions/privateer-fresh.ts) instead of sending the words to the model. Whole
+  // utterance only, so "why did the fresh start fail" is still a question. Needs
+  // privateer-speak >= 0.3.0; an older one ignores the option and the phrases are
+  // simply sent as messages.
+  // (A variable, not an inline literal, so this still typechecks against a pre-0.3.0
+  // PiSpeakOptions that has no voiceCommands field.)
+  const options = { configFile: join(globalDir(), "speak.json"), voiceCommands: VOICE_COMMANDS };
+  makePiSpeakExtension(options)(pi);
 }
+
+const VOICE_COMMANDS: Record<string, string> = {
+  "fresh start": "/fresh",
+  "start fresh": "/fresh",
+  "fresh agent": "/fresh",
+  "new agent": "/fresh",
+};

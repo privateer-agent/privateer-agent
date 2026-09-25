@@ -22,6 +22,7 @@
     { "entry": "extensions/privateer-desktop.ts", "name": "privateer-desktop", "note": "/desktop — open the Privateer desktop app" },
     { "entry": "extensions/privateer-hints.ts", "name": "privateer-hints", "note": "rotating tips in the working line + /hints" },
     { "entry": "extensions/privateer-update.ts", "name": "privateer-update", "note": "tool pack updates in place — banner flag + /update" },
+    { "entry": "extensions/privateer-fresh.ts", "name": "privateer-fresh", "note": "/fresh — replace the agent with a new one and stop everything it started" },
     { "entry": "extensions/privateer-speak.ts", "name": "privateer-speak", "note": "spoken responses (/speak) + voice input (/talk) — pi-speak + confidential account TTS/STT" },
     { "entry": "extensions/privateer-web.ts", "name": "privateer-web", "note": "web_search/web_fetch — account search when signed in, else the user's own provider (rpiv-web-tools)" },
     { "dep": ["@juicesharp/rpiv-ask-user-question", "index.ts"], "name": "rpiv-ask-user-question", "note": "ask_user_question" },

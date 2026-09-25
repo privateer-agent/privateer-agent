@@ -123,9 +123,13 @@ test("the harbor and acp subcommands opt into forwarding; the TUI does not", () 
   // process group, so the child has already had them. Forwarding would send a SECOND
   // — and a TUI that treats the first Ctrl-C as "clear the line" and the second as
   // "quit" would exit on one keypress.
-  const tui = line("CLI, ...modelArgs");
-  assert.ok(tui, "could not find the TUI launch line");
+  // The TUI runs supervised (bin/fresh-supervisor.mjs) and non-interactive runs through
+  // runToCompletion; neither may forward, and the supervisor installs no signal handler.
+  const tui = line("tuiArgs(args)");
+  assert.ok(tui, "could not find the non-interactive launch line");
   assert.ok(!tui!.includes("forwardSignals"), "the TUI must not forward signals");
+  const sup = fs.readFileSync(path.join(HERE, "..", "bin", "fresh-supervisor.mjs"), "utf8");
+  assert.ok(!/process\.on\("SIG/.test(sup), "the fresh supervisor must not handle terminal signals");
   const mod = fs.readFileSync(path.join(HERE, "..", "bin", "run-to-completion.mjs"), "utf8");
   const body = mod.slice(mod.indexOf("export function runToCompletion"));
   assert.ok(!/kill\("SIGINT"\)|"SIGINT"/.test(body.split("child.on")[0]), "must not forward SIGINT");

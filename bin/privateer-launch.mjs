@@ -31,6 +31,7 @@ import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 import { routeUpdate } from "./update-route.mjs";
 import { APPROVE_IN_APP_ENV, CLI_SPEND_ENV, PI_SUBCOMMANDS, authProblem, extractHeadlessFlags } from "./headless-flags.mjs";
 import { runToCompletion } from "./run-to-completion.mjs";
+import { filterRespawnArgs, listTerminals, requestFresh, runSupervised } from "./fresh-supervisor.mjs";
 import { configureCompileCache } from "./startup-cache.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
@@ -570,6 +571,66 @@ else if (sub === "acp") {
   runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-acp.mjs"), ...args.slice(1)], { forwardSignals: true });
 }
 
+// --- `privateer fresh [n|pid] [--list]` --------------------------------------
+// Swap a running terminal's agent for a brand-new process, reaping everything the old
+// one started. This is the rescue path: an agent that has jammed can't run its own
+// /fresh, so you run this from another terminal. See bin/fresh-supervisor.mjs.
+else if (sub === "fresh") {
+  const cmd = process.env.PRIVATEER_CMD || "privateer";
+  const rest = args.slice(1);
+  if (rest.includes("--help") || rest.includes("-h")) {
+    console.log(
+      [
+        `${cmd} fresh — replace a running terminal's agent with a new one.`,
+        "",
+        `  ${cmd} fresh            the only running terminal`,
+        `  ${cmd} fresh <n|pid>    one of several — pick from the list`,
+        `  ${cmd} fresh --list     show running terminals`,
+        "",
+        "The old agent and every process it started are stopped; the new one starts in",
+        "the same terminal with a new session and no link to the old one. Inside a",
+        "terminal, /fresh does the same. The old session stays resumable with /resume.",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
+  const terms = listTerminals(PRIVATEER_HOME);
+  const describe = (t, i) =>
+    `  ${i + 1}. ${t.cwd}  (pid ${t.pid}, up ${Math.max(1, Math.round((Date.now() - t.startedAt) / 60000))}m)`;
+  if (rest.includes("--list")) {
+    console.log(terms.length ? terms.map(describe).join("\n") : "No running Privateer terminals.");
+    process.exit(0);
+  }
+  const pick = rest.find((a) => !a.startsWith("-"));
+  let target;
+  if (pick) {
+    const n = Number(pick);
+    target = terms.find((t) => t.pid === n) ?? (Number.isInteger(n) && n >= 1 ? terms[n - 1] : undefined);
+    if (!target) {
+      console.error(`${cmd} fresh: no running terminal "${pick}" — ${cmd} fresh --list shows them.`);
+      process.exit(1);
+    }
+  } else if (terms.length === 1) {
+    target = terms[0];
+  } else if (terms.length === 0) {
+    console.error("No running Privateer terminals.");
+    process.exit(1);
+  } else {
+    console.error(`Several Privateer terminals are running — pick one:\n${terms.map(describe).join("\n")}\n\n  ${cmd} fresh <n>`);
+    process.exit(2);
+  }
+  requestFresh(target.socket, target.token).then(
+    () => {
+      console.log(`Fresh agent starting in ${target.cwd}.`);
+      process.exit(0);
+    },
+    (e) => {
+      console.error(`${cmd} fresh: ${e.message}`);
+      process.exit(1);
+    },
+  );
+}
+
 // --- Pi's own subcommands: `auth`, and the package commands -------------------
 // Pi matches these only as args[0]. The normal launch below prepends --model, -e and
 // --skill, so every one of them used to fall through as a CHAT MESSAGE — `privateer
@@ -748,19 +809,24 @@ else {
   //   3. a saved pick in settings.json → pass NO flag; Pi resolves it itself (and
   //      falls back sanely if that model has vanished from the registry)
   //   4. nothing saved (first run / fresh home) → the computed MODEL above
-  const userPassedModel = args.includes("--model");
-  let savedDefault = null;
-  try {
-    const s = JSON.parse(fs.readFileSync(path.join(AGENT_DIR, "settings.json"), "utf8"));
-    if (
-      typeof s.defaultProvider === "string" && s.defaultProvider.trim() &&
-      typeof s.defaultModel === "string" && s.defaultModel.trim()
-    ) {
-      savedDefault = `${s.defaultProvider}/${s.defaultModel}`;
-    }
-  } catch { /* absent/unreadable → no saved pick */ }
-  const modelArgs =
-    userPassedModel || (savedDefault && !process.env.PRIVATEER_MODEL) ? [] : ["--model", MODEL];
+  //
+  // A FUNCTION, called per launch: a fresh agent (bin/fresh-supervisor.mjs) re-reads it,
+  // so a model picked in the old session boots the new one instead of being stomped by
+  // a first-run --model computed before that pick existed.
+  const modelArgsFor = (launchArgs) => {
+    const userPassedModel = launchArgs.includes("--model");
+    let savedDefault = null;
+    try {
+      const s = JSON.parse(fs.readFileSync(path.join(AGENT_DIR, "settings.json"), "utf8"));
+      if (
+        typeof s.defaultProvider === "string" && s.defaultProvider.trim() &&
+        typeof s.defaultModel === "string" && s.defaultModel.trim()
+      ) {
+        savedDefault = `${s.defaultProvider}/${s.defaultModel}`;
+      }
+    } catch { /* absent/unreadable → no saved pick */ }
+    return userPassedModel || (savedDefault && !process.env.PRIVATEER_MODEL) ? [] : ["--model", MODEL];
+  };
 
   // Dev convenience: load provider keys from the repo's .env if present.
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
@@ -786,7 +852,12 @@ else {
   const splash = path.join(HERE, "privateer-splash.mjs");
   if (!isNonInteractive && fs.existsSync(splash)) nodeArgs.push("--import", pathToFileURL(splash).href);
 
-  runToCompletion(NODE_BIN, [...nodeArgs, CLI, ...modelArgs, ...extArgs, ...skillArgs, ...args]);
+  // Supervised rather than runToCompletion: the launcher stays up so /fresh, a voice
+  // command, or `privateer fresh` from another terminal can swap this agent for a new
+  // process with the old tree reaped. Print/export/version runs have nothing to swap.
+  const tuiArgs = (launchArgs) => [...nodeArgs, CLI, ...modelArgsFor(launchArgs), ...extArgs, ...skillArgs, ...launchArgs];
+  if (isNonInteractive) runToCompletion(NODE_BIN, tuiArgs(args));
+  else runSupervised(NODE_BIN, (first) => tuiArgs(first ? args : filterRespawnArgs(args)), { home: PRIVATEER_HOME });
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -969,6 +1040,7 @@ function printPrivateerHelp(cmd = process.env.PRIVATEER_CMD || "privateer") {
       `  ${cmd} harbor <command>     Manage the resident background Harbor daemon (run/install/uninstall/status)`,
       `  ${cmd} verify               Check local installation integrity and patch state`,
       `  ${cmd} acp                  Run as an Agent Client Protocol server (JSON-RPC on stdio)`,
+      `  ${cmd} fresh [n]            Replace a running terminal's agent with a new one (stops everything it started)`,
       `  ${cmd} install <source>     Install extension source and add to settings`,
       `  ${cmd} remove <source>      Remove extension source from settings`,
       `  ${cmd} uninstall <source>   Alias for remove`,
