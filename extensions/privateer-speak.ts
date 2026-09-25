@@ -123,13 +123,8 @@ export default function privateerSpeak(pi: any): void {
   //
   // voiceCommands: saying one of these AS THE WHOLE UTTERANCE runs /fresh (see
   // extensions/privateer-fresh.ts) instead of sending the words to the model. Whole
-  // utterance only, so "why did the fresh start fail" is still a question. Needs
-  // privateer-speak >= 0.3.0; an older one ignores the option and the phrases are
-  // simply sent as messages.
-  // (A variable, not an inline literal, so this still typechecks against a pre-0.3.0
-  // PiSpeakOptions that has no voiceCommands field.)
-  const options = { configFile: join(globalDir(), "speak.json"), voiceCommands: VOICE_COMMANDS };
-  makePiSpeakExtension(options)(pi);
+  // utterance only, so "why did the fresh start fail" is still a question.
+  makePiSpeakExtension({ configFile: join(globalDir(), "speak.json"), voiceCommands: VOICE_COMMANDS })(pi);
 }
 
 const VOICE_COMMANDS: Record<string, string> = {
