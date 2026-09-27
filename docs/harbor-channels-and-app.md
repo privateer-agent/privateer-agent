@@ -285,7 +285,14 @@ permission gate: a forged `routines_save`+`run` runs a headless **bypass-mode** 
 (→ RCE), a forged `extensions_add` installs an npm package (→ RCE), and a forged
 `skills_create` injects an auto-invoked system-prompt skill. Without signing, the
 untrusted server could forge any of them; with it, a server that turns malicious after
-link cannot. The replay watermark is **per-terminal** (`crypto/accountTrust.ts`
+link cannot. The two frames that **lower the permission gate** are signed the same way:
+`no_quarter` with `on: true` (lifts the gate for the session, strict ts) and
+`approval_response` with `decision: "allow"` (args bind the request `id`, so a
+signature answers exactly one pending ask). Their safe directions — `no_quarter` off
+and a deny — stay unsigned, and any decision other than an exact `"allow"` is a deny.
+Verified in `RelayClient.handle`, so it covers every relay-backed session; the desktop
+app's local IPC path is not a relay and doesn't carry signatures.
+The replay watermark is **per-terminal** (`crypto/accountTrust.ts`
 `control-sig.json`), so the always-on harbor and interactive terminals don't
 cross-reject each other's independent `ts` streams.
 

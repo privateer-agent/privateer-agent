@@ -22,6 +22,8 @@ import { apiRequest, serverBaseUrl } from "../auth/privateer.ts";
 import { MOAT_SHIMS, reservedNames } from "../config/moatManifest.ts";
 import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
+import { noQuarterActive } from "../permissions/noQuarter.ts";
+import { authorizeControl } from "./controlAuth.ts";
 import { CARGO_CHUNK_CHARS, type CargoSaveRequest, type CargoSaveResult } from "./cargoSave.ts";
 import {
   LIBRARY_CHUNK_CHARS,
@@ -120,11 +122,13 @@ export interface RelayCallbacks {
   // relay. Optional so callbacks that predate the frame keep compiling; an older
   // CLI that ignores it still gets signed out by the ≤25s heartbeat kill.
   onRevoked?: () => void;
-  // The app answered a relayed approval request.
+  // The app answered a relayed approval request. An "allow" reaches here only once
+  // handle() has verified the account's signature over it; a deny needs none.
   onApprovalResponse: (id: string, decision: "allow" | "deny") => void;
   // The app toggled no-quarter (unattended) mode: remote turns auto-approve like
   // bypass mode instead of relaying every action, so the agent runs to completion.
   // Dangerous/destructive actions still relay — they sit above bypass locally too.
+  // `on: true` reaches here only once handle() has verified the account's signature.
   onNoQuarter?: (on: boolean) => void;
   // The app toggled the privacy filter. `off` true = pi-privacy is disabled for this
   // session, exactly as `/privacy off` does it: no outbound PII scan or prompt, no
@@ -765,12 +769,59 @@ export class RelayClient {
       case "session_revoked":
         this.cb.onRevoked?.();
         break;
-      case "approval_response":
-        if (frame.id) this.cb.onApprovalResponse(frame.id, frame.decision === "deny" ? "deny" : "allow");
+      // The two frames that LOWER the permission gate. The relay is untrusted (docs/
+      // harbor-channels-and-app.md §6), and before this an unsigned `approval_response`
+      // or `no_quarter` from it was taken as the human's word — a hostile relay could
+      // allow any pending action, or lift the gate for the whole session. So each is
+      // account-signed now, like every other mutating control frame (H2), and verified
+      // against THIS terminal's id. Only the direction that widens what the agent may do
+      // needs proof: a deny, or no-quarter off, is safe from anyone and stays unsigned.
+      case "approval_response": {
+        if (typeof frame.id !== "string" || !frame.id) break;
+        // Exactly "allow" — anything else, including a missing or unknown decision,
+        // is a deny. This used to be the other way round.
+        if (frame.decision !== "allow") {
+          this.cb.onApprovalResponse(frame.id, "deny");
+          break;
+        }
+        // Not strict: the id binds the signature to one request, and the bridge
+        // settles each id once, so a replay has nothing left to answer. Strict would
+        // refuse the burst the app sends when it allows a queue in the same ms.
+        const auth = authorizeControl(
+          this.termId,
+          "approval_response",
+          { id: frame.id, decision: "allow" },
+          sig(frame),
+          tsOf(frame),
+        );
+        if (!auth.ok) {
+          this.refuseControl(auth.message);
+          // Settle it now rather than leave the gate waiting out its timeout.
+          this.cb.onApprovalResponse(frame.id, "deny");
+          break;
+        }
+        this.cb.onApprovalResponse(frame.id, "allow");
         break;
-      case "no_quarter":
-        this.cb.onNoQuarter?.(frame.on === true);
+      }
+      case "no_quarter": {
+        if (frame.on !== true) {
+          this.cb.onNoQuarter?.(false);
+          break;
+        }
+        // Strict: `on` is not bound to anything that expires, so a relay that kept the
+        // last signed `on` could otherwise replay it after the user turned the flag off.
+        const auth = authorizeControl(this.termId, "no_quarter", { on: true }, sig(frame), tsOf(frame), {
+          strict: true,
+        });
+        if (!auth.ok) {
+          this.refuseControl(auth.message);
+          // The app flips its toggle optimistically; tell it what actually holds.
+          this.sendNoQuarter(noQuarterActive());
+          break;
+        }
+        this.cb.onNoQuarter?.(true);
         break;
+      }
       case "privacy":
         this.cb.onPrivacy?.(frame.off === true);
         break;
@@ -1204,6 +1255,15 @@ export class RelayClient {
     // it, which is exactly why the app checks it against the link-time pin.
     if (typeof ctx.terminalPub === "string" && ctx.terminalPub) frame.terminalPub = ctx.terminalPub;
     this.rawSend(frame);
+  }
+
+  // A signed control frame failed verification here. Say so on both ends: the app,
+  // whose user pressed the button, and this terminal, whose user owns the machine.
+  private refuseControl(message?: string): void {
+    const text = message ?? "Refused an unverified change from the app.";
+    this.debug(`refused control: ${text}`);
+    this.sendNotice(text);
+    this.cb.onStatus?.(text);
   }
 
   // A one-line notice for the app's feed (e.g. "model → …", "unknown command").
