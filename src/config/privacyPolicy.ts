@@ -33,8 +33,7 @@ import { loadConfig, makePiPrivacyExtension } from "pi-privacy";
 import { noQuarterActive } from "../permissions/noQuarter.ts";
 import { addPiiAllow, piiAllowEntries, removePiiAllow } from "./piiAllow.ts";
 import { cliPalette, detectScheme } from "../ui/palette.ts";
-import { accountPosture, privateerChannel } from "../providers/account.ts";
-import { hasCredentials } from "../auth/privateer.ts";
+import { accountPosture } from "../providers/account.ts";
 import { writePiDefaultModel } from "../providers/defaultModel.ts";
 import { privacyDisabled, setPrivacyDisabled } from "./privacyDisabled.ts";
 import { updatePostureBadge } from "../../extensions/privateer-posture.ts";
@@ -84,11 +83,11 @@ export function sharedPrivacyOptions() {
       if (provider !== "privateer") return undefined; // pi-privacy handles its own providers
       return (await accountPosture(modelId)).tier;
     },
-    // Per-model verified-TEE capability for pi-privacy's /models picker: show Privateer's
-    // TEE-channel models (near/tinfoil/phala) as "◆ Verifiable TEE" when logged in, while
-    // ZDR-channel models stay at their honest floor. The live verdict still comes from
-    // resolveTier above on select — this only lifts the label.
-    privateerVerifiedTee: (m: any) => hasCredentials() && privateerChannel(m.id ?? "") === "tee",
+    // pi-privacy ships its own `/models`, a plain select over the models you hold keys
+    // for. Ours (extensions/privateer-models.ts) is the searchable one over the whole
+    // account catalog, and with both registered Pi renamed them /models:1 and /models:2 —
+    // so typing `/models` could land you in the short, unsearchable list.
+    modelPicker: false,
     // No quarter = unattended. No quarter also takes the whole filter down (noQuarter.ts),
     // so this only answers when the operator has run `/privacy on` with the moat down.
     // The PII send-or-redact question would stall a session the
