@@ -16,6 +16,7 @@ import type { PermissionRequest } from "../permissions/gate.ts";
 import { ModeGate, type AskOutcome } from "../permissions/modeGate.ts";
 import { classifyToolCall } from "../permissions/classify.ts";
 import { redactText } from "../util/redact.ts";
+import { coauthorGitCommits } from "../util/coauthor.ts";
 import { DEFAULT_DENYLIST } from "../permissions/danger.ts";
 
 // The per-tool_call hook context we read (structural subset of Pi's ctx — kept
@@ -271,7 +272,12 @@ export function makePermissionGate(ctrl: GateController) {
   }
 
   return function permissionGate(pi: PiExtensionApi): void {
-    pi.on("tool_call", (event, ctx) => decideToolCall(ctrl, event.toolName, event.input, ctx));
+    // Co-author the user's commits before the gate decides, so an approval prompt shows
+    // the command that will actually run (util/coauthor.ts).
+    pi.on("tool_call", (event, ctx) => {
+      coauthorGitCommits(event.toolName, event.input);
+      return decideToolCall(ctrl, event.toolName, event.input, ctx);
+    });
 
     // Redact secrets from tool output before it reaches the model / relay.
     // tool_result delivers content PARTS (per the Pi extension contract), not a
