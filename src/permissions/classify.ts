@@ -630,6 +630,24 @@ export function classifyToolCall(
     };
   }
 
+  // crypto_lookup (src/tools/crypto.ts) — a network read through the account API,
+  // like web_search. Named explicitly because nothing in its name matches the
+  // heuristic below, and the unknown-tool branch would make it bash-kind: a JSON
+  // prompt, and an outright DENY in plan/readonly, where "what's SOL at?" is as
+  // reasonable a question as any search.
+  if (name === "crypto_lookup") {
+    const mode = str(obj.mode) || "tokens";
+    const what = mode === "portfolio"
+      ? (str(obj.address) ? `wallet ${str(obj.address)}` : "the account's own Solana wallet")
+      : mode === "tokens" ? str(obj.query) : `${mode} tokens${obj.chain ? ` on ${str(obj.chain)}` : ""}`;
+    return {
+      tool: toolName,
+      kind: "fetch",
+      title: "Look up crypto market data",
+      detail: what,
+    };
+  }
+
   // Network reads (web fetch / search / http).
   if (name.includes("fetch") || name.includes("web") || name.includes("http") || name.includes("url")) {
     return {

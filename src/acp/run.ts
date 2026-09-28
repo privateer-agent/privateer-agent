@@ -43,13 +43,15 @@
 
 import "../boot.ts"; // env + attestation dispatcher, before any Pi import
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
+import { CRYPTO_TOOL_NAMES } from "../tools/crypto.ts";
 import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
 
 // Read-only by default, exactly as the channels runtime and the routines harbor do:
 // a turn nobody is watching must not be able to mutate the filesystem or shell out
 // until a human widens it in config.
 const SAFE_TOOLS = ["read", "grep", "find", "ls"];
-const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES];
+// crypto_lookup rides the web switch: its tickers/address leave the run as a query does.
+const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES, ...CRYPTO_TOOL_NAMES];
 // Media generation stays out of the default set (it spends the account's credit —
 // see the harbor's note); an ACP host that wants it names it in `acp.tools`. Listed
 // here so it can be stripped back out when generation is switched off.

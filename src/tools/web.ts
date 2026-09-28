@@ -50,7 +50,7 @@ export const WEB_TOOL_NAMES = ["web_search", "web_fetch"] as const;
 // tighter bound because a routine has no human to notice it went sideways.
 const MAX_FETCH_CHARS = 12_000;
 
-function text(t: string) {
+export function text(t: string) {
   return { content: [{ type: "text", text: t }], details: {} };
 }
 
@@ -76,7 +76,7 @@ function plain(s: string | undefined): string {
     .trim();
 }
 
-interface RagFailure {
+export interface RagFailure {
   ok: false;
   message: string;
 }
@@ -87,7 +87,7 @@ interface RagFailure {
  * swallowed: a routine that answers from memory because search quietly failed is
  * worse than one that says the search failed.
  */
-async function callRag<T>(path: string, body: unknown): Promise<({ ok: true } & { data: T }) | RagFailure> {
+export async function callRag<T>(path: string, body: unknown): Promise<({ ok: true } & { data: T }) | RagFailure> {
   let res: Response;
   try {
     res = await apiRequest(path, {

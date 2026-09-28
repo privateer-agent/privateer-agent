@@ -312,12 +312,17 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   if (caps.web === "account" && webEnabled()) {
     const { makeWebTools } = await import("../tools/web.ts");
     factories.push(makeWebTools());
+    // Market data rides the web switch: the tickers leave exactly as a query does.
+    const { makeCryptoTools } = await import("../tools/crypto.ts");
+    factories.push(makeCryptoTools());
   } else if (caps.web === "guarded") {
     if (!opts.webHint) throw new Error(`buildMoat: kind "${opts.kind}" needs a webHint for guarded web tools`);
     const hint = opts.webHint;
     const { guardedWebToolDefinitions } = await import("../tools/web.ts");
+    const { guardedCryptoToolDefinitions } = await import("../tools/crypto.ts");
     factories.push((pi: any) => {
       for (const def of guardedWebToolDefinitions(hint)) pi.registerTool?.(def);
+      for (const def of guardedCryptoToolDefinitions(hint)) pi.registerTool?.(def);
     });
   }
 

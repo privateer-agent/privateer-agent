@@ -35,6 +35,7 @@
 // pulling that package's own .ts sources into our typecheck, the same trick config/moat.ts
 // uses for pi-mcp-adapter.
 import { guardedWebToolDefinitions } from "../src/tools/web.ts";
+import { guardedCryptoToolDefinitions } from "../src/tools/crypto.ts";
 import { readWebToolsConfig, resolveWebMode, type ProviderMetaLike } from "../src/tools/webMode.ts";
 
 const RPIV_WEB_TOOLS = "@juicesharp/rpiv-web-tools";
@@ -46,6 +47,9 @@ const SIGNED_OUT_HINT =
   "Web access needs a Privateer account: run /signin to search on your account's " +
   "allowance, or /web-tools to use your own search provider (a Brave/Tavily key, or a " +
   "self-hosted SearXNG) instead.";
+
+const CRYPTO_SIGNED_OUT_HINT =
+  "Crypto lookups need a Privateer account: run /signin to use market data on your account.";
 
 interface RpivWebTools {
   registerWebSearchTool(pi: unknown): void;
@@ -89,6 +93,10 @@ export default async function privateerWeb(pi: any): Promise<void> {
   } else {
     for (const def of guardedWebToolDefinitions(SIGNED_OUT_HINT)) pi.registerTool?.(def);
   }
+
+  // Market data in BOTH branches: no user-configured provider serves it, so picking
+  // your own search engine must not cost you crypto_lookup. See tools/crypto.ts.
+  for (const def of guardedCryptoToolDefinitions(CRYPTO_SIGNED_OUT_HINT)) pi.registerTool?.(def);
 
   // Always available, whichever pack won: it is how a user on the account route configures
   // a provider of their own, and the only place to see which keys are resolving.

@@ -24,7 +24,7 @@
     { "entry": "extensions/privateer-update.ts", "name": "privateer-update", "note": "tool pack updates in place — banner flag + /update" },
     { "entry": "extensions/privateer-fresh.ts", "name": "privateer-fresh", "note": "/fresh — replace the agent with a new one and stop everything it started" },
     { "entry": "extensions/privateer-speak.ts", "name": "privateer-speak", "note": "spoken responses (/speak) + voice input (/talk) — pi-speak + confidential account TTS/STT" },
-    { "entry": "extensions/privateer-web.ts", "name": "privateer-web", "note": "web_search/web_fetch — account search when signed in, else the user's own provider (rpiv-web-tools)" },
+    { "entry": "extensions/privateer-web.ts", "name": "privateer-web", "note": "web_search/web_fetch — account search when signed in, else the user's own provider (rpiv-web-tools); crypto_lookup — account market data, in both cases" },
     { "dep": ["@juicesharp/rpiv-ask-user-question", "index.ts"], "name": "rpiv-ask-user-question", "note": "ask_user_question" },
     { "dep": ["pi-mcp-adapter", "index.ts"], "name": "pi-mcp-adapter", "note": "MCP servers as first-class tools" },
     { "dep": ["pi-subagents", "src", "extension", "index.ts"], "name": "pi-subagents", "note": "bounded parallel sub-agents" },

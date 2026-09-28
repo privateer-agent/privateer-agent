@@ -36,7 +36,7 @@ import { terminalPublicKeyBase64 } from "../crypto/terminalKey.ts";
 import { openJsonFromApp } from "../crypto/terminalUnseal.ts";
 import { verifyChannelSave } from "../crypto/accountVerify.ts";
 import { loadAccountSignKey, loadLastControlTs, saveLastControlTs } from "../crypto/accountTrust.ts";
-import { authorizeControl } from "../remote/controlAuth.ts";
+import { authorizeControl, controlRequiresFreshTs } from "../remote/controlAuth.ts";
 import { hasCredentials, revokeLocalSessions, revokeAccountSession, apiRequest, acquireAccountCredential, handleServerRevoke } from "../auth/privateer.ts";
 import {
   loadRoutines,
@@ -67,6 +67,7 @@ import { serializeBuild } from "./buildLock.ts";
 import { isHosted, publishRelayPub, webEnabled, mediaEnabled } from "../config/hosted.ts";
 import { relayExposureAllowed } from "../config/relayExposure.ts";
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
+import { CRYPTO_TOOL_NAMES } from "../tools/crypto.ts";
 import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
 import { COMPOSE_TOOL_NAMES } from "../tools/videoCompose.ts";
 import { BILLED_MEDIA_TOOLS } from "../permissions/classify.ts";
@@ -84,7 +85,8 @@ const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 // they join the DEFAULT allow-list: the overwhelmingly common unattended request
 // ("summarize today's news at 7pm") needs the live web and nothing else, and making
 // the user hand-write an allow-list for it was the whole friction.
-const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES];
+// crypto_lookup rides the web switch: its tickers/address leave the run as a query does.
+const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES, ...CRYPTO_TOOL_NAMES];
 
 // Media generation (src/tools/media.ts) plus local composition (videoCompose.ts).
 //
@@ -579,11 +581,11 @@ export class Harbor {
     ts: number | undefined,
     run: () => string | undefined,
   ): string | undefined {
-    // task_submit/task_spawn are NON-idempotent (each runs a headless session), so they
-    // require a strictly-fresh ts — a replayed frame with an equal ts must NOT re-run.
-    // The idempotent config mutations (routines/channels save|delete) keep the default
-    // at-or-above acceptance. See authorizeControl's strict note.
-    const strict = action === "task_submit" || action === "task_spawn" || action === "workflows_run";
+    // Run-style actions (task_submit/task_spawn/routines_run/workflows_run) are
+    // NON-idempotent, so they require a strictly-fresh ts — a replayed frame with an
+    // equal ts must NOT run again. Only the listed idempotent config mutations keep
+    // at-or-above acceptance. See controlRequiresFreshTs / authorizeControl.
+    const strict = controlRequiresFreshTs(action);
     const auth = authorizeControl(routineRelayId(), action, args, sig, ts, { strict });
     if (!auth.ok) return auth.message;
     return run();

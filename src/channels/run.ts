@@ -51,6 +51,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 // Pi-free static graph by design — see the header of piAuthStore.ts.
 import { modelRegistryOf } from "../providers/piAuthStore.ts";
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
+import { CRYPTO_TOOL_NAMES } from "../tools/crypto.ts";
 import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
 
 // Read-only default toolset — same rationale as the routines harbor's SAFE_TOOLS:
@@ -63,7 +64,8 @@ const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 // Web tools join the default set when the agent has web access — see
 // config/hosted.ts. Kept out of SAFE_TOOLS proper because they're the one "read-only"
 // capability that still sends a query off the machine.
-const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES];
+// crypto_lookup rides the web switch: its tickers/address leave the run as a query does.
+const WEB_TOOLS: string[] = [...WEB_TOOL_NAMES, ...CRYPTO_TOOL_NAMES];
 
 // Media GENERATION never joins the default set, even with the switch on: a chat
 // message is an untrusted prompt, and these spend the account's credit. A channel that
