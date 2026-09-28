@@ -21,7 +21,17 @@ import {
   Input,
   Spacer,
   Text,
+  type Component,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
+
+// TuiMouseDispatchResult isn't re-exported from the package index — same shape,
+// typed locally so the Container.handleMouse override matches its signature.
+interface MouseDispatchResult extends TuiMouseEventResult {
+  handled: true;
+  target: { component: Component; originX: number; originY: number; width: number; height: number };
+}
 import { TIERS, tierRank, type PrivacyTier } from "pi-privacy";
 import { verifyModelPosture } from "pi-privacy";
 import {
@@ -148,6 +158,10 @@ function sortRows(rows: Row[]): Row[] {
 
 const MAX_VISIBLE = 12;
 
+// Lines the picker renders above the first model row (title, legend, blank,
+// search input, blank). Used to translate a click's local y into a row index.
+const HEADER_LINES = 5;
+
 class ModelsPicker extends Container {
   private tui: TuiLike;
   private theme: ThemeLike;
@@ -202,7 +216,7 @@ class ModelsPicker extends Container {
     this.addChild(this.blurbText);
     this.addChild(
       new Text(
-        t.fg("muted", "↑↓ navigate   ⏎ select   type to search   esc cancel"),
+        t.fg("muted", "↑↓ navigate   PgUp/PgDn page   wheel scroll   click row   ⏎ select   esc cancel"),
         1,
         0,
       ),
@@ -317,6 +331,47 @@ class ModelsPicker extends Container {
     this.applyFilter(q);
   }
 
+  // Page the highlight by a whole viewport, clamped — PgUp/PgDn and shift-free
+  // long hops so a long ranked list is actually traversable.
+  private page(delta: number): void {
+    if (!this.filtered.length) return;
+    this.selectedIndex = Math.max(0, Math.min(this.selectedIndex + delta, this.filtered.length - 1));
+    this.updateList();
+  }
+
+  // Mouse support: wheel scrolls the highlight through the list, click jumps to a
+  // visible row. The terminal reports wheel as logical lines (negative = up).
+  handleMouse(event: TuiMouseEvent): MouseDispatchResult | undefined {
+    const handledHere = (): MouseDispatchResult => ({
+      handled: true,
+      target: { component: this, originX: 0, originY: 0, width: event.width, height: event.height },
+    });
+    if (event.type === "wheel" && event.wheelDelta) {
+      const delta = -event.wheelDelta;
+      if (!this.filtered.length || delta === 0) return handledHere();
+      this.selectedIndex = Math.max(0, Math.min(this.selectedIndex + delta, this.filtered.length - 1));
+      this.updateList();
+      this.tui.requestRender();
+      return handledHere();
+    }
+    if (event.type === "click" || event.type === "press") {
+      const row = event.y - HEADER_LINES;
+      if (row < 0 || row >= MAX_VISIBLE) return undefined;
+      const start = Math.max(
+        0,
+        Math.min(this.selectedIndex - Math.floor(MAX_VISIBLE / 2), this.filtered.length - MAX_VISIBLE),
+      );
+      const idx = start + row;
+      if (idx >= 0 && idx < this.filtered.length) {
+        this.selectedIndex = idx;
+        this.updateList();
+        this.tui.requestRender();
+        return handledHere();
+      }
+    }
+    return undefined;
+  }
+
   handleInput(keyData: string): void {
     const kb = getKeybindings();
     if (kb.matches(keyData, "tui.select.up")) {
@@ -329,6 +384,10 @@ class ModelsPicker extends Container {
       this.selectedIndex =
         this.selectedIndex === this.filtered.length - 1 ? 0 : this.selectedIndex + 1;
       this.updateList();
+    } else if (kb.matches(keyData, "tui.select.pageUp")) {
+      this.page(-MAX_VISIBLE);
+    } else if (kb.matches(keyData, "tui.select.pageDown")) {
+      this.page(MAX_VISIBLE);
     } else if (kb.matches(keyData, "tui.select.confirm")) {
       const row = this.filtered[this.selectedIndex];
       if (row) this.onSelect(row);
