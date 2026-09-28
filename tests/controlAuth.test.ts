@@ -12,7 +12,9 @@ import { sha256 } from "@noble/hashes/sha256";
 const HOME = mkdtempSync(join(tmpdir(), "privateer-ctrl-"));
 process.env.PRIVATEER_HOME = HOME;
 
-const { authorizeControl } = await import("../src/remote/controlAuth.ts");
+const { authorizeControl, controlRequiresFreshTs } = await import("../src/remote/controlAuth.ts");
+const { makeRoutinesControl } = await import("../src/remote/routinesControl.ts");
+const { upsertRoutine } = await import("../src/routines/store.ts");
 const { pinAccountSignKey, clearAccountSignKey } = await import("../src/crypto/accountTrust.ts");
 
 // Inline replica of the app signer (accountSign.ts).
@@ -88,4 +90,47 @@ test("authorizeControl: watermark is per-terminal (a different termId is indepen
   const ts = 1_000_000; // far below TERM's watermark
   const r = authorizeControl(otherTerm, "skills_delete", { name: "x" }, sign(MK, { termId: otherTerm, ts, action: "skills_delete", args: { name: "x" } }), ts);
   assert.equal(r.ok, true);
+});
+
+test("controlRequiresFreshTs: run-style actions are strict, config mutations are not", () => {
+  for (const a of ["task_submit", "task_spawn", "workflows_run", "routines_run"]) {
+    assert.equal(controlRequiresFreshTs(a), true, a);
+  }
+  for (const a of ["routines_save", "routines_delete", "routines_set_enabled", "channels_remove", "mcp_set_enabled", "mcp_remove", "workflows_save", "workflows_remove"]) {
+    assert.equal(controlRequiresFreshTs(a), false, a);
+  }
+  // Default-strict: an action nobody classified can't inherit equal-ts replay.
+  assert.equal(controlRequiresFreshTs("something_new_run"), true);
+});
+
+// Mirrors Harbor.guardControl: verify with the strictness controlRequiresFreshTs picks,
+// then run. A relay that captured one signed "Run Now" replays the exact bytes after the
+// first run finished; the routine (a disabled one-shot, still manually runnable) must
+// NOT dispatch a second time.
+test("routines_run: an equal-ts replay after the first run completes does not re-dispatch", () => {
+  pinAccountSignKey(pub(MK));
+  const term = "routines-replay";
+  upsertRoutine({ id: "r-oneshot", name: "oneshot", at: "2026-01-01T00:00:00", prompt: "do it", cwd: HOME, delivery: ["file"], enabled: false });
+  const dispatched: string[] = [];
+  const ctrl = makeRoutinesControl({ defaultCwd: () => HOME, runNow: (r) => dispatched.push(r.id) });
+  const guard = (args: Record<string, unknown>, sig: string, ts: number) => {
+    const auth = authorizeControl(term, "routines_run", args, sig, ts, { strict: controlRequiresFreshTs("routines_run") });
+    return auth.ok ? ctrl.run(String(args.idOrName)) : auth;
+  };
+
+  const args = { idOrName: "r-oneshot" };
+  const ts = 1_752_000_500_000;
+  const sig = sign(MK, { termId: term, ts, action: "routines_run", args });
+  assert.equal(guard(args, sig, ts).ok, true);
+  assert.deepEqual(dispatched, ["r-oneshot"]); // first run dispatched (and, for the test, "finished")
+
+  const replay = guard(args, sig, ts);
+  assert.equal(replay.ok, false);
+  assert.match(replay.message ?? "", /out-of-date/i);
+  assert.deepEqual(dispatched, ["r-oneshot"]);
+
+  // A genuinely fresh owner press still runs it.
+  const ts2 = ts + 1;
+  assert.equal(guard(args, sign(MK, { termId: term, ts: ts2, action: "routines_run", args }), ts2).ok, true);
+  assert.deepEqual(dispatched, ["r-oneshot", "r-oneshot"]);
 });

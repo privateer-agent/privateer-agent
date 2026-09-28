@@ -17,6 +17,27 @@
 import { loadAccountSignKey, loadLastControlTs, saveLastControlTs } from "../crypto/accountTrust.ts";
 import { verifyControl } from "../crypto/accountVerify.ts";
 
+// Control actions that are safe to re-apply: replaying the latest signed frame (same ts)
+// just re-asserts the same config. Everything NOT listed here — routines_run,
+// workflows_run, task_submit/task_spawn, and any action added later — is treated as
+// effectful and verified in strict mode. Default-strict so a new "run" action can't
+// silently inherit replayability (routines_run once did).
+const IDEMPOTENT_CONTROL_ACTIONS: ReadonlySet<string> = new Set([
+  "routines_save",
+  "routines_delete",
+  "routines_set_enabled",
+  "channels_remove",
+  "mcp_set_enabled",
+  "mcp_remove",
+  "workflows_save",
+  "workflows_remove",
+]);
+
+/** True when `action` must carry a strictly-fresh ts (see authorizeControl's `strict`). */
+export function controlRequiresFreshTs(action: string): boolean {
+  return !IDEMPOTENT_CONTROL_ACTIONS.has(action);
+}
+
 export interface ControlAuthResult {
   ok: boolean;
   message?: string;
@@ -33,7 +54,7 @@ export interface ControlAuthResult {
  *     idempotent config mutations (routines/skills/extensions/channels save|delete),
  *     where replaying the latest signed frame just re-applies the same state — harmless.
  *   - strict: reject ts AT-or-below the watermark. Required for NON-idempotent, effectful
- *     actions (task_submit/task_spawn — each RUNS a headless session), where a malicious
+ *     actions (task_submit/task_spawn/routines_run/workflows_run — each RUNS something), where a malicious
  *     relay replaying the latest signed frame (same ts) would re-run the task / spawn
  *     another session (inference-cost + resource abuse). Strict forces every accepted
  *     effectful frame to carry a strictly-fresh ts, which the server cannot fabricate (it
