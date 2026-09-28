@@ -25,6 +25,7 @@ import {
   RUNTIME_GUIDELINES_MARKER,
   runtimeGuidelinesBlock,
 } from "../src/context.ts";
+import privateerIdentity from "../src/identity.ts";
 
 // Honor Pi's own "disable context files" switch, so --no-context-files / -nc silences
 // everything this extension injects, not just PRIVATEER.md — otherwise the flag would
@@ -33,6 +34,10 @@ const CONTEXT_FILES_DISABLED =
   process.argv.includes("--no-context-files") || process.argv.includes("-nc");
 
 export default function privateerContext(pi: any): void {
+  // Privateer's name and CLI in place of Pi's (src/identity.ts). Its own handler, ahead
+  // of the -nc gate below: that flag silences context files, not which command is safe.
+  privateerIdentity(pi);
+
   // Inject the runtime guidelines + PRIVATEER.md into every turn's system prompt. The
   // prompt is rebuilt per turn and chained across before_agent_start handlers, so
   // appending here is idempotent for the turn; each marker guard makes its own block a

@@ -291,7 +291,11 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
 
   if (caps.context) {
     const { default: privateerContext } = await import("../../extensions/privateer-context.ts");
-    factories.push(privateerContext);
+    factories.push(privateerContext); // carries privateerIdentity itself
+  } else {
+    // Every kind: the model is told it runs Privateer, never `pi`. See src/identity.ts.
+    const { default: privateerIdentity } = await import("../identity.ts");
+    factories.push(privateerIdentity);
   }
 
   if (caps.spawnSkills) {
