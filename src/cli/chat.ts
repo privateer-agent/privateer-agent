@@ -754,9 +754,6 @@ async function main() {
       writePiDefaultModel(sp);
       const m = `model → ${sp}`;
       console.log(`${DIM}${m}${RESET}`);
-      if (!acceptsImages(sp)) {
-        console.log(`${YELLOW}⚠ ${sp} can't see images — @file/read on a picture will be dropped silently.${RESET}`);
-      }
       relay?.sendContext({ model: currentSpec, cwd, version: agentVersion() }); // banner follows the switch
       if (remote) relay?.sendNotice(m);
     } catch (e) {

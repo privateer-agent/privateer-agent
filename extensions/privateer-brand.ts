@@ -285,9 +285,10 @@ function contextLine(p: Palette): string {
 // or three things a returning user should notice. `cmd`, when present, is rendered in the
 // accent color so the actionable bit stands out from the prose. Trim this as it ages.
 const WHATS_NEW: Array<{ text: string; cmd?: string }> = [
-  { text: "Privateer agent CLI is live —", cmd: "npm i -g privateer-agent" },
-  { text: "PRIVATEER.md project context —", cmd: "/init" },
-  { text: "Self-update built in —", cmd: "privateer update" },
+  { text: "Searchable model picker —", cmd: "/models" },
+  { text: "Start over with a new agent —", cmd: "/fresh" },
+  { text: "Text-only models can read images now" },
+  { text: "Live crypto prices and Solana wallets" },
 ];
 
 function whatsNewRows(p: Palette): string[] {

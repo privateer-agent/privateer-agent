@@ -156,7 +156,7 @@ test("models command: headless exact match switches and persists to settings.jso
   assert.equal(resolveDefaultModel({ env: {}, signedIn: true }), "openai/gpt-5.5");
 });
 
-test("models command: switching to a text-only model warns it can't see images", async () => {
+test("models command: switching to a text-only model doesn't warn — vision delegation covers it", async () => {
   freshHome();
   let handler!: (args: string, ctx: any) => Promise<void>;
 
@@ -188,8 +188,8 @@ test("models command: switching to a text-only model warns it can't see images",
   await handler("openai/gpt-oss-120b", ctx);
 
   assert.ok(
-    notices.some((n) => n.level === "warning" && n.text.includes("can't see images")),
-    "must warn — otherwise a picture just gets dropped silently on the next turn",
+    !notices.some((n) => n.level === "warning"),
+    "images aren't dropped any more — privateer-vision hands them to a vision model on the same key",
   );
 });
 
