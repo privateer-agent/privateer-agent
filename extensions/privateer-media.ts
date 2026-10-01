@@ -20,14 +20,20 @@
 // already on disk — no account, no network, no spend — so it stays useful to a
 // signed-out terminal, and to a child whose job is to cut together what its parent
 // generated.
+//
+// /image-model and /video-model are registered unconditionally too: they only write a
+// local preference, and a signed-out terminal is told to /login when it opens the
+// picker rather than finding the command missing.
 import { makeMediaTools } from "../src/tools/media.ts";
 import { makeComposeTools } from "../src/tools/videoCompose.ts";
 import { mediaEnabled } from "../src/config/hosted.ts";
 import { childHoldsSpendGrant } from "../src/permissions/childSpend.ts";
 import { isSubagentChild } from "../src/remote/subagentRelay.ts";
+import { registerMediaModelCommands } from "../src/tools/mediaModelCommands.ts";
 
 export default function privateerMedia(pi: any): void {
   const canSpend = !isSubagentChild() || childHoldsSpendGrant();
   if (mediaEnabled() && canSpend) makeMediaTools()(pi);
   makeComposeTools()(pi);
+  registerMediaModelCommands(pi);
 }

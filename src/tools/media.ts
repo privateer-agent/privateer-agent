@@ -42,6 +42,7 @@ import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSyn
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { apiRequest } from "../auth/privateer.ts";
+import { effectiveMediaModel } from "../config/mediaModels.ts";
 
 /** Tool names these definitions register, for allow-list construction. */
 export const MEDIA_TOOL_NAMES = [
@@ -280,7 +281,7 @@ export const generateImageToolDefinition = {
     count: Type.Optional(Type.Number({ description: "How many variations to produce, 1-4. Above 1, files are suffixed -1, -2, … Defaults to 1." })),
     aspectRatio: Type.Optional(Type.String({ description: "Aspect ratio, e.g. '16:9', '9:16', '1:1'. Defaults to the model's own." })),
     size: Type.Optional(Type.String({ description: "Explicit pixel size if the model supports one, e.g. '1024x1024'." })),
-    model: Type.Optional(Type.String({ description: "Override the account's image model (e.g. 'google/gemini-3.1-flash-image'). Leave unset to use the account default." })),
+    model: Type.Optional(Type.String({ description: "Override the image model (e.g. 'google/gemini-3.1-flash-image'). Leave unset to use the one the user chose with /image-model, or the account default." })),
   }),
   async execute(
     _toolCallId: string,
@@ -302,6 +303,7 @@ export const generateImageToolDefinition = {
     }
 
     const count = Math.min(Math.max(1, Math.round(params.count ?? 1)), 4);
+    const model = effectiveMediaModel("image", params.model);
     const r = await callAccount<ImageResponse>("/api/agent/media/images", {
       method: "POST",
       signal,
@@ -311,7 +313,7 @@ export const generateImageToolDefinition = {
         ...(inputs.length ? { images: inputs } : {}),
         ...(params.aspectRatio ? { aspectRatio: params.aspectRatio } : {}),
         ...(params.size ? { imageSize: params.size } : {}),
-        ...(params.model ? { model: params.model } : {}),
+        ...(model ? { model } : {}),
       },
     });
     if (!r.ok) return text(`Image generation failed: ${r.message}`);
@@ -381,7 +383,7 @@ export const generateVideoToolDefinition = {
     aspectRatio: Type.Optional(Type.String({ description: "Aspect ratio, e.g. '16:9', '9:16'. Model-specific." })),
     resolution: Type.Optional(Type.String({ description: "Resolution, e.g. '720p' or '1080p'." })),
     audio: Type.Optional(Type.Boolean({ description: "Ask the model to generate a soundtrack too, where it supports one. Costs more. Defaults to false." })),
-    model: Type.Optional(Type.String({ description: "Override the account's video model (e.g. 'google/veo-3.1-lite'). Leave unset to use the account default." })),
+    model: Type.Optional(Type.String({ description: "Override the video model (e.g. 'google/veo-3.1-lite'). Leave unset to use the one the user chose with /video-model, or the account default." })),
   }),
   async execute(
     _toolCallId: string,
@@ -417,6 +419,7 @@ export const generateVideoToolDefinition = {
       return text(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
 
+    const model = effectiveMediaModel("video", params.model);
     const submitted = await callAccount<VideoSubmitResponse>("/api/agent/media/videos", {
       method: "POST",
       signal,
@@ -426,7 +429,7 @@ export const generateVideoToolDefinition = {
         ...(params.aspectRatio ? { aspectRatio: params.aspectRatio } : {}),
         ...(params.resolution ? { resolution: params.resolution } : {}),
         ...(params.audio ? { generateAudio: true } : {}),
-        ...(params.model ? { model: params.model } : {}),
+        ...(model ? { model } : {}),
         ...(firstFrame ? { firstFrame } : {}),
         ...(lastFrame ? { lastFrame } : {}),
       },
@@ -1154,9 +1157,10 @@ export function quoteMediaCallUsd(tool: string, input: unknown, caps: Capabiliti
   };
   switch (tool) {
     case "generate_image": {
-      // The report prices the ACCOUNT's image model; a call naming another one would
-      // be quoted at the wrong model's rate, so it isn't quoted at all.
-      if (typeof args.model === "string" && args.model) return null;
+      // The report prices the image model it DESCRIBES; a call naming another one would
+      // be quoted at the wrong model's rate, so it isn't quoted at all. (A server that
+      // ignores `?imageModel=` describes the account default — a mismatch, so no quote.)
+      if (typeof args.model === "string" && args.model && args.model !== caps.image?.model) return null;
       const each = caps.image?.priceUsdEach;
       if (typeof each !== "number") return null;
       const n = Math.min(Math.max(Math.trunc(num(args.count) ?? 1), 1), caps.image?.maxPerCall ?? 4);
@@ -1176,7 +1180,7 @@ export function quoteMediaCallUsd(tool: string, input: unknown, caps: Capabiliti
       if (!row || clipUsd === null) return null;
       const stills = row.billedTurnStills ?? 0;
       const each = caps.image?.priceUsdEach;
-      if (stills > 0 && (typeof each !== "number" || (typeof args.image_model === "string" && args.image_model))) return null;
+      if (stills > 0 && (typeof each !== "number" || (typeof args.image_model === "string" && args.image_model && args.image_model !== caps.image?.model))) return null;
       return clipUsd * (row.billedClips ?? 1) + stills * (each ?? 0);
     }
     case "generate_sfx":
@@ -1189,12 +1193,13 @@ export function quoteMediaCallUsd(tool: string, input: unknown, caps: Capabiliti
   }
 }
 
-/** Read the capability report (optionally describing a specific video / 3D model). */
+/** Read the capability report (optionally describing a specific image / video / 3D model). */
 export async function readMediaCapabilities(
-  query: { videoModel?: string; model?: string } = {},
+  query: { imageModel?: string; videoModel?: string; model?: string } = {},
   signal?: AbortSignal,
 ): Promise<{ ok: true; data: CapabilitiesResponse } | { ok: false; message: string }> {
   const q = new URLSearchParams();
+  if (query.imageModel) q.set("imageModel", query.imageModel);
   if (query.videoModel) q.set("videoModel", query.videoModel);
   if (query.model) q.set("model", query.model);
   const qs = q.toString();
@@ -1293,10 +1298,17 @@ export const mediaCapabilitiesToolDefinition = {
           "their legal values and the price — is per-model.",
       }),
     ),
+    imageModel: Type.Optional(
+      Type.String({
+        description:
+          "An image model id to describe instead of the default (e.g. 'google/gemini-3.1-flash-image'), " +
+          "so the price per image is the one generate_image will charge for it.",
+      }),
+    ),
     videoModel: Type.Optional(
       Type.String({
         description:
-          "A video model id to describe instead of the account default (e.g. 'bytedance/seedance-2.0'). " +
+          "A video model id to describe instead of the default (e.g. 'bytedance/seedance-2.0'). " +
           "Clip lengths, aspect ratios and the price per clip are all per-model — check the one you will " +
           "pass as generate_video's `model` before you spend on it.",
       }),
@@ -1310,10 +1322,20 @@ export const mediaCapabilitiesToolDefinition = {
       }),
     ),
   }),
-  async execute(_toolCallId: string, params: { model?: string; ttsModel?: string; videoModel?: string }, signal?: AbortSignal) {
+  async execute(
+    _toolCallId: string,
+    params: { model?: string; ttsModel?: string; imageModel?: string; videoModel?: string },
+    signal?: AbortSignal,
+  ) {
+    // Unset means "the model generate_* would use", which is this machine's
+    // /image-model or /video-model choice before the account default — describing the
+    // account default instead would quote one model's price and clip lengths for another.
+    const imageModel = effectiveMediaModel("image", params?.imageModel);
+    const videoModel = effectiveMediaModel("video", params?.videoModel);
     const query = new URLSearchParams();
     if (params?.model) query.set("model", params.model);
-    if (params?.videoModel) query.set("videoModel", params.videoModel);
+    if (imageModel) query.set("imageModel", imageModel);
+    if (videoModel) query.set("videoModel", videoModel);
     if (params?.ttsModel) query.set("ttsModel", params.ttsModel);
     const qs = query.toString();
     const r = await callAccount<CapabilitiesResponse>(
@@ -1324,6 +1346,11 @@ export const mediaCapabilitiesToolDefinition = {
 
     const { image, video, model3d, sfx, speech, privacy } = r.data;
     const lines = describeImageVideo(image, video);
+    // An older server ignores `?imageModel=` and reports the account default; say so
+    // rather than let the agent read that model's price as the chosen one's.
+    if (imageModel && image?.model && image.model !== imageModel) {
+      lines.push(`  (generate_image will use ${imageModel}; this server described the account default instead)`);
+    }
 
     lines.push(...describeModel3d(model3d));
     lines.push(...describeSfx(sfx));
@@ -1773,13 +1800,13 @@ export const generateSpriteToolDefinition = {
       }),
     ),
     model: Type.Optional(
-      Type.String({ description: "Video model id to render the motion with. Omit for the account default." }),
+      Type.String({ description: "Video model id to render the motion with. Omit for the one chosen with /video-model, or the account default." }),
     ),
     image_model: Type.Optional(
       Type.String({
         description:
           "Image model id used to TURN the picture to face each direction, e.g. " +
-          "'google/gemini-3.1-flash-image'. Omit for the account default. Only used when " +
+          "'google/gemini-3.1-flash-image'. Omit for the one chosen with /image-model, or the account default. Only used when " +
           "`directions` is 'four' or 'eight' — 'one' renders no turns and never touches an image " +
           "model. Worth setting when a run fails with SPRITE_IMAGE_MODEL_UNAVAILABLE: that is the " +
           "image provider being down, not the request being wrong, and naming another model here " +
@@ -1859,8 +1886,8 @@ export const generateSpriteToolDefinition = {
             const guessed = guessResPath(cwd, params.dir);
             return guessed ? { res_path: guessed } : {};
           })()),
-        ...(params.model ? { model: params.model } : {}),
-        ...(params.image_model ? { image_model: params.image_model } : {}),
+        ...((m) => (m ? { model: m } : {}))(effectiveMediaModel("video", params.model)),
+        ...((m) => (m ? { image_model: m } : {}))(effectiveMediaModel("image", params.image_model)),
       },
     });
     if (!submitted.ok) return text(`Sprite generation failed: ${submitted.message}`);

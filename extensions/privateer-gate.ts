@@ -491,11 +491,25 @@ const approveInAppMs = isSubagentChild() ? 0 : Number(process.env.PRIVATEER_APPR
 // anything, and media.ts has no business in the TUI's startup graph.
 async function quoteMediaCall(tool: string, input: unknown, signal?: AbortSignal): Promise<number | null> {
   const { readMediaCapabilities, quoteMediaCallUsd } = await import("../src/tools/media.ts");
+  const { effectiveMediaModel } = await import("../src/config/mediaModels.ts");
   const a = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
-  const model = typeof a.model === "string" && a.model ? a.model : undefined;
-  const query = tool === "generate_video" || tool === "generate_sprite" ? { videoModel: model } : tool === "generate_model" ? { model } : {};
+  // Price the model the tool will actually SEND — its own `model`, else this machine's
+  // /image-model or /video-model choice — not the account default it would fall past.
+  let priced = a;
+  let query: { imageModel?: string; videoModel?: string; model?: string } = {};
+  if (tool === "generate_image") {
+    const imageModel = effectiveMediaModel("image", a.model);
+    priced = { ...a, model: imageModel };
+    query = { imageModel };
+  } else if (tool === "generate_video" || tool === "generate_sprite") {
+    const imageModel = tool === "generate_sprite" ? effectiveMediaModel("image", a.image_model) : undefined;
+    priced = tool === "generate_sprite" ? { ...a, image_model: imageModel } : a;
+    query = { videoModel: effectiveMediaModel("video", a.model), imageModel };
+  } else if (tool === "generate_model") {
+    query = { model: typeof a.model === "string" && a.model ? a.model : undefined };
+  }
   const caps = await readMediaCapabilities(query, signal);
-  return caps.ok ? quoteMediaCallUsd(tool, input, caps.data) : null;
+  return caps.ok ? quoteMediaCallUsd(tool, priced, caps.data) : null;
 }
 
 const cliLedger = cliGrant ? new CliSpendLedger(cliGrant, quoteMediaCall) : null;
