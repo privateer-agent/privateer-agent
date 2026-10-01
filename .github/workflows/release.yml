@@ -34,6 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Before anything builds: the banner's What's New must have been reviewed for
+      # this exact version (src/config/whatsNew.json `reviewedFor`).
+      - name: What's New is reviewed for this release
+        run: node scripts/check-whats-new.mjs "${GITHUB_REF_NAME}"
       - name: Create (or reuse) the release
         env:
           GH_TOKEN: ${{ github.token }}

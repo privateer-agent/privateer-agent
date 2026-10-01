@@ -64,6 +64,7 @@
     "dev": "node bin/privateer-launch.mjs",
     "dev:fresh": "PRIVATEER_HOME=\"$PWD/.dev-home\" node bin/privateer-launch.mjs",
     "typecheck": "tsc --noEmit",
+    "check:whats-new": "node scripts/check-whats-new.mjs",
     "test": "for f in tests/*.test.ts; do node --import tsx --test \"$f\" || exit 1; done"
   },
   "engines": {

@@ -281,17 +281,21 @@ function contextLine(p: Palette): string {
 }
 
 // ── "What's New" — a tiny in-banner changelog ────────────────────────────────
-// A hand-curated highlights list (newest first). Not the full changelog — just the two
-// or three things a returning user should notice. `cmd`, when present, is rendered in the
-// accent color so the actionable bit stands out from the prose. Trim this as it ages.
-const WHATS_NEW: Array<{ text: string; cmd?: string }> = [
-  { text: "Open and switch named terminals —", cmd: "/term" },
-  { text: "Voice follows the window you're in" },
-  { text: "Searchable model picker —", cmd: "/models" },
-  { text: "Start over with a new agent —", cmd: "/fresh" },
-];
+// A hand-curated highlights list (newest first), kept in src/config/whatsNew.json so the
+// release guard (scripts/check-whats-new.mjs) can read it without loading the TUI. Not the
+// full changelog — just the two to four things a returning user should notice. `cmd`, when
+// present, is rendered in the accent color so the actionable bit stands out from the prose.
+const WHATS_NEW: Array<{ text: string; cmd?: string }> = (() => {
+  try {
+    const list = JSON.parse(readFileSync(new URL("../src/config/whatsNew.json", import.meta.url), "utf8"));
+    return Array.isArray(list?.items) ? list.items : [];
+  } catch {
+    return []; // a banner without the list beats no banner
+  }
+})();
 
 function whatsNewRows(p: Palette): string[] {
+  if (!WHATS_NEW.length) return [];
   const head = `${p.BOLD}${p.INK}✦ What's new${p.RESET}`;
   const items = WHATS_NEW.map(
     ({ text, cmd }) =>
@@ -322,7 +326,8 @@ function renderBanner(width: number, p: Palette, mark: string[], modelProvider?:
   const packs = packNotice(p);
   if (packs) text.push(packs);
   // A blank spacer, then the What's New block — set off below the identity lines.
-  text.push("", ...whatsNewRows(p));
+  const news = whatsNewRows(p);
+  if (news.length) text.push("", ...news);
 
   // Zip the mark and the text column by row. Rows past the mark's height get a blank
   // gutter of the mark's width, so the text stays in one column throughout.
