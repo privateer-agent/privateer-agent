@@ -285,10 +285,10 @@ function contextLine(p: Palette): string {
 // or three things a returning user should notice. `cmd`, when present, is rendered in the
 // accent color so the actionable bit stands out from the prose. Trim this as it ages.
 const WHATS_NEW: Array<{ text: string; cmd?: string }> = [
+  { text: "Open and switch named terminals —", cmd: "/term" },
+  { text: "Voice follows the window you're in" },
   { text: "Searchable model picker —", cmd: "/models" },
   { text: "Start over with a new agent —", cmd: "/fresh" },
-  { text: "Text-only models can read images now" },
-  { text: "Live crypto prices and Solana wallets" },
 ];
 
 function whatsNewRows(p: Palette): string[] {
