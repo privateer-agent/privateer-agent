@@ -648,6 +648,28 @@ export function classifyToolCall(
     };
   }
 
+  // terminal (src/tools/terminal.ts) — named windows the user watches. Opening one
+  // with a command RUNS that command, so it is bash-kind with the command as the
+  // detail: the same danger list, allowlist and plan-mode refusal as typing it into
+  // bash. A bare shell is bash-kind too (it puts a new window on the user's screen),
+  // and so is close, which ends whatever runs in the window. Focus and list only move
+  // a window to the front or read names: no gate, in any mode.
+  if (name === "terminal") {
+    const action = str(obj.action) || "list";
+    if (action === "focus" || action === "list") return null;
+    const label = str(obj.name);
+    if (action === "close") {
+      return { tool: toolName, kind: "bash", title: `Close terminal "${label}"`, detail: `close terminal ${label}` };
+    }
+    const command = str(obj.command).trim();
+    return {
+      tool: toolName,
+      kind: "bash",
+      title: command ? `Open terminal "${label}" running a command` : `Open terminal "${label}"`,
+      detail: command || `open a shell${obj.cwd ? ` in ${str(obj.cwd)}` : ""}`,
+    };
+  }
+
   // Network reads (web fetch / search / http).
   if (name.includes("fetch") || name.includes("web") || name.includes("http") || name.includes("url")) {
     return {

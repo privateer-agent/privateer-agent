@@ -20,6 +20,7 @@
     { "entry": "extensions/privateer-media.ts", "name": "privateer-media", "note": "image/video/speech/music + ffmpeg compose" },
     { "entry": "extensions/privateer-computer.ts", "name": "privateer-computer", "note": "screen control — screenshots, mouse and keyboard (off unless armed with --allow-computer-control)" },
     { "entry": "extensions/privateer-desktop.ts", "name": "privateer-desktop", "note": "/desktop — open the Privateer desktop app" },
+    { "entry": "extensions/privateer-terminals.ts", "name": "privateer-terminals", "note": "named terminal windows — the terminal tool + /term to switch between them" },
     { "entry": "extensions/privateer-hints.ts", "name": "privateer-hints", "note": "rotating tips in the working line + /hints" },
     { "entry": "extensions/privateer-update.ts", "name": "privateer-update", "note": "tool pack updates in place — banner flag + /update" },
     { "entry": "extensions/privateer-fresh.ts", "name": "privateer-fresh", "note": "/fresh — replace the agent with a new one and stop everything it started" },

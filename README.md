@@ -126,6 +126,9 @@ silently. The moat is swappable; the floor under it holds.
   and the mic closes when you stop talking. Your OS voice by default — nothing leaves the
   machine — or your account's confidential-compute TTS/STT once you sign in. `/talk loop on`
   makes it hands-free. See [Talk to it](#talk-to-it--voice-both-directions).
+- **Named terminals.** The agent can open windows you watch — a dev server, a REPL, a second
+  agent — give each a name, and bring any of them to the front; `/term api` switches you there
+  yourself. macOS Terminal, iTerm2, and tmux anywhere. See [Named terminals](#named-terminals).
 - **MCP servers, sub-agents & skills.** Connect Model Context Protocol servers (local stdio
   or remote HTTP with OAuth) with [`/connect`](#connectors--mcp), delegate work to bounded
   parallel sub-agents, and drop in skills — all gated like everything else.
@@ -359,14 +362,46 @@ One caveat while the account endpoints catch up: `/speak rate` and `/talk vocab`
 by the local and OpenAI-compatible engines, not yet by the account's TTS/STT.
 
 Voice is **off by default and interactive-only** — harbor, ACP and channel sessions never
-speak. The mic opens only on something you did (`/talk`, the push-to-talk key, or a
-conversation turn you switched on); there is no wake word, capture is hard-capped, audio is
+speak. The mic opens only on something you did (`/talk`, the push-to-talk key, a
+conversation turn you switched on, or switching to a window while dictation or conversation
+mode is on); there is no wake word, capture is hard-capped, audio is
 held in memory and never written to disk, and a mis-heard transcript is still just a prompt —
 every tool call it leads to hits the same permission gate as anything you type. Recording
 needs a capture tool on PATH: `sox` anywhere, or `arecord`/`parecord`/`ffmpeg` on Linux,
 `ffmpeg` on macOS. Everything is stored in `~/.privateer/speak.json`; the engine itself is the
 standalone [`privateer-speak`](https://www.npmjs.com/package/privateer-speak) package, usable
 in any Pi agent.
+
+## Named terminals
+
+Ask for "a terminal running the dev server" and the agent opens a new window, names it, and
+puts it in front of you. Every Privateer window names itself too (after its folder, or the
+name the agent gave it), so you and the agent can hop between them by name:
+
+```
+/term                  pick a terminal to switch to
+/term api              switch to "api"
+/term open api npm run dev    open one yourself
+/term name backend     rename this window
+/term close api        close it, ending what runs there
+/term list             every named terminal (← marks this one)
+```
+
+The agent does the same through its `terminal` tool. Opening a window with a command goes
+through the permission gate exactly like running that command in bash; switching and listing
+don't ask. The agent can't read what a window prints: that's what bash and background tasks
+are for. These windows are for you.
+
+Voice follows you between windows. Every window shares one voice setup, so with
+dictation or conversation mode on, the window you switch to listens for your next prompt,
+including a new agent the moment its window opens in front. The window you left pauses
+its mic. (That's [privateer-speak](https://www.npmjs.com/package/privateer-speak)'s focus
+awareness; it needs a terminal that reports focus.)
+
+Works in **macOS Terminal**, **iTerm2**, and inside **tmux** on any platform; other terminals
+get told so. macOS may ask once for permission to let the terminal control itself. Names are
+shared across every Privateer on the machine (`~/.privateer/terminals.json`), and a window
+that's been closed drops off the list on its own.
 
 ## The Privateer app
 

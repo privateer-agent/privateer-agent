@@ -61,6 +61,7 @@ import {
 } from "privateer-speak";
 import { apiRequest, hasCredentials } from "../src/auth/privateer.ts";
 import { globalDir } from "../src/config/paths.ts";
+import { thisTerminalIsFront } from "../src/terminals/index.ts";
 import { VOICE_DESCRIPTIONS } from "./speak-voices.data.ts";
 
 const QWEN3_TTS_VOICES = ["serena", "aiden", "dylan", "eric", "ono_anna", "ryan", "sohee", "uncle_fu", "vivian"];
@@ -358,7 +359,14 @@ export default function privateerSpeak(pi: any): void {
   // voiceCommands: saying one of these AS THE WHOLE UTTERANCE runs /fresh (see
   // extensions/privateer-fresh.ts) instead of sending the words to the model. Whole
   // utterance only, so "why did the fresh start fail" is still a question.
-  makePiSpeakExtension({ configFile: join(globalDir(), "speak.json"), voiceCommands: VOICE_COMMANDS })(pi);
+  // isFocused: a window that has just started (say, one the agent opened with the
+  // terminal tool) asks Terminal/iTerm2 whether it's in front, so a hands-free mode
+  // carries on in the new agent without a keypress — see src/terminals/.
+  makePiSpeakExtension({
+    configFile: join(globalDir(), "speak.json"),
+    voiceCommands: VOICE_COMMANDS,
+    isFocused: thisTerminalIsFront,
+  })(pi);
 }
 
 const VOICE_COMMANDS: Record<string, string> = {
