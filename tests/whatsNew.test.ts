@@ -18,9 +18,12 @@ test("the shipped What's New is reviewed for this version and well-formed", () =
 });
 
 test("a version bump without a review is refused, with what to do", () => {
-  const problems: string[] = whatsNewProblems({ ...list, reviewedFor: "0.12.58" }, "0.13.0");
+  // Against THIS release, not a pinned one: the shipped list's newest entry is always
+  // `since` the current version, which a hard-coded older release would also flag.
+  const v = pkg.version.replace(/\./g, "\\.");
+  const problems: string[] = whatsNewProblems({ ...list, reviewedFor: "0.0.1" }, pkg.version);
   assert.equal(problems.length, 1);
-  assert.match(problems[0]!, /reviewed for 0\.12\.58.*0\.13\.0.*"reviewedFor": "0\.13\.0"/s);
+  assert.match(problems[0]!, new RegExp(`reviewed for 0\\.0\\.1.*${v}.*"reviewedFor": "${v}"`, "s"));
 });
 
 test("entries: text, a slash cmd, a since no later than the release, newest first, four at most", () => {
