@@ -1,10 +1,10 @@
 {
   "$comment": "The banner's What's New list, newest first: the two to four things a returning user should notice, not a changelog. `reviewedFor` is the release this list was last looked at for. A release can't ship until it equals package.json's version (scripts/check-whats-new.mjs, run by `npm test` and by release.yml before anything builds), so every release, patches included, is a deliberate look at this list. If nothing new is worth a line, bumping `reviewedFor` alone is the answer. `since` is the release an entry arrived in. `cmd` is shown in the accent colour.",
-  "reviewedFor": "0.14.0",
+  "reviewedFor": "0.14.1",
   "items": [
+    { "text": "Chat channels as a login service: privateer channels install", "since": "0.14.1" },
     { "text": "Hand off sensitive files: privateer --private", "since": "0.14.0" },
     { "text": "Open and switch named terminals —", "cmd": "/term", "since": "0.13.0" },
-    { "text": "Voice follows the window you're in", "since": "0.13.0" },
-    { "text": "Searchable model picker —", "cmd": "/models", "since": "0.12.53" }
+    { "text": "Voice follows the window you're in", "since": "0.13.0" }
   ]
 }
