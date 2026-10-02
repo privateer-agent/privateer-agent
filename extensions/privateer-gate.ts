@@ -41,6 +41,7 @@ import { childSpendAllows } from "../src/permissions/childSpend.ts";
 import { CliSpendLedger, headlessSpendGuidance, isSpendRequest, readCliSpendGrant } from "../src/permissions/cliSpend.ts";
 import { BILLED_MEDIA_TOOLS } from "../src/permissions/classify.ts";
 import { privateModeFromEnv } from "../src/permissions/privateMode.ts";
+import { REPLY_TIMEOUT_ENV, StallWatchdog, replyTimeoutMs } from "../src/engine/stallWatchdog.ts";
 import type { PermissionRequest } from "../src/permissions/gate.ts";
 import { HeadlessAppApprover } from "../src/remote/headlessApproval.ts";
 import { describeErrorText } from "../src/engine/errors.ts";
@@ -772,11 +773,44 @@ export default function privateerControl(pi: any): void {
     };
   });
 
+  // A headless run must not wait forever on a provider that went silent (see
+  // src/engine/stallWatchdog.ts). Armed per request, re-armed by every streamed event,
+  // off between requests. On a stall: say so on stderr, abort the turn, exit non-zero.
+  let stallCtx: any;
+  const stallMs = replyTimeoutMs();
+  const watchdog = new StallWatchdog(stallMs, () => {
+    const secs = Math.round(stallMs / 1000);
+    process.stderr.write(
+      `privateer: no reply from ${currentSpec || "the model"} for ${secs}s — stopped. The provider accepted the ` +
+        `request and then sent nothing.\n  Re-run, or pick another model with --model. ` +
+        `${REPLY_TIMEOUT_ENV}=<seconds> changes the limit (0 turns it off).\n`,
+    );
+    process.exitCode = 1;
+    try {
+      stallCtx?.abort?.();
+    } catch {
+      /* the turn is already ending */
+    }
+  });
+  pi.on("before_provider_request", (_e: any, ctx: any) => {
+    if (!headlessRun) return;
+    stallCtx = ctx;
+    watchdog.arm();
+  });
+  pi.on("message_start", (ev: any) => {
+    if (headlessRun && ev?.message?.role === "assistant") watchdog.arm();
+  });
+  pi.on("message_update", () => {
+    if (headlessRun) watchdog.arm();
+  });
+  pi.on("message_end", () => watchdog.disarm());
+
   // Print mode prints a failed turn's raw SDK text — "401 status code (no body)",
   // "Connection error." — and exits. Follow it with what that means and what to do,
   // on stderr so stdout stays the answer (or the JSON stream).
   pi.on("agent_end", (ev: any) => {
-    if (!headlessRun) return;
+    watchdog.disarm();
+    if (!headlessRun || watchdog.stalled) return; // a stall already said what happened
     const msgs: any[] = Array.isArray(ev?.messages) ? ev.messages : [];
     const last = [...msgs].reverse().find((m) => m?.role === "assistant");
     if (last?.stopReason !== "error" || typeof last.errorMessage !== "string") return;

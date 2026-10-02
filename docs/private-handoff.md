@@ -217,7 +217,14 @@ Stated plainly, so nobody finds them the hard way:
 - **Verification is per process, cached for a minute.** An enclave that fails attestation
   mid-run stops tool calls within that window, not instantly.
 - **`--private` doesn't choose your model.** It refuses to work with the wrong one. Pin
-  `--model` (or `acp.model`) to one from the table above.
+  `--model` (or `acp.model`) to one from the table above. Through 0.14.0 an unpinned run
+  could start on a different model than your saved pick (on a dev checkout, OpenRouter's
+  default) when another Privateer process had just exited. `--private` refused those
+  runs, and pinning avoids the question entirely.
+- **A silent provider stops the run, it doesn't hang it.** A `-p` run that gets nothing
+  from the model for 180 seconds exits 1 and says so on stderr. Treat that like a refusal:
+  nothing came back, so retry or pick another model. `PRIVATEER_REPLY_TIMEOUT=<seconds>`
+  changes the limit (`0` turns it off).
 
 Under the hood: `src/permissions/privateMode.ts` (the check), `src/ext/permissionGate.ts`
 (where it runs, ahead of every mode), `bin/headless-flags.mjs` (`--private` and the JSON

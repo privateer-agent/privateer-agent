@@ -69,3 +69,21 @@ leaks a ref'd handle, and asserts the process exits and preserves a non-zero exi
 It was confirmed to hang against an unpatched CLI, so it fails if the patch stops
 applying — see `docs/project-config-dirs.md` for the patch-maintenance routine on a pi
 version bump.
+
+## …and must not wait forever on a silent provider
+
+The exit fix covers a run whose work is done. The other way a one-shot run "hangs" is
+a provider that accepts the request and then sends nothing: Pi waits on the stream with
+no limit, nothing reaches stdout, and no session file is written either, because Pi only
+writes one after the first reply. Seen 2026-10-02 as a `-p` run sitting for 14 minutes.
+
+`extensions/privateer-gate.ts` runs a stall watchdog (`src/engine/stallWatchdog.ts`) on
+headless runs. It is armed when a request goes out, re-armed by every streamed event
+(text, thinking and tool-call deltas all count), and off between requests, so a slow but
+live answer or a long local command never trips it. After `PRIVATEER_REPLY_TIMEOUT`
+seconds of silence (default 180, `0` turns it off) it prints why on stderr, aborts the
+turn, and the run exits 1.
+
+`tests/stallWatchdog.test.ts` runs a real `-p` against a mock model that sends stream
+headers and then nothing, and asserts exit 1 with the reason.
+

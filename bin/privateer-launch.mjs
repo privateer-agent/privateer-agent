@@ -31,6 +31,7 @@ import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 import { routeUpdate } from "./update-route.mjs";
 import { APPROVE_IN_APP_ENV, CLI_SPEND_ENV, PI_SUBCOMMANDS, PRIVATE_ENV, authProblem, extractHeadlessFlags, extractPrivateFlag, privateProblem } from "./headless-flags.mjs";
 import { runToCompletion } from "./run-to-completion.mjs";
+import { modelArgs } from "./model-args.mjs";
 import { filterRespawnArgs, listTerminals, requestFresh, runSupervised } from "./fresh-supervisor.mjs";
 import { configureCompileCache } from "./startup-cache.mjs";
 
@@ -817,14 +818,15 @@ else {
   //   1. a --model the user typed on the privateer command line (already in `args`)
   //   2. PRIVATEER_MODEL — deliberate override, folded into MODEL above
   //   3. a saved pick in settings.json → pass NO flag; Pi resolves it itself (and
-  //      falls back sanely if that model has vanished from the registry)
+  //      falls back sanely if that model has vanished from the registry). Except a
+  //      signed-in `privateer/*` pick, passed explicitly — see bin/model-args.mjs for
+  //      the silent OpenRouter fallback that prevents
   //   4. nothing saved (first run / fresh home) → the computed MODEL above
   //
   // A FUNCTION, called per launch: a fresh agent (bin/fresh-supervisor.mjs) re-reads it,
   // so a model picked in the old session boots the new one instead of being stomped by
   // a first-run --model computed before that pick existed.
   const modelArgsFor = (launchArgs) => {
-    const userPassedModel = launchArgs.includes("--model");
     let savedDefault = null;
     try {
       const s = JSON.parse(fs.readFileSync(path.join(AGENT_DIR, "settings.json"), "utf8"));
@@ -835,7 +837,7 @@ else {
         savedDefault = `${s.defaultProvider}/${s.defaultModel}`;
       }
     } catch { /* absent/unreadable → no saved pick */ }
-    return userPassedModel || (savedDefault && !process.env.PRIVATEER_MODEL) ? [] : ["--model", MODEL];
+    return modelArgs({ launchArgs, envModel: process.env.PRIVATEER_MODEL, savedDefault, signedIn, computed: MODEL });
   };
 
   // Dev convenience: load provider keys from the repo's .env if present.
