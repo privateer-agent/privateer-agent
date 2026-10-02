@@ -61,7 +61,7 @@ import {
 } from "privateer-speak";
 import { apiRequest, hasCredentials } from "../src/auth/privateer.ts";
 import { globalDir } from "../src/config/paths.ts";
-import { thisTerminalIsFront } from "../src/terminals/index.ts";
+import { thisTerminalIsFront, watchThisTerminalFocus } from "../src/terminals/index.ts";
 import { VOICE_DESCRIPTIONS } from "./speak-voices.data.ts";
 
 const QWEN3_TTS_VOICES = ["serena", "aiden", "dylan", "eric", "ono_anna", "ryan", "sohee", "uncle_fu", "vivian"];
@@ -362,10 +362,14 @@ export default function privateerSpeak(pi: any): void {
   // isFocused: a window that has just started (say, one the agent opened with the
   // terminal tool) asks Terminal/iTerm2 whether it's in front, so a hands-free mode
   // carries on in the new agent without a keypress — see src/terminals/.
+  // watchFocus: Git Bash's window (mintty) never tells the program inside when it gains
+  // or loses focus, so there Windows is watched instead, or the mic wouldn't follow you
+  // between windows.
   makePiSpeakExtension({
     configFile: join(globalDir(), "speak.json"),
     voiceCommands: VOICE_COMMANDS,
     isFocused: thisTerminalIsFront,
+    watchFocus: watchThisTerminalFocus,
   })(pi);
 }
 

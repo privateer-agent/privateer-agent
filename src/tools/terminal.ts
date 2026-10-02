@@ -33,7 +33,8 @@ export const terminalToolDefinition = {
     "`list` shows every named terminal and marks this one. `close` closes a window and ends what runs in it. " +
     "You can NOT read a terminal's output: for commands whose output you need, use bash or a background task. " +
     "Use this when the user wants to watch or use something themselves, or asks to switch terminals. " +
-    "Works in macOS Terminal, iTerm2, and inside tmux.",
+    "Works in macOS Terminal, iTerm2, Git Bash's own window (mintty) on Windows, and inside tmux. " +
+    "Don't improvise with bash (`start`, `mintty`, `open -a`) when this says it can't: tell the user instead.",
   parameters: Type.Object({
     action: Type.Union(ACTIONS.map((a) => Type.Literal(a)), { description: "What to do." }),
     name: Type.Optional(

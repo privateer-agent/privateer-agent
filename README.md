@@ -402,8 +402,12 @@ including a new agent the moment its window opens in front. The window you left 
 its mic. (That's [privateer-speak](https://www.npmjs.com/package/privateer-speak)'s focus
 awareness; it needs a terminal that reports focus.)
 
-Works in **macOS Terminal**, **iTerm2**, and inside **tmux** on any platform; other terminals
-get told so. macOS may ask once for permission to let the terminal control itself. Names are
+Works in **macOS Terminal**, **iTerm2**, **Git Bash's own window (mintty)** on Windows, and
+inside **tmux** on any platform; other terminals get told so. macOS may ask once for permission
+to let the terminal control itself. In Git Bash, new windows are mintty windows like the one
+you started in, and since mintty doesn't tell the program inside when it gains or loses focus,
+Privateer watches which window Windows has in front (a small PowerShell loop, one per window)
+so the voice still follows you. Names are
 shared across every Privateer on the machine (`~/.privateer/terminals.json`), and a window
 that's been closed drops off the list on its own.
 

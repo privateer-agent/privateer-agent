@@ -169,6 +169,29 @@ export async function thisTerminalIsFront(): Promise<boolean | undefined> {
   }
 }
 
+/**
+ * Report whether this window is in front each time that changes, for terminals that
+ * can't tell the program inside themselves (mintty on Windows — see backends.ts). For
+ * privateer-speak's watchFocus; elsewhere the terminal's own focus reports do this, and
+ * it watches nothing.
+ */
+export function watchThisTerminalFocus(report: (front: boolean) => void): () => void {
+  const b = backend();
+  if ("unsupported" in b || !b.watchFront) return () => undefined;
+  let stop: (() => void) | undefined;
+  let stopped = false;
+  void b
+    .selfId()
+    .then((id) => {
+      if (id && !stopped) stop = b.watchFront!(id, report);
+    })
+    .catch(() => undefined);
+  return () => {
+    stopped = true;
+    stop?.();
+  };
+}
+
 export interface TerminalListing {
   records: TerminalRecord[];
   selfId?: string;

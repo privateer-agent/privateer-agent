@@ -12,7 +12,9 @@ import type { TerminalBackend } from "../src/terminals/backends.ts";
 
 process.env.PRIVATEER_HOME = mkdtempSync(join(tmpdir(), "privateer-terminals-"));
 
-const { detectBackend, tmux, hangUp, shellLine, asString, ttyOf } = await import("../src/terminals/backends.ts");
+const { detectBackend, tmux, mintty, parseTasklist, powershellArgs, hangUp, shellLine, asString, ttyOf } = await import(
+  "../src/terminals/backends.ts"
+);
 const { checkName, freeName, readRegistry, registryPath, saveTerminal } = await import("../src/terminals/registry.ts");
 const terminals = await import("../src/terminals/index.ts");
 const { classifyToolCall } = await import("../src/permissions/classify.ts");
@@ -56,6 +58,9 @@ test("tmux wins whenever we are inside it; macOS apps by TERM_PROGRAM; anything 
   const ghostty = detectBackend({ TERM_PROGRAM: "ghostty" }, "darwin");
   assert.ok("unsupported" in ghostty && /ghostty/.test(ghostty.unsupported) && /tmux/.test(ghostty.unsupported));
   assert.ok("unsupported" in detectBackend({}, "linux"));
+  assert.equal((detectBackend({ TERM_PROGRAM: "mintty" }, "win32") as TerminalBackend).app, "mintty");
+  const wt = detectBackend({ WT_SESSION: "x" }, "win32");
+  assert.ok("unsupported" in wt && /Git Bash/.test(wt.unsupported), "Windows is pointed at Git Bash, not tmux");
 });
 
 test("names: trimmed, bounded, case-insensitive, and deduped with a suffix", () => {
@@ -192,4 +197,93 @@ test("the tool refuses without a UI and asks for a name where one is needed", as
     terminalToolDefinition.execute("t", params, undefined, undefined, ctx).then((r: any) => r.content[0].text);
   assert.match(await run({ action: "open", name: "x" }, { hasUI: false }), /interactive session/);
   assert.match(await run({ action: "focus" }, { hasUI: true }), /name is required/);
+});
+
+// ── mintty (Git Bash on Windows) ──────────────────────────────────────────────
+
+/** What a PowerShell call was asked to run, decoded from -EncodedCommand. */
+const psScript = (args: string[]): string => Buffer.from(args.at(-1)!, "base64").toString("utf16le");
+
+test("powershell gets its script encoded, so quoting never reaches the command line", () => {
+  const args = powershellArgs(`Write-Output "it's ok"`);
+  assert.deepEqual(args.slice(0, -1), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"]);
+  assert.equal(psScript(args), `Write-Output "it's ok"`);
+});
+
+test("tasklist's CSV gives the mintty windows' process ids", () => {
+  const out = '"mintty.exe","4120","Console","1","12,340 K"\r\n"mintty.exe","9988","Console","1","11,000 K"\r\n';
+  assert.deepEqual([...parseTasklist(out)], ["4120", "9988"]);
+  assert.deepEqual([...parseTasklist("INFO: No tasks are running which match the specified criteria.")], []);
+});
+
+test("mintty: this window is the mintty above us; open runs a self-deleting script in a new one", async () => {
+  const calls: string[][] = [];
+  const written: Array<{ path: string; body: string }> = [];
+  const launched: Array<{ file: string; args: string[]; opts: any }> = [];
+  const exec = async (file: string, args: string[]) => {
+    calls.push([file, ...(file === "powershell.exe" ? [psScript(args)] : args)]);
+    if (file === "powershell.exe" && psScript(args).includes("mintty.exe")) return "4120|C:\\Program Files\\Git\\usr\\bin\\mintty.exe\r\n";
+    if (file === "tasklist") return '"mintty.exe","4120","Console","1","1 K"\r\n"mintty.exe","5555","Console","1","1 K"\r\n';
+    return "";
+  };
+  const launch = async (file: string, args: string[], opts: any) => {
+    launched.push({ file, args, opts });
+    return 5555;
+  };
+  const t = mintty(exec, launch, { SHELL: "/usr/bin/bash" }, { dir: "C:\\Temp", write: (path, body) => written.push({ path, body }) });
+
+  assert.equal(await t.selfId(), "4120");
+  assert.match(calls[0]![1]!, new RegExp(`\\$id = ${process.pid}`), "the walk starts at this process");
+  const id = await t.open({ name: "api", cwd: "C:\\work\\api", command: "npm run dev", focus: true });
+  assert.equal(id, "5555");
+  assert.equal(launched[0]!.file, "C:\\Program Files\\Git\\usr\\bin\\mintty.exe", "the same mintty this window runs in");
+  const script = launched[0]!.args.at(-1)!;
+  assert.deepEqual(launched[0]!.args.slice(0, -1), ["-t", "api", "-e", "/usr/bin/bash", "-l"]);
+  assert.ok(script.startsWith("C:/Temp/privateer-term-") && script.endsWith(".sh"), script);
+  assert.equal(launched[0]!.opts.env.CHERE_INVOKING, "1", "the login profile mustn't cd home");
+  assert.equal(written[0]!.body, `rm -f "$0"\ncd 'C:\\work\\api' && npm run dev\nexec '/usr/bin/bash' -l\n`);
+
+  assert.deepEqual([...(await t.live())], ["4120", "5555"]);
+  assert.equal(await t.close("7777"), false, "a window that's gone isn't closed");
+  assert.equal(await t.close("5555"), true);
+  assert.deepEqual(calls.at(-1), ["taskkill", "/PID", "5555", "/T", "/F"]);
+});
+
+test("mintty: focus and front go through user32, and a missing window says so", async () => {
+  const exec = async (_file: string, args: string[]) => {
+    const script = psScript(args);
+    if (script.includes("SetForegroundWindow($h)")) return script.includes("-Id 5555") ? "ok\r\n" : "missing\r\n";
+    return "4120\r\n"; // the foreground window's process
+  };
+  const t = mintty(exec, async () => 0, {}, { dir: "/tmp", write: () => {} });
+  assert.equal(await t.focus("5555"), true);
+  assert.equal(await t.focus("7777"), false);
+  assert.equal(await t.isFront("4120"), true);
+  assert.equal(await t.isFront("5555"), false);
+});
+
+test("watching focus: a no-op where the terminal reports it itself", () => {
+  terminals.setBackendForTests(fakeBackend().b);
+  const stop = terminals.watchThisTerminalFocus(() => assert.fail("nothing to report"));
+  stop();
+  terminals.setBackendForTests(undefined);
+});
+
+test("watching focus: the backend's watcher, started for this window and stopped on request", async () => {
+  const { b } = fakeBackend("4120");
+  const seen: boolean[] = [];
+  let stopped = 0;
+  b.watchFront = (id, onChange) => {
+    assert.equal(id, "4120");
+    onChange(true);
+    onChange(false);
+    return () => void stopped++;
+  };
+  terminals.setBackendForTests(b);
+  const stop = terminals.watchThisTerminalFocus((front) => seen.push(front));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(seen, [true, false]);
+  stop();
+  assert.equal(stopped, 1);
+  terminals.setBackendForTests(undefined);
 });
