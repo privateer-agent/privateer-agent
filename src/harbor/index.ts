@@ -64,6 +64,8 @@ import { postOutbox as sealToOutbox, type OutboxSource } from "../outbox/cloudOu
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
 import { serializeBuild } from "./buildLock.ts";
+import { createAccountLease } from "./accountLease.ts";
+import { closeSession } from "./closeSession.ts";
 import { isHosted, publishRelayPub, webEnabled, mediaEnabled } from "../config/hosted.ts";
 import { relayExposureAllowed } from "../config/relayExposure.ts";
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
@@ -134,6 +136,11 @@ const GATE_TIMEOUT_MS = 5 * 60_000;
 // endpoint or an expired OAuth token from stalling a scheduled run.
 const WARM_TIMEOUT_MS = Number(process.env.PRIVATEER_MCP_WARM_MS) || 30_000;
 const WARM_POLL_MS = 250;
+// Hard ceiling on one unattended run (a routine, a submitted task, a workflow agent
+// step). Nothing else bounds a provider stream that stops sending without closing, and a
+// run stuck there holds its routine's `running` slot until the harbor restarts — the
+// routine silently never fires again. Live spawns have their own cap (liveTaskSession).
+const RUN_TIMEOUT_MS = Number(process.env.PRIVATEER_RUN_TIMEOUT_MS) || 30 * 60_000;
 
 // Distinguishes concurrent runs in the child-spend registry. A counter rather than a
 // timestamp: two runs starting in the same millisecond would share a key, and the second
@@ -175,6 +182,12 @@ function parseSpec(spec: string): { provider: string; modelId: string } {
 
 function log(msg: string): void {
   process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`);
+}
+
+// Identity of a queued outbox item, for removing the ones a flush delivered from a
+// queue that may have grown while it was posting.
+function pendingKey(p: PendingCloud): string {
+  return JSON.stringify([p.routine, p.at, p.kind ?? "routine", p.status, p.content]);
 }
 
 // Connector notes are things the RUN could not do — a selected connector that isn't
@@ -271,6 +284,25 @@ export class Harbor {
   // Live, app-drivable sessions spawned on demand (task_spawn). Each has its OWN relay
   // terminal (task-<uuid>); the harbor just keeps handles so it can reap them on shutdown.
   private readonly liveTasks = new Map<string, LiveTaskHandle>();
+  // The one account inference session every concurrent run shares — see accountLease.ts.
+  private readonly account = createAccountLease({
+    mint: async () => {
+      const creds = await acquireAccountCredential();
+      await persistAccountCredential(creds);
+      rememberAccountCredential(creds); // claim it, so the teardown drops OUR entry only
+    },
+    revoke: async () => {
+      try { await revokeAccountSession(); } catch { /* best effort — server TTL is the fallback */ }
+      // Ownership-checked: an interactive terminal on this machine shares auth.json,
+      // and its entry must survive a harbor run's teardown (see providers/account.ts).
+      try { await dropPersistedAccountCredential(); } catch { /* nothing persisted */ }
+    },
+    log,
+  });
+  // The cloud-outbox flush in progress, if any. Every tick starts one; without this two
+  // could post the same items (duplicates in the Inbox) and the slower one's save would
+  // overwrite what the faster one left.
+  private flushing?: Promise<void>;
 
   // App-facing routine management (list/save/delete/pause/run) over the harbor's
   // relay. Run-now is injected here since only the harbor can actually fire one;
@@ -633,22 +665,33 @@ export class Harbor {
     return sealToOutbox(name, at, status, content, kind, media, source);
   }
 
-  private async flushPendingCloud(): Promise<void> {
+  private flushPendingCloud(): Promise<void> {
+    this.flushing ??= this.doFlushPendingCloud()
+      .catch((e) => log(`outbox flush failed: ${e instanceof Error ? e.message : String(e)}`))
+      .finally(() => {
+        this.flushing = undefined;
+      });
+    return this.flushing;
+  }
+
+  private async doFlushPendingCloud(): Promise<void> {
     if (!hasCredentials()) return;
     const queue = loadPendingCloud();
     if (queue.length === 0) return;
-    const remaining: PendingCloud[] = [];
+    const sent = new Set<string>();
     for (const p of queue) {
-      if (
-        remaining.length === 0 &&
-        (await this.postOutbox(p.routine, p.at, p.status, p.content, p.kind ?? "routine", p.media ?? [], p.source))
-      ) continue;
-      remaining.push(p);
+      // Stop at the first failure: order is preserved, and whatever broke this one
+      // (offline, no outbox key yet) will break the rest too.
+      if (!(await this.postOutbox(p.routine, p.at, p.status, p.content, p.kind ?? "routine", p.media ?? [], p.source))) break;
+      sent.add(pendingKey(p));
     }
-    if (remaining.length !== queue.length) {
-      savePendingCloud(remaining);
-      log(`flushed ${queue.length - remaining.length} pending cloud outbox item(s); ${remaining.length} remaining`);
-    }
+    if (sent.size === 0) return;
+    // Re-read rather than save what we loaded: a run that finished while we were
+    // posting queued its result in the meantime, and overwriting with our snapshot
+    // would delete it.
+    const remaining = loadPendingCloud().filter((p) => !sent.has(pendingKey(p)));
+    savePendingCloud(remaining);
+    log(`flushed ${sent.size} pending cloud outbox item(s); ${remaining.length} remaining`);
   }
 
   private primeSchedule(): void {
@@ -778,32 +821,56 @@ export class Harbor {
     const toInbox = routine.delivery.includes("cloud");
     const media = toInbox ? new ResultMedia() : undefined;
 
-    const { out, status, error, notes } = await this.runSession({
-      prompt: withBrief(routine.prompt, { inbox: toInbox, canAttach: !!media }),
-      cwd: routine.cwd,
-      model: modelSpec,
-      tools: routine.tools ?? [],
-      media,
-    });
+    let status: "ok" | "error" = "error";
+    let error: string | undefined;
+    let delivered: string[] = [];
+    try {
+      const run = await this.runSession({
+        prompt: withBrief(routine.prompt, { inbox: toInbox, canAttach: !!media }),
+        cwd: routine.cwd,
+        model: modelSpec,
+        tools: routine.tools ?? [],
+        media,
+      });
+      ({ status, error } = run);
 
-    const content = formatResult(routine, out, status, error, notes);
-    const report = await deliver(routine, content, status, {
-      media: media?.list() ?? [],
-      pushRelay: this.pushRelay,
-      pushCloud: this.pushCloud,
-      webhooks: config.webhooks,
-      redact: (text) => redactText(text, collectSecrets(config.providers)),
-    });
-    log(`  "${routine.name}" ${status}; delivered via ${report.delivered.join(", ") || "(none)"}`);
-
-    this.persistRun(routine.id, {
-      lastRun: new Date().toISOString(),
-      lastStatus: status,
-      lastError: error,
-      ...advanceAfterRun(routine),
-    });
-    this.running.delete(routine.id);
-    return { ok: status === "ok", message: report.delivered.join(", ") || undefined };
+      const content = formatResult(routine, run.out, status, error, run.notes);
+      try {
+        const report = await deliver(routine, content, status, {
+          media: media?.list() ?? [],
+          pushRelay: this.pushRelay,
+          pushCloud: this.pushCloud,
+          webhooks: config.webhooks,
+          redact: (text) => redactText(text, collectSecrets(config.providers)),
+        });
+        delivered = report.delivered;
+      } catch (e) {
+        // A full disk, an unwritable output dir. The run happened and was paid for; say
+        // so in the log and on the routine rather than throwing past the schedule
+        // advance below — that throw is what used to re-fire (and re-bill) the routine
+        // on every restart.
+        error = `delivery failed: ${e instanceof Error ? e.message : String(e)}`;
+        status = "error";
+      }
+      log(`  "${routine.name}" ${status}; delivered via ${delivered.join(", ") || "(none)"}${error && delivered.length === 0 ? ` (${error})` : ""}`);
+    } finally {
+      // Always advance the schedule and free the slot, whatever threw above. Without the
+      // finally, one exception left the routine marked running forever (it never fired
+      // again) — or, as an unhandled rejection, crashed the harbor before nextRun moved,
+      // so the restart fired it again straight away.
+      try {
+        this.persistRun(routine.id, {
+          lastRun: new Date().toISOString(),
+          lastStatus: status,
+          lastError: error,
+          ...advanceAfterRun(routine),
+        });
+      } catch (e) {
+        log(`  couldn't record the run of "${routine.name}": ${e instanceof Error ? e.message : String(e)}`);
+      }
+      this.running.delete(routine.id);
+    }
+    return { ok: status === "ok", message: delivered.join(", ") || undefined };
   }
 
   // Build the Pi services for one unattended run: the auto-approve gate, the account
@@ -831,6 +898,11 @@ export class Harbor {
         allowedOutsideRoots: [],
         cwd,
         confineToCwd: true,
+        // Bypass mode lets anything through that the allow-list registered — including
+        // reads outside cwd and of protected files, which bypass allows outright. A run
+        // nobody is watching, that may well have fetched a hostile web page, must not
+        // read ~/.ssh or our own auth.json and put it in the next URL: refuse both.
+        hardConfine: true,
         async localAsk() {
           return "deny";
         },
@@ -954,7 +1026,7 @@ export class Harbor {
           await new Promise((r) => setTimeout(r, WARM_POLL_MS));
         }
       } finally {
-        session.dispose?.();
+        await closeSession(session);
       }
     } catch (e) {
       log(`  connector warm-up failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -977,7 +1049,8 @@ export class Harbor {
     let out = "";
     let status: "ok" | "error" = "ok";
     let error: string | undefined;
-    let spawnedAccount = false;
+    let leasedAccount = false;
+    let session: any;
     const resolved = await this.resolveRunTools(spec.tools, spec.cwd, spec.model);
     // attach_to_result rides with the staging area rather than the allow-list: it is
     // how the answer is DELIVERED, not a capability the run gains. A routine that
@@ -997,14 +1070,10 @@ export class Harbor {
 
       const { provider, modelId } = parseSpec(spec.model);
       if (provider === "privateer") {
-        try {
-          const creds = await acquireAccountCredential();
-          await persistAccountCredential(creds);
-          rememberAccountCredential(creds); // claim it, so the teardown drops OUR entry only
-          spawnedAccount = true;
-        } catch (e) {
-          log(`  account channel unavailable: ${(e as Error).message}`);
-        }
+        // Shared with every other run in flight — see accountLease.ts. A failed mint is
+        // logged by the lease; the run goes ahead and fails on auth with that context.
+        leasedAccount = true;
+        await this.account.acquire();
       }
 
       const model = (modelRegistryOf(services) as any).find(provider, modelId);
@@ -1012,12 +1081,12 @@ export class Harbor {
         status = "error";
         error = `model ${provider}/${modelId} not found`;
       } else {
-        const { session } = await createAgentSessionFromServices({
+        ({ session } = await createAgentSessionFromServices({
           services,
           sessionManager: SessionManager.inMemory(spec.cwd),
           model,
           tools: allowedTools,
-        } as any);
+        } as any));
         const adapter = createEngineEventAdapter();
         session.subscribe((ev: any) => {
           for (const ee of adapter.toEngineEvents(ev)) {
@@ -1028,21 +1097,30 @@ export class Harbor {
             }
           }
         });
-        await session.prompt(spec.prompt);
+        let timedOut = false;
+        const deadline = setTimeout(() => {
+          timedOut = true;
+          void Promise.resolve(session.abort?.()).catch(() => {});
+        }, RUN_TIMEOUT_MS);
+        try {
+          await session.prompt(spec.prompt);
+        } finally {
+          clearTimeout(deadline);
+        }
+        if (timedOut) {
+          status = "error";
+          error = `run stopped after ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes (PRIVATEER_RUN_TIMEOUT_MS)`;
+        }
       }
     } catch (err) {
       status = "error";
       error = err instanceof Error ? err.message : String(err);
     } finally {
-      // Revoke ONLY this run's account inference session (the harbor's own child API
-      // session — relay/outbox — stays alive until shutdown). Drop Pi's persisted copy
-      // too so a later run's fallback never reuses a revoked token. Best-effort.
-      if (spawnedAccount) {
-        try { await revokeAccountSession(); } catch { /* best effort — server TTL is the fallback */ }
-        // Ownership-checked: an interactive terminal on this machine shares auth.json,
-        // and its entry must survive a harbor run's teardown (see providers/account.ts).
-        try { await dropPersistedAccountCredential(); } catch { /* nothing persisted */ }
-      }
+      if (session) await closeSession(session);
+      // Drop this run's reference to the shared account session; the last run out
+      // revokes it (and its persisted copy). The harbor's own child API session —
+      // relay/outbox — is separate and stays alive until shutdown.
+      if (leasedAccount) await this.account.release();
       // Drop this run's child grant. Unconditional and last: a grant left behind would
       // authorize the NEXT run's subagents for tools that run never named.
       releaseChildSpend();
@@ -1108,6 +1186,7 @@ export class Harbor {
           defaultModel: loadHarborConfig().defaultModel,
           parseSpec,
           log,
+          account: this.account,
           onClosed: (id) => this.liveTasks.delete(id),
           // A live spawn's feed lives only in the attached app; when the session ends
           // (closed, reaped, or timed out) its answer would otherwise be gone. Seal the
@@ -1401,6 +1480,12 @@ export function runHarbor(): void {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  // A resident service: one stray rejection from a fire-and-forget promise (a relay
+  // callback, a run started from IPC) must not take every routine down with it — and,
+  // under launchd/systemd, restart into the same state and do it again. Log it instead.
+  process.on("unhandledRejection", (reason) => {
+    log(`unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`);
+  });
   harbor.start().catch(async (err) => {
     if (err instanceof HarborAlreadyRunningError) {
       // A resident harbor already owns this machine — leave it in charge. Exit 0 so a

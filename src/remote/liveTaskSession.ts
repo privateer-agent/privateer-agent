@@ -29,6 +29,8 @@ import { AttachmentStore, type StoredAttachment } from "../util/attachmentStore.
 import { spawnAccountCredentials, revokeAccountSession } from "../auth/privateer.ts";
 import { createUIContext } from "../ext/headlessUi.ts";
 import { noQuarterActive } from "../permissions/noQuarter.ts";
+import type { AccountLease } from "../harbor/accountLease.ts";
+import { closeSession } from "../harbor/closeSession.ts";
 
 export interface LiveTaskHandle {
   termId: string;
@@ -41,6 +43,10 @@ export interface LiveTaskDeps {
   parseSpec: (spec: string) => { provider: string; modelId: string };
   log: (msg: string) => void;
   onClosed: (termId: string) => void;
+  // The harbor's shared account session (harbor/accountLease.ts). The credential slot is
+  // one per process, so a spawn minting and revoking its own killed whatever routine was
+  // mid-turn beside it. Absent → this session mints and revokes its own (standalone use).
+  account?: AccountLease;
   // Deliver the session's closing answer durably (the harbor seals it to the account
   // outbox, so it lands in the app's inbox). A live spawn's feed is otherwise purely
   // ephemeral: close the screen, reap the session, and everything it said is gone —
@@ -72,6 +78,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   let initialPromptSent = false;
   let stopped = false;
   let spawnedAccount = false;
+  let leasedAccount = false;
 
   let attachTimer: ReturnType<typeof setTimeout> | undefined;
   let lifeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -111,10 +118,16 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     if (attachTimer) clearTimeout(attachTimer);
     if (lifeTimer) clearTimeout(lifeTimer);
     try { relay?.stop(); } catch { /* already stopped */ }
+    if (session) {
+      try { await session.abort?.(); } catch { /* nothing in flight */ }
+      await closeSession(session); // MCP connections, listeners — see closeSession.ts
+    }
     attachments.cleanup(); // drop the scratch dir holding inbound file bytes
     // Revoke ONLY this session's account inference session so it doesn't linger in the
     // app's Linked Devices; the harbor's own child session stays alive. Best-effort.
-    if (spawnedAccount) {
+    if (leasedAccount) {
+      await deps.account!.release();
+    } else if (spawnedAccount) {
       try { await revokeAccountSession(); } catch { /* server TTL is the fallback */ }
       // Ownership-checked: auth.json is shared machine-wide, so a live task's teardown
       // must not delete an interactive terminal's entry (see providers/account.ts).
@@ -228,7 +241,10 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   });
 
   const { provider, modelId } = deps.parseSpec(modelSpec);
-  if (provider === "privateer") {
+  if (provider === "privateer" && deps.account) {
+    leasedAccount = true; // set before the await, so stop() always releases what we took
+    await deps.account.acquire();
+  } else if (provider === "privateer") {
     try {
       const creds = await spawnAccountCredentials();
       await persistAccountCredential(creds);

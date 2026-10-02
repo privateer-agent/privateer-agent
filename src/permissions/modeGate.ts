@@ -69,6 +69,12 @@ export interface ModeGateDeps {
   // budget RECORDS what it allows — asking it about a call the mode would refuse anyway
   // would spend budget on nothing.
   isSpendPreauthorized?: (req: PermissionRequest) => boolean | Promise<boolean>;
+  // Refuse every request that leaves cwd or touches a protected file, whatever the mode.
+  // For the harbor's unattended runs, which run in `bypass` (their safety is the tool
+  // allow-list) — and bypass allows outside/protected outright (mode.ts), which left
+  // their `confineToCwd` meaning nothing. Sits below no-quarter only: an operator who
+  // launched with --no-quarter asked for no gate at all.
+  hardConfine?: boolean;
 }
 
 // The permission gate used by the live TUI. It first applies the mode/allowlist
@@ -84,6 +90,8 @@ export class ModeGate implements PermissionGate {
     // any mode/allowlist/remote/denylist policy is consulted. Deliberately the very
     // first check so nothing below can force an "ask" back on.
     if (this.deps.getSkipAllPermissions?.()) return "allow";
+
+    if (this.deps.hardConfine && (req.outside || req.protected)) return "deny";
 
     const denylist = this.deps.denylist ?? [];
     const auto = decideAuto(req, this.deps.getMode(), this.deps.allowlist, denylist);

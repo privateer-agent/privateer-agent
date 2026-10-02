@@ -2,7 +2,7 @@ import { resolve, isAbsolute, relative, dirname, join, basename } from "node:pat
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { isProtectedPath } from "./protected.ts";
+import { isProtectedPath, isCredentialStorePath } from "./protected.ts";
 import type { PermissionRequest } from "./gate.ts";
 
 // NEW glue for the Pi rewrite. In 0.2 each tool built its own PermissionRequest
@@ -19,6 +19,11 @@ export interface ScopeOptions {
   cwd: string;
   confineToCwd?: boolean; // default true
   allowedOutsideRoots?: string[];
+  // Gate a READ of a protected file or credential store (isCredentialStorePath) even
+  // inside cwd, flagged `protected`. Off by default — an interactive session reading
+  // its own project's .env is normal. The harbor's unattended runs turn it on and pair
+  // it with GateController.hardConfine, which refuses anything flagged.
+  guardSecretReads?: boolean;
 }
 
 // Resolve symlinks so an in-cwd symlink can't smuggle a path outside scope past the
@@ -619,13 +624,16 @@ export function classifyToolCall(
     const p = firstPath(obj);
     if (!p) return null; // e.g. grep with no explicit path → in-cwd, no gate
     const abs = resolveInCwd(scope.cwd, p);
-    if (!isOutsideScope(scope, abs)) return null;
+    const outside = isOutsideScope(scope, abs);
+    const secret = scope.guardSecretReads === true && (isProtectedPath(abs) || isCredentialStorePath(abs));
+    if (!outside && !secret) return null;
     return {
       tool: toolName,
       kind: "read",
-      title: "Read outside working directory",
+      title: secret ? "Read a protected file" : "Read outside working directory",
       detail: abs,
-      outside: true,
+      outside,
+      ...(secret ? { protected: true } : {}),
       path: abs,
     };
   }

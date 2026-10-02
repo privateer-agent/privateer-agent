@@ -46,6 +46,10 @@ export interface GateController {
   denylist?: string[];
   cwd: string;
   confineToCwd?: boolean;
+  // Unattended confinement: deny outside-cwd and protected access in every mode, and
+  // treat a read of a credential store as protected even inside cwd. See
+  // ModeGate.hardConfine and ScopeOptions.guardSecretReads.
+  hardConfine?: boolean;
   getRemote?(): boolean;
   // The controller raised the flag: total bypass for remote turns — see
   // ModeGate.getNoQuarter.
@@ -157,6 +161,7 @@ export async function decideToolCall(
     cwd: ctrl.cwd,
     confineToCwd: ctrl.confineToCwd,
     allowedOutsideRoots: ctrl.allowedOutsideRoots,
+    guardSecretReads: ctrl.hardConfine,
   });
   if (!req) return undefined; // no gate needed — read-only/in-scope/meta
 
@@ -196,6 +201,7 @@ export async function decideToolCall(
     getNoQuarter: ctrl.getNoQuarter,
     getAutoApprove: ctrl.getAutoApprove,
     getSkipAllPermissions: ctrl.getSkipAllPermissions,
+    hardConfine: ctrl.hardConfine,
     isSpendPreauthorized: ctrl.isSpendPreauthorized
       ? (r: PermissionRequest) => ctrl.isSpendPreauthorized!(r, input, ctx.signal)
       : undefined,
