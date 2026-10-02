@@ -28,8 +28,9 @@
 // made in an editor is picked up on the next scan, exactly like one made through the
 // command — there is no "restart to apply" step to explain.
 
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { configPath } from "./paths.ts";
+import { writeFileAtomic } from "../util/atomicWrite.ts";
 
 let cached: string[] = [];
 let cachedStamp = "";
@@ -89,7 +90,7 @@ function write(entries: string[]): void {
     /* new or unreadable — a fresh object, so one bad file doesn't lose the edit */
   }
   const privacy = { ...((cfg.privacy as Record<string, unknown>) ?? {}), piiAllow: entries };
-  writeFileSync(configPath(), JSON.stringify({ ...cfg, privacy }, null, 2) + "\n");
+  writeFileAtomic(configPath(), JSON.stringify({ ...cfg, privacy }, null, 2) + "\n");
   invalidate();
 }
 

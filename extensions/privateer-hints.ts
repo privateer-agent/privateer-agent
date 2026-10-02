@@ -21,11 +21,12 @@
 // /hints on|off persists { hints: { enabled } } in ~/.privateer/config.json (ours;
 // Pi never reads that file) — read-modify-write, preserving unrelated keys.
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { keyText } from "@earendil-works/pi-coding-agent";
 import { configPath, globalDir } from "../src/config/paths.ts";
 import { desktopAppPath } from "../src/config/desktopApp.ts";
+import { writeFileAtomic } from "../src/util/atomicWrite.ts";
 
 const FIRST_MS = 6_000; // a turn shorter than this never shows a tip
 const EVERY_MS = 12_000;
@@ -120,7 +121,7 @@ function persistEnabled(enabled: boolean): void {
   cfg.hints = { ...(cfg.hints ?? {}), enabled };
   try {
     mkdirSync(globalDir(), { recursive: true });
-    writeFileSync(configPath(), JSON.stringify(cfg, null, 2) + "\n");
+    writeFileAtomic(configPath(), JSON.stringify(cfg, null, 2) + "\n");
   } catch {
     /* best effort — the toggle still holds for this session */
   }

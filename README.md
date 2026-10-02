@@ -479,10 +479,30 @@ privateer harbor uninstall
 ```
 
 Installs as a **launchd user agent** on macOS or a **`systemd --user` unit** on Linux — no
-root, no sudo. (There's no Windows service path yet; use `privateer harbor run`.)
+root, no sudo. (There's no Windows service path yet; use `privateer harbor run`.) Logs go to
+`~/.privateer/harbor.log` on macOS (kept under 5 MB, one previous copy as `harbor.log.1`) and
+to the journal on Linux: `journalctl --user -u privateer-harbor`.
 
 Everything the harbor does still runs through the permission gate. Actions needing approval
-surface in the app; routines you approved once run on their own schedule.
+surface in the app; routines you approved once run on their own schedule. Unattended runs
+are confined to their working directory and can't read credential stores (`~/.ssh`,
+`~/.aws`, Privateer's own login and config files), whatever tools they're allowed.
+
+**Chat channels** (Telegram, Slack, Discord, WhatsApp) run beside it, as their own service:
+
+```bash
+privateer channels install    # login service; re-run after changing channels from the app
+privateer channels status     # which platforms are live right now
+privateer channels run        # or in the foreground
+```
+
+**On a VPS:** run both as a dedicated, unprivileged user, never root. A routine you allow
+`bash` runs with that user's full rights. Sign in over SSH with `privateer` and `/login` (it
+prints a code to approve in the app). Nothing needs an inbound port, except WhatsApp's
+webhook. The Linux unit sets `NoNewPrivileges`, `UMask=0077` and a restart limit. It skips
+systemd's namespace sandboxing on purpose, because that fails to start on kernels without
+unprivileged user namespaces. In a container with no systemd, use `privateer harbor run`
+under the container's own restart policy.
 
 ## Workflows
 

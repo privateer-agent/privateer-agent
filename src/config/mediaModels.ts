@@ -18,9 +18,10 @@
  * Missing file, unreadable file and malformed JSON all mean "no choice" — the account
  * default — never a crash in the middle of a tool call.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { configPath } from "./paths.ts";
+import { writeFileAtomic } from "../util/atomicWrite.ts";
 
 export type MediaKind = "image" | "video";
 
@@ -55,7 +56,7 @@ export function setMediaModelPref(kind: MediaKind, id: string | null): void {
   const next: Record<string, unknown> = { ...cfg, media };
   if (Object.keys(media).length === 0) delete next.media;
   mkdirSync(dirname(configPath()), { recursive: true });
-  writeFileSync(configPath(), JSON.stringify(next, null, 2) + "\n");
+  writeFileAtomic(configPath(), JSON.stringify(next, null, 2) + "\n");
 }
 
 /** The model a call should send: its own `model`, else this machine's choice, else none. */

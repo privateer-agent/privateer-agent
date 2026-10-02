@@ -35,9 +35,10 @@
  * Framework-agnostic: nothing here imports React or the relay. The caller owns the
  * frame plumbing and the sealed-secret open.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { agentDir } from "../config/paths.ts";
+import { writeFileAtomic } from "../util/atomicWrite.ts";
 
 export type McpTransport = "stdio" | "http";
 
@@ -200,7 +201,7 @@ export function makeMcpControl(opts?: {
 
   function writeSource(src: SourceFile): void {
     mkdirSync(dirname(sourcePath()), { recursive: true });
-    writeFileSync(sourcePath(), JSON.stringify(src, null, 2) + "\n");
+    writeFileAtomic(sourcePath(), JSON.stringify(src, null, 2) + "\n");
     project(src);
   }
 
@@ -220,7 +221,7 @@ export function makeMcpControl(opts?: {
       mcpServers[name] = toStandard(e);
     }
     mkdirSync(dirname(projectionPath()), { recursive: true });
-    writeFileSync(
+    writeFileAtomic(
       projectionPath(),
       JSON.stringify({ mcpServers, settings: { toolPrefix: "server" } }, null, 2) + "\n",
     );

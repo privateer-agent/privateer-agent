@@ -1,4 +1,5 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync, unlinkSync } from "node:fs";
+import { writeFileAtomic } from "../util/atomicWrite.ts";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { globalDir } from "../config/paths.ts";
@@ -64,11 +65,9 @@ export function saveRoutines(routines: Routine[]): void {
   mkdirSync(dir, { recursive: true });
   tryChmod(dir, 0o700);
   const payload: RoutineFile = { routines };
-  writeFileSync(routinesFilePath(), JSON.stringify(payload, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  tryChmod(routinesFilePath(), 0o600);
+  // Atomic: a half-written routines.json reads as "no routines" (loadRoutines), and the
+  // next save would then persist only the one routine it was given.
+  writeFileAtomic(routinesFilePath(), JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
 }
 
 // Look up by id first, then by (case-insensitive) name for CLI convenience.
@@ -99,16 +98,46 @@ export function removeRoutine(idOrName: string): Routine | null {
   return target;
 }
 
-// Write a run's result to the routine's output dir: a dated file plus latest.md.
+// Dated result files kept per routine. An hourly routine on an always-on box wrote one
+// every hour, forever; latest.md is what anything reads, and this many is history enough.
+export const ROUTINE_OUTPUT_KEEP = Number(process.env.PRIVATEER_ROUTINE_OUTPUT_KEEP) || 30;
+
+// Write a run's result to the routine's output dir: a dated file plus latest.md, then
+// prune the dated files to the newest ROUTINE_OUTPUT_KEEP. Owner-only, like the rest of
+// the global dir: a result can quote whatever the routine read.
 // Returns the absolute path of latest.md.
 export function writeRoutineOutput(name: string, content: string): string {
   const dir = routineOutputDir(name);
   mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  writeFileSync(join(dir, `${stamp}.md`), content, "utf8");
+  writeFileSync(join(dir, `${stamp}.md`), content, { encoding: "utf8", mode: 0o600 });
   const latest = join(dir, "latest.md");
-  writeFileSync(latest, content, "utf8");
+  writeFileAtomic(latest, content, { mode: 0o600 });
+  pruneRoutineOutput(dir, ROUTINE_OUTPUT_KEEP);
   return latest;
+}
+
+// Our dated names (ISO with ':' and '.' → '-') sort chronologically as strings, so the
+// oldest are first. Only files of that shape are touched — anything else a user put in
+// the folder is theirs. Best-effort: a prune failure never fails a delivery.
+const DATED_OUTPUT = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.md$/;
+
+export function pruneRoutineOutput(dir: string, keep: number): number {
+  let removed = 0;
+  try {
+    const dated = readdirSync(dir).filter((f) => DATED_OUTPUT.test(f)).sort();
+    for (const f of dated.slice(0, Math.max(0, dated.length - keep))) {
+      try {
+        unlinkSync(join(dir, f));
+        removed++;
+      } catch {
+        /* already gone */
+      }
+    }
+  } catch {
+    /* unreadable dir */
+  }
+  return removed;
 }
 
 // A pending routine result queued for the next interactive session ("notice"
@@ -144,7 +173,7 @@ export function addNotice(notice: RoutineNotice): void {
   notices.push(notice);
   // Keep the queue bounded so an offline stretch can't grow it without limit.
   const trimmed = notices.slice(-50);
-  writeFileSync(noticesPath(), JSON.stringify(trimmed, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  writeFileAtomic(noticesPath(), JSON.stringify(trimmed, null, 2) + "\n", { mode: 0o600 });
   tryChmod(noticesPath(), 0o600);
 }
 
@@ -189,7 +218,7 @@ export function addPendingRelay(entry: PendingRelay): void {
   const queue = loadPendingRelay();
   queue.push(entry);
   const trimmed = queue.slice(-50); // bound the backlog
-  writeFileSync(pendingRelayPath(), JSON.stringify(trimmed, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  writeFileAtomic(pendingRelayPath(), JSON.stringify(trimmed, null, 2) + "\n", { mode: 0o600 });
   tryChmod(pendingRelayPath(), 0o600);
 }
 
@@ -271,6 +300,6 @@ export function addPendingCloud(entry: PendingCloud): void {
 export function savePendingCloud(entries: PendingCloud[]): void {
   const dir = join(globalDir(), "routines");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(pendingCloudPath(), JSON.stringify(entries, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  writeFileAtomic(pendingCloudPath(), JSON.stringify(entries, null, 2) + "\n", { mode: 0o600 });
   tryChmod(pendingCloudPath(), 0o600);
 }

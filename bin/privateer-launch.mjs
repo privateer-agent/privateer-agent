@@ -556,6 +556,16 @@ else if (sub === "harbor" || sub === "daemon") {
   runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-harbor.mjs"), ...args.slice(1)], { forwardSignals: true });
 }
 
+// --- `privateer channels [run|install|uninstall|status]` -------------------
+// The chat-platform bridges (Telegram/Slack/Discord/WhatsApp). Same shape as the
+// harbor: a resident process, its own launcher, its own optional login service.
+else if (sub === "channels") {
+  sweepLegacyShims();
+  sweepBashLogs();
+  const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
+  runToCompletion(NODE_BIN, [...nodeArgs, path.join(REPO, "bin", "privateer-channels.mjs"), ...args.slice(1)], { forwardSignals: true });
+}
+
 // --- `privateer verify` ----------------------------------------------------
 // Check the install that is on this disk right now. Every other trust signal we
 // publish is an install-time one (npm provenance at `npm i`, a checksum inside
@@ -1051,7 +1061,8 @@ function printPrivateerHelp(cmd = process.env.PRIVATEER_CMD || "privateer") {
       "Commands:",
       `  ${cmd} init [directory]     Create a starter PRIVATEER.md project-context file`,
       `  ${cmd} update [--all]       Fetch the latest release or newer tool packs`,
-      `  ${cmd} harbor <command>     Manage the resident background Harbor daemon (run/install/uninstall/status)`,
+      `  ${cmd} harbor <command>     Manage Harbor, the always-on agent behind the app (run/install/uninstall/status)`,
+      `  ${cmd} channels <command>   Run chat channels: Telegram, Slack, Discord, WhatsApp (run/install/uninstall/status)`,
       `  ${cmd} verify               Check local installation integrity and patch state`,
       `  ${cmd} acp                  Run as an Agent Client Protocol server (JSON-RPC on stdio)`,
       `  ${cmd} fresh [n]            Replace a running terminal's agent with a new one (stops everything it started)`,

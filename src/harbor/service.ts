@@ -4,32 +4,57 @@
 // user agent; Linux → systemd --user unit. No root: everything lives under the
 // user's own home and login session.
 //
+// The channels runner (chat platforms → agent turns) installs the same way, as its own
+// unit: every function here takes a ServiceKind, defaulting to the harbor, so the
+// desktop app's calls (installService(), serviceInfo(), …) are unchanged.
+//
 // ORDERING NOTE: this module is import-safe (node builtins + our paths only, no Pi),
 // so the harbor CLI can load it without going through boot.ts.
-import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync, openSync, readSync, closeSync, fstatSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { globalDir } from "../config/paths.ts";
 import { harborIsRunning, sendToHarbor, describeRelay, formatDuration, type IpcResponse } from "./ipc.ts";
 
-const LABEL = "pro.privateer.harbor"; // launchd label / reverse-dns id
-const UNIT = "privateer-harbor.service"; // systemd --user unit name
+export type ServiceKind = "harbor" | "channels";
 
-// Pre-rename service identity ("daemon"). Kept ONLY so install/uninstall can evict a
-// service a user installed before the harbor rename — otherwise it lingers as an
-// orphaned launchd agent / systemd unit still running the old launcher. Never written,
-// only torn down.
-const OLD_LABEL = "pro.privateer.daemon";
-const OLD_UNIT = "privateer-daemon.service";
+interface ServiceSpec {
+  label: string; // launchd label / reverse-dns id
+  unit: string; // systemd --user unit name
+  launcher: string; // bin/ file the unit runs with "run"
+  description: string;
+  // Pre-rename identity, kept ONLY so install/uninstall can evict a service a user
+  // installed before the harbor rename ("daemon") — otherwise it lingers as an orphaned
+  // launchd agent / systemd unit still running the old launcher. Never written.
+  oldLabel?: string;
+  oldUnit?: string;
+}
 
-// Absolute path to the node launcher that boots + runs the harbor (bin/privateer-harbor.mjs).
+const SPECS: Record<ServiceKind, ServiceSpec> = {
+  harbor: {
+    label: "pro.privateer.harbor",
+    unit: "privateer-harbor.service",
+    launcher: "privateer-harbor.mjs",
+    description: "Privateer resident agent harbor (routines + app-driven task spawns)",
+    oldLabel: "pro.privateer.daemon",
+    oldUnit: "privateer-daemon.service",
+  },
+  channels: {
+    label: "pro.privateer.channels",
+    unit: "privateer-channels.service",
+    launcher: "privateer-channels.mjs",
+    description: "Privateer channels (Telegram/Slack/Discord/WhatsApp chats to agent turns)",
+  },
+};
+
+// Absolute path to the node launcher that boots + runs the service (bin/privateer-*.mjs).
 // Resolved from THIS module so it's correct for both a dev checkout and a global npm
 // install (…/node_modules/privateer-agent/bin/privateer-harbor.mjs).
-function harborLauncherPath(): string {
+function launcherPath(kind: ServiceKind): string {
   const here = dirname(fileURLToPath(import.meta.url)); // …/src/harbor
-  return resolve(here, "../../bin/privateer-harbor.mjs");
+  return resolve(here, "../../bin", SPECS[kind].launcher);
 }
 
 // The node binary to bake into the unit. We use the CURRENT interpreter (>=22, the
@@ -39,8 +64,16 @@ function nodeBinaryPath(): string {
   return process.execPath;
 }
 
-function harborLogPath(): string {
-  return join(globalDir(), "harbor.log");
+// The log FILE the service writes to (exported for the in-process rotation, logRotate.ts). macOS only: launchd appends stdout/stderr here.
+// On Linux the unit logs to the journal (see logLocation), which rotates on its own.
+export function logFilePath(kind: ServiceKind = "harbor"): string {
+  return join(globalDir(), `${kind}.log`);
+}
+
+// Where to read this service's log, for humans: a file on macOS, a journalctl command
+// on Linux. Reporting harbor.log on Linux pointed people at a file nothing ever wrote.
+function logLocation(kind: ServiceKind, platform: NodeJS.Platform = process.platform): string {
+  return platform === "linux" ? `journalctl --user -u ${SPECS[kind].unit}` : logFilePath(kind);
 }
 
 // Whether the interpreter we're baking in is an Electron binary rather than a plain
@@ -79,8 +112,8 @@ function forwardedEnv(): Record<string, string> {
 
 // ── macOS (launchd) ─────────────────────────────────────────────────────────────
 
-function launchAgentPath(): string {
-  return join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+function launchAgentPath(kind: ServiceKind = "harbor"): string {
+  return join(homedir(), "Library", "LaunchAgents", `${SPECS[kind].label}.plist`);
 }
 
 function xmlEscape(s: string): string {
@@ -93,20 +126,20 @@ function xmlEscape(s: string): string {
 // holding the machine lock (exit 0 every ~10s, appending the same line to harbor.log
 // forever — this is what produced a 7 MB log of "already running"), and a deliberate
 // shutdown, which launchd would undo. Matches the systemd unit's Restart=on-failure.
-export function launchdPlist(): string {
-  const args = [nodeBinaryPath(), harborLauncherPath(), "run"];
+export function launchdPlist(kind: ServiceKind = "harbor"): string {
+  const args = [nodeBinaryPath(), launcherPath(kind), "run"];
   const envVars = forwardedEnv();
   const argXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
   const envXml = Object.entries(envVars)
     .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`)
     .join("\n");
-  const log = xmlEscape(harborLogPath());
+  const log = xmlEscape(logFilePath(kind));
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${LABEL}</string>
+  <string>${SPECS[kind].label}</string>
   <key>ProgramArguments</key>
   <array>
 ${argXml}
@@ -129,19 +162,21 @@ ${Object.keys(envVars).length ? `  <key>EnvironmentVariables</key>\n  <dict>\n${
 
 // Evict a pre-rename launchd agent (pro.privateer.daemon) if one is installed, so the
 // harbor rename doesn't leave the old service running the old launcher alongside it.
-function evictOldLaunchd(): void {
-  const oldPlist = join(homedir(), "Library", "LaunchAgents", `${OLD_LABEL}.plist`);
+function evictOldLaunchd(kind: ServiceKind): void {
+  const old = SPECS[kind].oldLabel;
+  if (!old) return;
+  const oldPlist = join(homedir(), "Library", "LaunchAgents", `${old}.plist`);
   if (existsSync(oldPlist)) {
     spawnSync("launchctl", ["unload", "-w", oldPlist], { stdio: "ignore" });
     rmSync(oldPlist, { force: true });
   }
 }
 
-function installLaunchd(): void {
-  evictOldLaunchd();
-  const plist = launchAgentPath();
+function installLaunchd(kind: ServiceKind): void {
+  evictOldLaunchd(kind);
+  const plist = launchAgentPath(kind);
   mkdirSync(dirname(plist), { recursive: true });
-  writeFileSync(plist, launchdPlist());
+  writeFileSync(plist, launchdPlist(kind));
   // Unload a prior copy (ignore failure — it may not be loaded), then load with -w so
   // it's enabled across reboots.
   spawnSync("launchctl", ["unload", plist], { stdio: "ignore" });
@@ -151,9 +186,9 @@ function installLaunchd(): void {
   }
 }
 
-function uninstallLaunchd(): void {
-  evictOldLaunchd();
-  const plist = launchAgentPath();
+function uninstallLaunchd(kind: ServiceKind): void {
+  evictOldLaunchd(kind);
+  const plist = launchAgentPath(kind);
   if (existsSync(plist)) {
     spawnSync("launchctl", ["unload", "-w", plist], { stdio: "ignore" });
     rmSync(plist, { force: true });
@@ -162,65 +197,122 @@ function uninstallLaunchd(): void {
 
 // ── Linux (systemd --user) ───────────────────────────────────────────────────────
 
-function systemdUnitPath(): string {
+function systemdUnitPath(kind: ServiceKind = "harbor"): string {
   const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(base, "systemd", "user", UNIT);
+  return join(base, "systemd", "user", SPECS[kind].unit);
 }
 
-function systemdUnit(): string {
-  const exec = [nodeBinaryPath(), harborLauncherPath(), "run"].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+// One systemd word: double-quoted with C-style escapes, and `%` doubled — systemd
+// expands %-specifiers inside ExecStart= and Environment=, so a path or value with a
+// literal % would otherwise be rewritten (or rejected) when the unit loads.
+function sdQuote(s: string): string {
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
+}
+
+// The unit, hardened as far as a --user unit can go everywhere:
+//   • NoNewPrivileges — nothing the agent runs can gain privileges (no sudo, no
+//     setuid helpers). A routine allowed `bash` runs with exactly the user's rights.
+//   • UMask=0077 — every file it creates (results, logs, staged media) is owner-only.
+//   • StartLimit* — Restart=on-failure with no limit restarted a harbor that crashes
+//     at boot every few seconds forever; five tries in five minutes, then it stays
+//     down and `systemctl --user status` says why.
+//   • KillMode=mixed — SIGTERM reaches the harbor alone, so its shutdown handler can
+//     revoke its sessions; anything still running (MCP servers it spawned) is killed
+//     after TimeoutStopSec.
+// Deliberately NOT here: ProtectSystem/ProtectHome/PrivateTmp and the rest of the
+// namespace family. In a user manager they need unprivileged user namespaces, and
+// where those are off (many VPS kernels, hardened distros) systemd refuses to start
+// the unit at all (status=226/NAMESPACE). Run the harbor as a dedicated user instead
+// — that is the boundary that works on every box.
+function systemdUnit(kind: ServiceKind = "harbor"): string {
+  const exec = [nodeBinaryPath(), launcherPath(kind), "run"].map(sdQuote).join(" ");
   const envLines = Object.entries(forwardedEnv())
-    .map(([k, v]) => `Environment=${k}=${v}`)
+    .map(([k, v]) => `Environment=${sdQuote(`${k}=${v}`)}`)
     .join("\n");
   return `[Unit]
-Description=Privateer resident agent harbor (routines + app-driven task spawns)
+Description=${SPECS[kind].description}
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart=${exec}
 Restart=on-failure
-RestartSec=5
-${envLines}
-
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+KillMode=mixed
+TimeoutStopSec=15
+${envLines ? `${envLines}\n` : ""}
 [Install]
 WantedBy=default.target
 `;
 }
 
+/** The generated systemd unit text (exported for tests). */
+export function systemdUnitText(kind: ServiceKind = "harbor"): string {
+  return systemdUnit(kind);
+}
+
 // Evict a pre-rename systemd --user unit (privateer-daemon.service) if present, so the
 // harbor rename doesn't leave the old unit enabled alongside the new one.
-function evictOldSystemd(): void {
+function evictOldSystemd(kind: ServiceKind): void {
+  const old = SPECS[kind].oldUnit;
+  if (!old) return;
   const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  const oldUnit = join(base, "systemd", "user", OLD_UNIT);
+  const oldUnit = join(base, "systemd", "user", old);
   if (existsSync(oldUnit)) {
-    spawnSync("systemctl", ["--user", "disable", "--now", OLD_UNIT], { stdio: "ignore" });
+    spawnSync("systemctl", ["--user", "disable", "--now", old], { stdio: "ignore" });
     rmSync(oldUnit, { force: true });
     spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
   }
 }
 
-function installSystemd(): void {
-  evictOldSystemd();
-  const unit = systemdUnitPath();
+// The login name to linger. $USER is unset under cron, `su -c`, some container shells
+// and CI — and `loginctl enable-linger ""` silently did nothing, so the service died
+// with the SSH session that installed it. The passwd entry is the reliable answer.
+function loginName(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return process.env.USER || process.env.LOGNAME || "";
+  }
+}
+
+function installSystemd(kind: ServiceKind): void {
+  // A box with no systemd user manager (a Docker/LXC container, WSL without systemd)
+  // used to fail with systemctl's own cryptic error. Say what to do instead.
+  const probe = spawnSync("systemctl", ["--user", "show-environment"], { encoding: "utf8" });
+  if (probe.error || probe.status !== 0) {
+    throw new Error(
+      `No systemd user manager here (${(probe.stderr || probe.error?.message || `exit ${probe.status}`).trim()}). ` +
+        `Run \`privateer ${kind} run\` under your own supervisor (a container's restart policy, supervisord, tmux) instead.`,
+    );
+  }
+  evictOldSystemd(kind);
+  const unit = systemdUnitPath(kind);
   mkdirSync(dirname(unit), { recursive: true });
-  writeFileSync(unit, systemdUnit());
+  writeFileSync(unit, systemdUnit(kind));
   spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
   // enable-linger so the user service keeps running with no active login session —
   // the whole point of "reachable even when no shell is open". Best-effort: it needs
   // no root on most distros, but don't fail the install if it's disallowed.
-  spawnSync("loginctl", ["enable-linger", process.env.USER || ""], { stdio: "ignore" });
-  const r = spawnSync("systemctl", ["--user", "enable", "--now", UNIT], { encoding: "utf8" });
+  const user = loginName();
+  if (user) spawnSync("loginctl", ["enable-linger", user], { stdio: "ignore" });
+  // Clear a StartLimit hit from an earlier, broken install, so --now actually starts it.
+  spawnSync("systemctl", ["--user", "reset-failed", SPECS[kind].unit], { stdio: "ignore" });
+  const r = spawnSync("systemctl", ["--user", "enable", "--now", SPECS[kind].unit], { encoding: "utf8" });
   if (r.status !== 0) {
     throw new Error(`systemctl enable failed: ${(r.stderr || r.stdout || "").trim() || `exit ${r.status}`}`);
   }
 }
 
-function uninstallSystemd(): void {
-  evictOldSystemd();
-  const unit = systemdUnitPath();
-  spawnSync("systemctl", ["--user", "disable", "--now", UNIT], { stdio: "ignore" });
+function uninstallSystemd(kind: ServiceKind): void {
+  evictOldSystemd(kind);
+  const unit = systemdUnitPath(kind);
+  spawnSync("systemctl", ["--user", "disable", "--now", SPECS[kind].unit], { stdio: "ignore" });
   if (existsSync(unit)) rmSync(unit, { force: true });
   spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
 }
@@ -273,10 +365,14 @@ export function unitProgramPaths(platform: NodeJS.Platform, unitPath: string): s
   if (platform === "linux") {
     const line = body.match(/^ExecStart=(.*)$/m);
     if (!line) return null;
-    // Written as single-quoted words with '\'' for an embedded quote (systemdUnit()).
-    const args = [...line[1].matchAll(/'((?:[^']|'\\'')*)'|(\S+)/g)].map((m) =>
-      m[1] !== undefined ? m[1].replace(/'\\''/g, "'") : m[2],
-    );
+    // Today's units write double-quoted words with C escapes and %% (sdQuote). Units
+    // installed before that wrote single-quoted words with '\'' for an embedded quote;
+    // both are still out there, so both parse.
+    const args = [...line[1].matchAll(/"((?:[^"\\]|\\.)*)"|'((?:[^']|'\\'')*)'|(\S+)/g)].map((m) => {
+      if (m[1] !== undefined) return m[1].replace(/\\(.)/g, "$1").replace(/%%/g, "%");
+      if (m[2] !== undefined) return m[2].replace(/'\\''/g, "'");
+      return m[3];
+    });
     return args.length ? args : null;
   }
   return null;
@@ -326,46 +422,69 @@ export function unitNeedsRefresh(platform: NodeJS.Platform, unitPath: string): b
     return false;
   }
   if (platform === "darwin" && /<key>KeepAlive<\/key>\s*<true\s*\/>/.test(body)) return true;
+  // The Linux twin of the always-restart plist: no StartLimitBurst means a harbor that
+  // crashes at boot is restarted every few seconds, forever.
+  if (platform === "linux" && !/^StartLimitBurst=/m.test(body)) return true;
   const args = unitProgramPaths(platform, unitPath);
   if (args?.[0] && interpreterIsElectron(args[0]) && !/ELECTRON_RUN_AS_NODE/.test(body)) return true;
   return false;
 }
 
-function unitPathFor(platform: NodeJS.Platform): string {
-  if (platform === "darwin") return launchAgentPath();
-  if (platform === "linux") return systemdUnitPath();
+function unitPathFor(platform: NodeJS.Platform, kind: ServiceKind): string {
+  if (platform === "darwin") return launchAgentPath(kind);
+  if (platform === "linux") return systemdUnitPath(kind);
   return "";
 }
 
-export function serviceInfo(): ServiceInfo {
+export function serviceInfo(kind: ServiceKind = "harbor"): ServiceInfo {
   const platform = process.platform;
-  const unitPath = unitPathFor(platform);
+  const unitPath = unitPathFor(platform, kind);
   return {
     platform,
     supported: platform === "darwin" || platform === "linux",
     installed: !!unitPath && existsSync(unitPath),
     unitPath,
-    logPath: harborLogPath(),
+    logPath: logLocation(kind, platform),
     needsRefresh: unitNeedsRefresh(platform, unitPath),
     stale: !!unitPath && unitIsStale(platform, unitPath),
   };
 }
 
 // Install the service for the current platform. Idempotent (rewrites + reloads).
-export function installService(): ServiceInfo {
+export function installService(kind: ServiceKind = "harbor"): ServiceInfo {
   const platform = process.platform;
-  if (platform === "darwin") installLaunchd();
-  else if (platform === "linux") installSystemd();
-  else throw new Error(`Auto-start isn't supported on ${platform}. Run \`privateer harbor\` yourself, or keep a terminal open.`);
-  return serviceInfo();
+  if (platform === "darwin") installLaunchd(kind);
+  else if (platform === "linux") installSystemd(kind);
+  else throw new Error(`Auto-start isn't supported on ${platform}. Run \`privateer ${kind}\` yourself, or keep a terminal open.`);
+  return serviceInfo(kind);
 }
 
-export function uninstallService(): ServiceInfo {
+export function uninstallService(kind: ServiceKind = "harbor"): ServiceInfo {
   const platform = process.platform;
-  if (platform === "darwin") uninstallLaunchd();
-  else if (platform === "linux") uninstallSystemd();
+  if (platform === "darwin") uninstallLaunchd(kind);
+  else if (platform === "linux") uninstallSystemd(kind);
   else throw new Error(`No service to remove on ${platform}.`);
-  return serviceInfo();
+  return serviceInfo(kind);
+}
+
+// `privateer channels status`: the unit, and which platforms the runner is serving
+// right now (its heartbeat — channels/status.ts). Imported lazily: status.ts is
+// import-safe, but this module should not pay for it on the harbor's paths.
+export async function channelsStatusReport(): Promise<string> {
+  const info = serviceInfo("channels");
+  const { readRunningPlatforms } = await import("../channels/status.ts");
+  const live = [...readRunningPlatforms()];
+  const lines = [
+    `platform:  ${info.platform}${info.supported ? "" : " (auto-start unsupported — run `privateer channels` manually)"}`,
+    `service:   ${info.installed ? `installed (${info.unitPath})${info.stale ? " — STALE: run `privateer channels uninstall`" : info.needsRefresh ? " — needs rewriting; run `privateer channels install`" : ""}` : "not installed"}`,
+    `channels:  ${live.length ? `serving ${live.join(", ")}` : "not running (no fresh heartbeat)"}`,
+    `logs:      ${info.logPath}`,
+  ];
+  if (info.installed && !live.length) {
+    lines.push("hint:      installed but not serving — check the log. With no channels.<platform> block in config.json it exits on purpose.");
+  }
+  lines.push("note:      channel changes from the app apply on restart (`privateer channels install` restarts it).");
+  return lines.join("\n");
 }
 
 // Human-readable status for `privateer harbor status`: whether the service is
@@ -406,12 +525,20 @@ export async function statusReport(): Promise<string> {
 }
 
 // Best-effort read of the tail of the harbor log (for a `status --log` affordance or
-// error surfacing). Returns "" if absent.
+// error surfacing). Returns "" if absent. Reads only the last `maxBytes` — the log can
+// be megabytes, and this used to load all of it to keep 4 KB.
 export function tailHarborLog(maxBytes = 4_000): string {
+  let fd: number | undefined;
   try {
-    const buf = readFileSync(harborLogPath(), "utf8");
-    return buf.length > maxBytes ? buf.slice(buf.length - maxBytes) : buf;
+    fd = openSync(logFilePath("harbor"), "r");
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString("utf8");
   } catch {
     return "";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }

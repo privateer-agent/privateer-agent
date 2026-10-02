@@ -66,6 +66,8 @@ import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlre
 import { serializeBuild } from "./buildLock.ts";
 import { createAccountLease } from "./accountLease.ts";
 import { closeSession } from "./closeSession.ts";
+import { rotateLogIfLarge } from "./logRotate.ts";
+import { logFilePath } from "./service.ts";
 import { isHosted, publishRelayPub, webEnabled, mediaEnabled } from "../config/hosted.ts";
 import { relayExposureAllowed } from "../config/relayExposure.ts";
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
@@ -715,6 +717,8 @@ export class Harbor {
     // returns immediately once a client exists, or while remote access is off.
     this.syncRelay();
     void this.flushPendingCloud();
+    // Bound the log launchd appends us to (see logRotate.ts). A stat a minute.
+    if (rotateLogIfLarge(logFilePath("harbor"))) log("rotated harbor.log (previous kept as harbor.log.1)");
     const now = Date.now();
     for (const r of loadRoutines()) {
       if (!r.enabled || this.running.has(r.id)) continue;

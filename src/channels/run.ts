@@ -53,6 +53,8 @@ import { modelRegistryOf } from "../providers/piAuthStore.ts";
 import { WEB_TOOL_NAMES } from "../tools/web.ts";
 import { CRYPTO_TOOL_NAMES } from "../tools/crypto.ts";
 import { MEDIA_TOOL_NAMES } from "../tools/media.ts";
+import { rotateLogIfLarge } from "../harbor/logRotate.ts";
+import { logFilePath } from "../harbor/service.ts";
 
 // Read-only default toolset — same rationale as the routines harbor's SAFE_TOOLS:
 // a turn nobody is watching can't mutate the filesystem or shell out. Now that the
@@ -147,10 +149,19 @@ async function main() {
 
   // ── config ──────────────────────────────────────────────────────────────────
   let cfg: any = {};
+  let raw: string;
   try {
-    cfg = JSON.parse(readFileSync(configPath(), "utf8"));
+    raw = readFileSync(configPath(), "utf8");
   } catch {
-    log(`no config at ${configPath()} — add a channels block (see run.ts header).`);
+    // Nothing configured yet is a clean exit (see the no-bridges case below for why).
+    log(`no config at ${configPath()} — add a channels block (see run.ts header), or set channels up from the app.`);
+    process.exit(0);
+  }
+  try {
+    cfg = JSON.parse(raw);
+  } catch (e) {
+    // A config that exists but won't parse IS a failure: say so, and exit non-zero.
+    log(`can't parse ${configPath()}: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
   const ch = cfg.channels ?? {};
@@ -404,15 +415,23 @@ async function main() {
   }
 
   if (bridges.length === 0) {
-    log("no channels started — configure a channels.<platform> block in config.json.");
-    process.exit(1);
+    // Exit 0, not 1: under the login service (`privateer channels install`) a failure
+    // exit is restarted, and "nothing configured yet" doesn't get better by retrying —
+    // it got restarted until systemd's start limit, filling the log with this line.
+    // Configure a channel (from the app or config.json), then start it again.
+    log("no channels started — configure a channels.<platform> block in config.json (or from the app), then run `privateer channels install` again.");
+    process.exit(0);
   }
 
   // Heartbeat: announce the live platforms now and refresh on a cadence so the app's
   // channels manager can tell running from merely-configured. A stale/absent file
   // reads as offline (see channels/status.ts).
   writeChannelsStatus(startedPlatforms);
-  const heartbeat = setInterval(() => writeChannelsStatus(startedPlatforms), HEARTBEAT_MS);
+  const heartbeat = setInterval(() => {
+    writeChannelsStatus(startedPlatforms);
+    // Bound the log launchd appends to (macOS service; a no-op elsewhere). See logRotate.ts.
+    if (rotateLogIfLarge(logFilePath("channels"))) log("rotated channels.log (previous kept as channels.log.1)");
+  }, HEARTBEAT_MS);
   heartbeat.unref?.();
 
   const shutdown = () => {

@@ -36,7 +36,7 @@ callbacks firing, the adapter really spawning a server, and MCP tools passing th
 Useful throughout — watch the harbor while you drive from the phone:
 
 ```bash
-tail -f ~/.privateer/harbor.log     # adjust if your log path differs
+tail -f ~/.privateer/harbor.log     # macOS; on Linux: journalctl --user -u privateer-harbor -f
 ```
 
 Config the harbor reads (both should change as you act from the app):

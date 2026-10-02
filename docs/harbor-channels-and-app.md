@@ -31,7 +31,7 @@ Three long-lived agent roles, each a separate process/session:
 |------|---------|---------|--------|
 | **Interactive terminal** | `privateer` TUI (`src/main.ts` → `cli/chat.ts`) | The coding agent a human types at | Optional, per session, when the user enables remote-access |
 | **Harbor** | `src/harbor/index.ts` (`privateer harbor`) | Runs **scheduled routines**; hosts the app-facing **management** surface (routines + channels config) | Always, when the account is signed in |
-| **Channels harbor** | `src/channels/run.ts` (`npm run channels`) | Bridges **Telegram/Slack/Discord/WhatsApp** chats to agent turns | No relay — reads config from disk |
+| **Channels harbor** | `src/channels/run.ts` (`privateer channels`, or `privateer channels install` as a login service) | Bridges **Telegram/Slack/Discord/WhatsApp** chats to agent turns | No relay — reads config from disk |
 
 The **relay** is a server-forwarded WebSocket that lets the app drive a terminal.
 The **REST** endpoints handle account login (device-code), session listing, and the

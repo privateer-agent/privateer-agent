@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchdPlist, unitNeedsRefresh, unitIsStale, unitProgramPaths } from "../src/harbor/service.ts";
+import { launchdPlist, systemdUnitText, unitNeedsRefresh, unitIsStale, unitProgramPaths } from "../src/harbor/service.ts";
 
 const DIR = mkdtempSync(join(tmpdir(), "priv-service-"));
 test.after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* best effort */ } });
@@ -45,10 +45,8 @@ test("unitNeedsRefresh flags a pre-fix plist and clears once rewritten", () => {
   writeFileSync(fresh, launchdPlist());
   assert.equal(unitNeedsRefresh("darwin", fresh), false, "what we generate today is current");
 
-  // Narrow by design: a missing file isn't a refresh prompt, and Linux's unit
-  // already carries the right policy (Restart=on-failure), so it is never flagged.
+  // Narrow by design: a missing file isn't a refresh prompt.
   assert.equal(unitNeedsRefresh("darwin", join(DIR, "nope.plist")), false);
-  assert.equal(unitNeedsRefresh("linux", old), false);
 });
 
 // ── The unit that outlives the software it points at ────────────────────────────
@@ -135,4 +133,53 @@ test("unitNeedsRefresh flags an Electron unit with no ELECTRON_RUN_AS_NODE", () 
   const stale = join(DIR, "stale.plist");
   writeFileSync(stale, plistWith([join(DIR, "vanished"), launcher, "run"]));
   assert.equal(unitNeedsRefresh("darwin", stale), false);
+});
+
+// ── systemd: hardening, quoting, and the restart loop ───────────────────────────
+
+test("the systemd unit is hardened as far as a user unit can go everywhere", () => {
+  const unit = systemdUnitText();
+  for (const line of ["NoNewPrivileges=yes", "UMask=0077", "KillMode=mixed", "StartLimitBurst=5", "Restart=on-failure"]) {
+    assert.match(unit, new RegExp(`^${line}$`, "m"), line);
+  }
+  // The namespace family fails the unit outright (226/NAMESPACE) where unprivileged
+  // user namespaces are off, which is many VPSes — so it must not creep in.
+  assert.doesNotMatch(unit, /^(ProtectSystem|ProtectHome|PrivateTmp|PrivateUsers)=/m);
+  // StartLimit* belong in [Unit]; in [Service] systemd ignores them with a warning.
+  assert.ok(unit.indexOf("StartLimitBurst") < unit.indexOf("[Service]"));
+});
+
+test("ExecStart round-trips paths with spaces, quotes and % through systemd quoting", () => {
+  const unitPath = join(DIR, "quoted.service");
+  writeFileSync(unitPath, '[Service]\nExecStart="/opt/my node/bin/node" "/home/a \\"q\\"/100%%/harbor.mjs" "run"\n');
+  assert.deepEqual(unitProgramPaths("linux", unitPath), ["/opt/my node/bin/node", '/home/a "q"/100%/harbor.mjs', "run"]);
+  // What we generate today parses back to the real interpreter and launcher.
+  const ours = join(DIR, "ours.service");
+  writeFileSync(ours, systemdUnitText());
+  const args = unitProgramPaths("linux", ours)!;
+  assert.equal(args[0], process.execPath);
+  assert.match(args[1]!, /bin[/\\]privateer-harbor\.mjs$/);
+  assert.equal(args[2], "run");
+});
+
+test("a Linux unit with no start limit wants rewriting; today's does not", () => {
+  const launcher = join(DIR, "h.mjs");
+  writeFileSync(launcher, "");
+  const old = join(DIR, "old.service");
+  writeFileSync(old, `[Service]\nExecStart='${process.execPath}' '${launcher}' 'run'\nRestart=on-failure\n`);
+  assert.equal(unitNeedsRefresh("linux", old), true, "Restart=on-failure with no limit restarts a boot crash forever");
+  const ours = join(DIR, "current.service");
+  writeFileSync(ours, systemdUnitText());
+  assert.equal(unitNeedsRefresh("linux", ours), false);
+});
+
+test("channels get their own unit: label, launcher and log", () => {
+  const plist = launchdPlist("channels");
+  assert.match(plist, /<string>pro\.privateer\.channels<\/string>/);
+  assert.match(plist, /privateer-channels\.mjs<\/string>/);
+  assert.match(plist, /channels\.log<\/string>/);
+  assert.match(systemdUnitText("channels"), /privateer-channels\.mjs" "run"/);
+  // And the harbor's is untouched by the generalisation.
+  assert.match(launchdPlist(), /<string>pro\.privateer\.harbor<\/string>/);
+  assert.match(launchdPlist(), /harbor\.log<\/string>/);
 });

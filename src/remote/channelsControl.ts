@@ -21,13 +21,14 @@
  * Framework-agnostic: nothing here imports React or the relay. The caller owns the
  * frame plumbing and the running-presence read.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { configPath } from "../config/paths.ts";
 // The platform roster, per-platform secret field names, and the "is this block
 // startable" predicate all live in ONE place, shared with the channels runtime —
 // see channels/platforms.ts. Re-exported here so existing importers of
 // CHANNEL_PLATFORMS/ChannelPlatform from this module keep working unchanged.
 import { CHANNEL_PLATFORMS, SECRET_FIELDS, isChannelPlatform, type ChannelPlatform } from "../channels/platforms.ts";
+import { writeFileAtomic } from "../util/atomicWrite.ts";
 
 export { CHANNEL_PLATFORMS };
 export type { ChannelPlatform };
@@ -161,7 +162,7 @@ export function makeChannelsControl(opts: {
 
       cfg.channels[draft.platform] = block;
       try {
-        writeFileSync(configPath(), JSON.stringify(cfg, null, 2));
+        writeFileAtomic(configPath(), JSON.stringify(cfg, null, 2) + "\n");
       } catch (e) {
         return { ok: false, message: `Couldn't write config: ${e instanceof Error ? e.message : String(e)}` };
       }
@@ -174,7 +175,7 @@ export function makeChannelsControl(opts: {
       if (!cfg.channels?.[platform]) return { ok: false, message: "Not configured." };
       delete cfg.channels[platform];
       try {
-        writeFileSync(configPath(), JSON.stringify(cfg, null, 2));
+        writeFileAtomic(configPath(), JSON.stringify(cfg, null, 2) + "\n");
       } catch (e) {
         return { ok: false, message: `Couldn't write config: ${e instanceof Error ? e.message : String(e)}` };
       }
