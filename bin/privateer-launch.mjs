@@ -868,7 +868,9 @@ else {
   // command, or `privateer fresh` from another terminal can swap this agent for a new
   // process with the old tree reaped. Print/export/version runs have nothing to swap.
   const tuiArgs = (launchArgs) => [...nodeArgs, CLI, ...modelArgsFor(launchArgs), ...extArgs, ...skillArgs, ...launchArgs];
-  if (isNonInteractive) runToCompletion(NODE_BIN, tuiArgs(args));
+  // forwardSignals: a `kill` reaches only this launcher, and a -p run left behind keeps
+  // working (and spending) with nobody waiting for its answer.
+  if (isNonInteractive) runToCompletion(NODE_BIN, tuiArgs(args), { forwardSignals: true });
   else runSupervised(NODE_BIN, (first) => tuiArgs(first ? args : filterRespawnArgs(args)), { home: PRIVATEER_HOME });
 }
 
