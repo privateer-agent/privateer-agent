@@ -40,6 +40,7 @@ import { updatePostureBadge } from "./privateer-posture.ts";
 import { childSpendAllows } from "../src/permissions/childSpend.ts";
 import { CliSpendLedger, headlessSpendGuidance, isSpendRequest, readCliSpendGrant } from "../src/permissions/cliSpend.ts";
 import { BILLED_MEDIA_TOOLS } from "../src/permissions/classify.ts";
+import { privateModeFromEnv } from "../src/permissions/privateMode.ts";
 import type { PermissionRequest } from "../src/permissions/gate.ts";
 import { HeadlessAppApprover } from "../src/remote/headlessApproval.ts";
 import { describeErrorText } from "../src/engine/errors.ts";
@@ -694,7 +695,9 @@ export default function privateerControl(pi: any): void {
   // prompt, before it plans). Quiet when nothing billable is enabled, or when no quarter
   // lifts the gate anyway.
   function uncoveredBilledTools(): string[] {
-    if (noQuarterActive()) return [];
+    // Private mode refuses every billed tool outright (they send text off the machine),
+    // so "add --allow-spend" would be advice that cannot work.
+    if (noQuarterActive() || privateModeFromEnv()) return [];
     const active: string[] = (() => {
       try {
         return pi.getActiveTools?.() ?? [];
@@ -749,6 +752,25 @@ export default function privateerControl(pi: any): void {
     return { systemPrompt: `${event.systemPrompt}\n\n# Billing in this run\n${lines.join("\n")}` };
   });
   pi.on("session_shutdown", () => appApprover?.close());
+
+  // Private mode (src/permissions/privateMode.ts), told to the model before it plans:
+  // otherwise it reaches for web_search, gets refused, and narrates the refusal instead
+  // of doing the local work. And the reply is the one channel the gate can't close, so
+  // the model is asked to keep raw records out of it — a request, not a control.
+  pi.on("before_agent_start", (event: any) => {
+    if (!privateModeFromEnv()) return;
+    return {
+      systemPrompt:
+        `${event.systemPrompt}\n\n# Private mode\n` +
+        "This run handles data that must not leave this machine except through a verified-private model. " +
+        "Only local tools work: read, grep, find, ls, write, edit, and shell commands that don't use the network. " +
+        "Web, MCP, media and upload tools, and network commands, are refused. Every tool is refused if the model " +
+        "can't be verified as private; if that happens, stop and say so.\n" +
+        "Your reply leaves private mode: whoever asked will see it. Answer exactly what was asked. Don't quote raw " +
+        "records, names, emails, identifiers or other personal data from the files unless the task explicitly asks " +
+        "for them. When asked for detail, write it to a file and reply with the path.",
+    };
+  });
 
   // Print mode prints a failed turn's raw SDK text — "401 status code (no body)",
   // "Connection error." — and exits. Follow it with what that means and what to do,

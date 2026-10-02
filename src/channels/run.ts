@@ -332,7 +332,12 @@ async function main() {
         // in providers/account.ts hangs off `before_agent_start`, which pi's prompt()
         // never reaches — it throws on its own `hasConfiguredAuth` precheck first.
         if (model?.provider === "privateer") await ensureAccountArmed(undefined);
-        await approvalCtx.run({ bridge, chatId, posture: effectivePosture }, () => session.prompt(text));
+        // A chat message is never a command: with expansion on, Pi runs a leading
+        // `/name` as an extension command, so any chat member could send `/privacy off`
+        // or `/privacy allow *` (persisted to config.json). Same rule as ACP.
+        await approvalCtx.run({ bridge, chatId, posture: effectivePosture }, () =>
+          session.prompt(text, { expandPromptTemplates: false }),
+        );
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       } finally {

@@ -57,7 +57,8 @@ fields optional:
     "model":   "openrouter/openai/gpt-4o-mini",
     "tools":   ["read", "grep", "find", "ls"],
     "posture": "approve",
-    "cwd":     "/path/to/project"
+    "cwd":     "/path/to/project",
+    "private": false
   }
 }
 ```
@@ -68,6 +69,7 @@ fields optional:
 | `tools` | `read`, `grep`, `find`, `ls` (+ web tools if web is enabled) | **Hard ceiling.** The host cannot widen it — not via `session/new`, not via anything. Media-generation tools are opt-in only (they spend your account's credit). |
 | `posture` | `approve` | `readonly` — plan mode, remote asks are denied outright, never prompted. `approve` — the host renders each ask. `auto` — non-dangerous actions run unattended; dangerous shell and destructive tools still come back to the host as asks (weaker than `--no-quarter`, which clears those too). |
 | `cwd` | the process's spawn cwd | **The confinement root** for both tools and the permission gate. |
+| `private` | `false` | **Private mode.** No tool runs unless the session's model is verified-private (`tee-verified` or `local`), only on-machine tools run, network shell commands are refused, and a failed tool's error text is not sent to the host. Nothing the host answers lifts it. Also `privateer acp --private`. For handing over data the host must not see; see [`private-handoff.md`](private-handoff.md). |
 
 ### ⚠️ The cwd footgun
 
@@ -91,6 +93,7 @@ questions. Pick by one thing — does anything need approving?
 | Let a one-shot run spend on named billing tools, capped | `privateer -p --allow-spend generate_video --max-calls 1 --max-spend 1.00 "…"` |
 | Have a person approve from their phone while a one-shot runs | `privateer -p --approve-in-app "…"` |
 | **Have your program answer each approval itself** | `privateer acp` (this page) |
+| Hand over files your program must not read itself | `privateer -p --private "…"`, or `acp.private` (see [`private-handoff.md`](private-handoff.md)) |
 
 A `-p` run with none of those flags **denies** every approval, because nobody is there to
 ask. It says so at startup (on stderr) and in the model's instructions, so neither you nor
@@ -243,6 +246,9 @@ Stated plainly so nobody discovers them in production:
 - **MCP servers offered by the host are ignored.** `session/new` may list `mcpServers`;
   they are logged and skipped. Connectors configured locally are unaffected on other
   surfaces, but they do not load on the ACP path.
+- **Prompt text is never a command.** A leading `/name` in a prompt is sent to the model as
+  text, not run as an extension command, so a host (or anyone posting to it) can't send
+  `/privacy off`.
 - **No images or audio in prompts** — advertised as unsupported; if a host sends them
   anyway they render as `[image attached: …]` placeholders.
 - **No session resume** (`loadSession: false`). The host owns durable history — under

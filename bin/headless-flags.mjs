@@ -137,6 +137,46 @@ export function extractHeadlessFlags(args) {
   };
 }
 
+/** The env var carrying `--private` (permissions/privateMode.ts) into every gate. */
+export const PRIVATE_ENV = "PRIVATEER_PRIVATE";
+
+/**
+ * Strip `--private` from `args` (in place). Returns true when it was there.
+ *
+ * Valid for any launch — the TUI, `-p`, `acp` — because it only ever makes a run
+ * stricter: tools run only while the model is verified-private, and only tools that
+ * stay on this machine. Unlike the spend env vars, an exported PRIVATEER_PRIVATE is
+ * honoured too, for the same reason.
+ */
+export function extractPrivateFlag(args) {
+  let found = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--") break;
+    if (args[i] === "--private") {
+      args.splice(i, 1);
+      i--;
+      found = true;
+    }
+  }
+  return found;
+}
+
+/**
+ * Why these args can't run in private mode, or null. `--mode json` streams every event
+ * to stdout, tool results included — the contents of every file the run read, handed to
+ * the very caller private mode exists to keep them from. `-p` prints only the answer.
+ */
+export function privateProblem(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") break;
+    if ((a === "--mode" && args[i + 1] === "json") || a === "--mode=json") {
+      return "--private can't be combined with --mode json: JSON mode streams every tool result (the files this run reads) to stdout. Use -p, which prints only the answer, or `privateer acp`.";
+    }
+  }
+  return null;
+}
+
 // Pi's own subcommands. Pi recognizes each only as args[0], so the launcher must hand
 // them over with NOTHING in front — the normal launch prepends --model, -e and --skill,
 // which is exactly how `privateer auth check` used to become a chat message.

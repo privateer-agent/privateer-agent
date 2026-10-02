@@ -18,6 +18,7 @@ import { classifyToolCall } from "../permissions/classify.ts";
 import { redactText } from "../util/redact.ts";
 import { coauthorGitCommits } from "../util/coauthor.ts";
 import { DEFAULT_DENYLIST } from "../permissions/danger.ts";
+import { privateModeFromEnv, privateRefusal, type ModelRef } from "../permissions/privateMode.ts";
 
 // The per-tool_call hook context we read (structural subset of Pi's ctx — kept
 // local so the gate stays import-order-safe and unit-testable).
@@ -25,6 +26,8 @@ export interface ToolCallCtx {
   signal?: AbortSignal;
   hasUI?: boolean;
   mode?: "tui" | "rpc" | "json" | "print" | string;
+  // The session's current model — what private mode checks before any tool runs.
+  model?: ModelRef;
   // Pi's ExtensionUIContext shape (verified against pi-coding-agent 0.80):
   // select(title, options: string[]) → chosen string | undefined; confirm(title, message).
   ui?: {
@@ -54,6 +57,11 @@ export interface GateController {
   // launch flag (env PRIVATEER_NO_QUARTER); when true the gate auto-allows every
   // action with no prompt.
   getSkipAllPermissions?(): boolean;
+  // Private mode (permissions/privateMode.ts): no tool runs unless the session's model is
+  // verified-private, and only tools that stay on this machine run at all. ORed with
+  // PRIVATEER_PRIVATE, which any controller honours, so a controller can switch it on but
+  // never off.
+  getPrivate?(): boolean;
   // Billing tools the operator authorized before this run started, so an unattended
   // session can spend what it was told it may spend instead of denying every media
   // call for want of a human. Lifts `alwaysAsk` and nothing else — see
@@ -136,6 +144,13 @@ export async function decideToolCall(
       block: true,
       reason: `${toolName} is unavailable while this terminal is driven remotely — its prompts can't reach the app. Complete the task without it, or ask the operator to run it from the terminal directly.`,
     };
+  }
+
+  // Private mode sits above every mode, allowlist and approval: nothing a person or a
+  // host answers can show a file to an unverified model or send it off the machine.
+  if (ctrl.getPrivate?.() || privateModeFromEnv()) {
+    const refusal = await privateRefusal(toolName, input, ctx.model);
+    if (refusal) return { block: true, reason: refusal };
   }
 
   const req = classifyToolCall(toolName, input, {

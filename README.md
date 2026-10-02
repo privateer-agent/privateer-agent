@@ -54,6 +54,10 @@ Privateer runs in three places, over one account and one config: the **terminal*
 - **Privacy you can verify, not just trust.** Confidential-enclave (TEE) inference is
   cryptographically **attested** — not a policy promise — and an **on-device PII gate**
   warns before structured personal data ever leaves your machine for an unverified model.
+- **A private subagent for your other agents.** Claude Code, Codex, or your own orchestrator
+  can hand Privateer the files it shouldn't read itself: `privateer -p --private "…"` reads
+  them on your machine, reasons over them in an attested enclave, and returns only the
+  answer. See [Hand off sensitive work](#hand-off-sensitive-work-to-privateer).
 - **It's Pi underneath.** Privateer is a distribution of the [Pi](https://pi.dev) coding agent —
   every Pi extension, skill, and command works, and Privateer's own features are just extensions
   you can read, swap, or build on. Nothing to compile. See [Built on Pi](#built-on-pi).
@@ -545,6 +549,8 @@ setup, config, and limitations: [`docs/acp.md`](docs/acp.md).
 Driving Privateer from **your own program or agent**? ACP is how that program gets asked:
 every approval arrives as a `session/request_permission` call it answers. The wire format,
 option ids and a minimal client are in [`docs/acp.md`](docs/acp.md#driving-privateer-from-another-agent).
+Handing it data your program shouldn't see? Set `"private": true` in the `acp` block; see
+[Hand off sensitive work](#hand-off-sensitive-work-to-privateer).
 
 ### One-shot runs (`-p`) and spending
 
@@ -565,6 +571,36 @@ privateer -p --approve-in-app --approval-timeout 300 "make a 6s intro clip"
 call. `media_capabilities` shows the same prices. A call that can't be priced is refused
 under a dollar cap rather than let through. `--approve-in-app` reaches the app while it's
 open or running in the background.
+
+## Hand off sensitive work to Privateer
+
+Your coding agent's context goes to its provider. When a task touches files that
+shouldn't (patient records, a customer export, payroll, a database dump), the agent can
+hand that part to Privateer instead of reading the files itself:
+
+```bash
+privateer -p --private --model privateer/tinfoil/gemma4-31b \
+  "Read customers/export.csv. Reply with the number of customers per country. No row-level data."
+```
+
+The calling agent passes file *names*. Privateer reads the files on this machine, reasons
+over them on a verified-private model, and prints only the answer. `--private` is what
+makes that a guarantee rather than a hope:
+
+- **No file reaches an unverified model.** Before every tool call the model must be
+  `tee-verified` (an enclave quote Privateer checked itself) or `local`. A ZDR route, a
+  standard provider, or a failed attestation refuses the tool.
+- **Nothing leaves through a tool.** Only on-machine tools run. Web, MCP, media, uploads
+  and network shell commands (`curl`, `ssh`, `git push`, …) are refused.
+- **Nothing lifts it.** It sits above permission modes and approvals, `--no-quarter`
+  included, and subagents inherit it.
+- **The caller sees only the answer.** `-p` prints the reply. `--private --mode json`,
+  which would stream the file contents, is refused.
+
+The reply itself is the one channel left, so ask for aggregates, yes/no answers, or a
+summary, and have Privateer write detail to a file. Setup for Claude Code and other agents,
+the ACP route for your own programs, prompt patterns, and the honest limits are in
+[`docs/private-handoff.md`](docs/private-handoff.md).
 
 ## Connectors — MCP
 
@@ -737,7 +773,10 @@ agent is stuck),
 `privateer acp` (serve the agent to an ACP host like Buzz or Zed — see
 [`docs/acp.md`](docs/acp.md)), `privateer auth status` (is this machine signed in?),
 `privateer -p … [--allow-spend …] [--approve-in-app]` (see
-[one-shot runs](#one-shot-runs--p-and-spending)), `privateer --no-quarter`, `privateer --version`.
+[one-shot runs](#one-shot-runs--p-and-spending)), `privateer --private` (tools run only on a
+verified-private model and never reach the network; see
+[Hand off sensitive work](#hand-off-sensitive-work-to-privateer)), `privateer --no-quarter`,
+`privateer --version`.
 An unknown subcommand of `auth` is an error. It is never sent to the model as a prompt.
 
 ## Develop

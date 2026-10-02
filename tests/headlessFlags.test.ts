@@ -61,3 +61,24 @@ test("an unknown auth subcommand is an error, never a prompt", () => {
   assert.equal(authProblem(["hello", "auth"]), null);
   for (const sub of ["auth", "install", "remove", "uninstall", "list", "config"]) assert.ok(PI_SUBCOMMANDS.includes(sub));
 });
+
+test("--private is stripped anywhere before --, and only there", async () => {
+  const { extractPrivateFlag } = await import("../bin/headless-flags.mjs");
+  const a = ["-p", "--private", "summarize a.csv"];
+  assert.equal(extractPrivateFlag(a), true);
+  assert.deepEqual(a, ["-p", "summarize a.csv"], "Pi never sees the flag");
+  const b = ["acp", "--private"];
+  assert.equal(extractPrivateFlag(b), true);
+  assert.deepEqual(b, ["acp"]);
+  const c = ["-p", "--", "what does --private do?"];
+  assert.equal(extractPrivateFlag(c), false);
+  assert.deepEqual(c, ["-p", "--", "what does --private do?"]);
+});
+
+test("private mode refuses --mode json, which would stream tool results to the caller", async () => {
+  const { privateProblem } = await import("../bin/headless-flags.mjs");
+  assert.match(privateProblem(["--mode", "json", "x"])!, /--mode json/);
+  assert.match(privateProblem(["--mode=json", "x"])!, /--mode json/);
+  assert.equal(privateProblem(["-p", "x"]), null);
+  assert.equal(privateProblem(["-p", "--", "--mode json"]), null);
+});

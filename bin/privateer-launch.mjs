@@ -29,7 +29,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 import { routeUpdate } from "./update-route.mjs";
-import { APPROVE_IN_APP_ENV, CLI_SPEND_ENV, PI_SUBCOMMANDS, authProblem, extractHeadlessFlags } from "./headless-flags.mjs";
+import { APPROVE_IN_APP_ENV, CLI_SPEND_ENV, PI_SUBCOMMANDS, PRIVATE_ENV, authProblem, extractHeadlessFlags, extractPrivateFlag, privateProblem } from "./headless-flags.mjs";
 import { runToCompletion } from "./run-to-completion.mjs";
 import { filterRespawnArgs, listTerminals, requestFresh, runSupervised } from "./fresh-supervisor.mjs";
 import { configureCompileCache } from "./startup-cache.mjs";
@@ -247,6 +247,16 @@ delete process.env[APPROVE_IN_APP_ENV];
   }
   if (headless.spend) process.env[CLI_SPEND_ENV] = JSON.stringify(headless.spend);
   if (headless.approveInAppMs) process.env[APPROVE_IN_APP_ENV] = String(headless.approveInAppMs);
+}
+// --private: NOT cleared from the inherited env first, unlike the two above — it can only
+// tighten a run, so an orchestrator exporting it for every child is the point.
+if (extractPrivateFlag(args)) process.env[PRIVATE_ENV] = "1";
+if (/^(1|true|yes)$/i.test((process.env[PRIVATE_ENV] ?? "").trim())) {
+  const problem = privateProblem(args);
+  if (problem) {
+    process.stderr.write(`privateer: ${problem}\n`);
+    process.exit(2);
+  }
 }
 
 const sub = args[0];

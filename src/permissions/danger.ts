@@ -37,6 +37,15 @@ export function looksLikeSecretExfil(command: string): boolean {
   return SECRET_FILE.test(command) && NETWORK_SINK.test(command);
 }
 
+// Does this command look like it can move bytes off the machine? Private mode refuses
+// these outright (permissions/privateMode.ts). Same heuristic as the exfil check, plus
+// the git and package-manager verbs that upload: a regex over the raw text, not a shell
+// parser, so it is a net, not a proof.
+const UPLOAD_VERB = /\bgit\s+push\b|\b(npm|pnpm|yarn)\s+publish\b/i;
+export function reachesNetwork(command: string): boolean {
+  return NETWORK_SINK.test(command) || UPLOAD_VERB.test(command);
+}
+
 export function matchesDenylist(command: string, patterns: string[]): boolean {
   return patterns.some((src) => {
     if (!src.trim()) return false;

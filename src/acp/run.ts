@@ -21,7 +21,8 @@
 //       "model":   "openrouter/openai/gpt-4o-mini",   // optional
 //       "tools":   ["read","grep","find","ls"],        // optional ceiling
 //       "posture": "approve",                          // readonly | approve | auto
-//       "cwd":     "/path/to/project"        // optional; else this process's cwd
+//       "cwd":     "/path/to/project",       // optional; else this process's cwd
+//       "private": true                         // optional; see permissions/privateMode.ts
 //     }
 //   }
 //
@@ -115,6 +116,10 @@ export async function runAcp(): Promise<void> {
     : (web ? [...SAFE_TOOLS, ...WEB_TOOLS] : [...SAFE_TOOLS]);
   const posture: Posture = normalizePosture(block.posture) ?? "approve";
   const baseCwd: string = block.cwd ?? process.cwd();
+  // Private mode: `acp.private`, or `privateer acp --private` / PRIVATEER_PRIVATE (read by
+  // the gate itself). The handoff surface for an agent that must not see the data.
+  const { privateModeFromEnv, modelTier, PRIVATE_TIERS } = await import("../permissions/privateMode.ts");
+  const privateMode: boolean = block.private === true || privateModeFromEnv();
 
   // The gate. Identical posture semantics to the channels runtime: "readonly" maps to
   // plan mode (hard-deny writes), "auto" relaxes non-dangerous actions, and every ask
@@ -129,6 +134,7 @@ export async function runAcp(): Promise<void> {
     confineToCwd: true,
     getRemote: () => true,
     getAutoApprove: () => posture === "auto",
+    getPrivate: () => privateMode,
     async localAsk() {
       return "deny";
     },
@@ -272,8 +278,22 @@ export async function runAcp(): Promise<void> {
   const modelCount = listModels()?.available.length ?? 0;
   log(
     `ready — model ${defaultModel}, ${modelCount} selectable, ` +
-      `ceiling [${tools.join(", ")}], posture ${posture}`,
+      `ceiling [${tools.join(", ")}], posture ${posture}${privateMode ? ", PRIVATE" : ""}`,
   );
+  // Say up front when private mode will refuse every tool, rather than letting the
+  // caller find out from its first denial. The gate re-checks per call regardless.
+  if (privateMode) {
+    try {
+      const tier = await modelTier({ provider: model.provider, id: model.id, baseUrl: model.baseUrl });
+      log(
+        PRIVATE_TIERS.has(tier)
+          ? `private mode: ${defaultModel} is ${tier}`
+          : `private mode: ${defaultModel} is ${tier}, NOT verified-private — every tool will be refused. Pick a TEE or local model.`,
+      );
+    } catch (e) {
+      log(`private mode: could not verify ${defaultModel} (${e instanceof Error ? e.message : String(e)}) — tools will be refused until it verifies`);
+    }
+  }
 
   // One Pi session per ACP session. A single subscription routes streamed text into a
   // mutable holder, which the running turn owns — safe because a session runs at most
@@ -353,7 +373,12 @@ export async function runAcp(): Promise<void> {
           // its own `hasConfiguredAuth` precheck before it emits `before_agent_start`,
           // where providers/account.ts installs the equivalent net.
           await ensureAccountArmed(currentProvider);
-          await session.prompt(text);
+          // Prompt text is the HOST's, so it is never a command: with expansion on, Pi
+          // runs a leading `/name` as an extension command, and anyone who can post to
+          // the host (a Buzz channel, a calling agent) could send `/privacy off` or
+          // `/privacy allow *` — the second persisted to config.json. Text goes to the
+          // model as text.
+          await session.prompt(text, { expandPromptTemplates: false });
         } catch (e) {
           return { ok: false, error: e instanceof Error ? e.message : String(e) };
         } finally {
@@ -371,7 +396,7 @@ export async function runAcp(): Promise<void> {
 
   let agent: InstanceType<typeof PrivateerAcpAgent> | undefined;
   new AgentSideConnection((conn) => {
-    agent = new PrivateerAcpAgent(conn, { createSession, models: listModels, onLog: log });
+    agent = new PrivateerAcpAgent(conn, { createSession, models: listModels, onLog: log, private: privateMode });
     return agent;
   }, stream);
 
