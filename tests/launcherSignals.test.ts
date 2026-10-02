@@ -109,7 +109,7 @@ test("without forwarding the child IS orphaned — the bug this fixes, pinned", 
   try { process.kill(childPid, "SIGKILL"); } catch { /* ignore */ }
 });
 
-test("the harbor and acp subcommands opt into forwarding; the TUI does not", () => {
+test("harbor, channels, acp and -p runs forward SIGTERM; the interactive TUI does not", () => {
   // The mechanism is only useful where it is switched on. Read from source so a
   // future edit that drops the flag fails here rather than in production.
   const src = fs.readFileSync(LAUNCHER, "utf8");
@@ -118,16 +118,23 @@ test("the harbor and acp subcommands opt into forwarding; the TUI does not", () 
 
   assert.ok(line("privateer-harbor.mjs")?.includes("forwardSignals: true"), "harbor does not forward");
   assert.ok(line("privateer-acp.mjs")?.includes("forwardSignals: true"), "acp does not forward");
+  assert.ok(line("privateer-channels.mjs")?.includes("forwardSignals: true"), "channels does not forward");
 
   // SIGINT and SIGQUIT are terminal-generated and delivered to the whole foreground
   // process group, so the child has already had them. Forwarding would send a SECOND
   // — and a TUI that treats the first Ctrl-C as "clear the line" and the second as
   // "quit" would exit on one keypress.
-  // The TUI runs supervised (bin/fresh-supervisor.mjs) and non-interactive runs through
-  // runToCompletion; neither may forward, and the supervisor installs no signal handler.
-  const tui = line("tuiArgs(args)");
-  assert.ok(tui, "could not find the non-interactive launch line");
-  assert.ok(!tui!.includes("forwardSignals"), "the TUI must not forward signals");
+  // The interactive TUI runs supervised (bin/fresh-supervisor.mjs), which forwards
+  // nothing and installs no signal handler. A NON-interactive run (-p) does forward,
+  // since 7cd8ed5: a `kill` reaches only the launcher, and a -p agent left behind keeps
+  // working and spending with nobody waiting. That is safe for the reason above only
+  // because runToCompletion forwards SIGTERM and never SIGINT (asserted at the end).
+  const printRun = line("tuiArgs(args)");
+  assert.ok(printRun, "could not find the non-interactive launch line");
+  assert.ok(printRun!.includes("forwardSignals: true"), "a -p run must take its agent with it");
+  const tui = src.split("\n").find((l) => l.includes("runSupervised("));
+  assert.ok(tui, "could not find the interactive launch line");
+  assert.ok(!tui!.includes("forwardSignals"), "the interactive TUI must not forward signals");
   const sup = fs.readFileSync(path.join(HERE, "..", "bin", "fresh-supervisor.mjs"), "utf8");
   assert.ok(!/process\.on\("SIG/.test(sup), "the fresh supervisor must not handle terminal signals");
   const mod = fs.readFileSync(path.join(HERE, "..", "bin", "run-to-completion.mjs"), "utf8");
