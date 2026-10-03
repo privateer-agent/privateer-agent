@@ -895,6 +895,45 @@ test("a published context window reaches the model entry, and survives a relaunc
   });
 });
 
+test("a published output cap becomes maxTokens, clamped to the proxy ceiling, and survives a relaunch", async () => {
+  // WHY: reasoning shares maxTokens with the answer, and pi only compact-and-retries a
+  // length stop that ended BELOW it. A flat 16384 let a thinking model spend all of it
+  // reasoning and end the run "truncated before completion".
+  await withCacheHome(async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      json({
+        models: [
+          { modelId: "google/gemini-3.8-flash", privacy: { tier: "zdr-enforced" }, maxCompletionTokens: 65536 },
+          { modelId: "acme/small-cap", privacy: { tier: "zdr-enforced" }, maxCompletionTokens: 4096 },
+          { modelId: "acme/no-cap", privacy: { tier: "zdr-enforced" }, maxCompletionTokens: null },
+          { modelId: "acme/old-server", privacy: { tier: "zdr-enforced" } },
+          { modelId: "acme/absurd", privacy: { tier: "zdr-enforced" }, maxCompletionTokens: 3 },
+        ],
+      })) as typeof fetch;
+    try {
+      await fetchAccountCatalog();
+      const entry = (id: string) => (accountProviderConfig([id]) as any).models.find((m: any) => m.id === id);
+      // Above the server's 32000 proxy ceiling asks for nothing extra.
+      assert.equal(entry("google/gemini-3.8-flash").maxTokens, 32000);
+      // A real cap below the old flat value is honoured, not over-asked.
+      assert.equal(entry("acme/small-cap").maxTokens, 4096);
+      for (const id of ["acme/no-cap", "acme/old-server", "acme/absurd"]) {
+        assert.equal(entry(id).maxTokens, 16384, `${id} must fall back`);
+      }
+    } finally {
+      globalThis.fetch = real;
+    }
+
+    const cached = JSON.parse(readFileSync(CACHE_FILE, "utf8"));
+    assert.equal(cached.maxOutputs["google/gemini-3.8-flash"], 32000);
+    assert.equal("acme/no-cap" in cached.maxOutputs, false, "unknown caps are not persisted as guesses");
+
+    const fresh = await import(`../src/providers/account.ts?relaunch-max=${Date.now()}`);
+    assert.equal(fresh.accountProviderConfig(["acme/small-cap"]).models[0].maxTokens, 4096);
+  });
+});
+
 test("a v1 cache with no windows still launches, on the fallback", async () => {
   // The upgrade path: a file written by a build that predates this field.
   await withCacheHome(async () => {

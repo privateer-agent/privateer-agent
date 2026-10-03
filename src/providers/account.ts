@@ -100,6 +100,27 @@ function validContextWindow(value: unknown): number | undefined {
     : undefined;
 }
 
+// What to ask for per turn when the server publishes no output cap for a model — the
+// flat value the whole catalog used to be registered with, so "unpublished" behaves
+// exactly as it always has.
+const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+
+// The server's own ceiling on a proxied turn (treeview inferenceService
+// PROXY_MAX_COMPLETION_TOKENS). Asking past it buys nothing — the proxy sizes its
+// balance gate to at most this — so a published cap above it is clamped here.
+const ACCOUNT_MAX_OUTPUT_TOKENS = 32000;
+
+// Below this a turn cannot fit a complete tool call; same floor pi-ai uses for an
+// answer (contextBudget.ts MIN_ANSWER_TOKENS). A smaller published cap is treated as
+// garbled rather than strangling every turn.
+const MIN_PUBLISHED_MAX_OUTPUT = 1024;
+
+function validMaxOutputTokens(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= MIN_PUBLISHED_MAX_OUTPUT
+    ? Math.min(Math.floor(value), ACCOUNT_MAX_OUTPUT_TOKENS)
+    : undefined;
+}
+
 function seedModel(id: string) {
   return {
     id,
@@ -119,7 +140,13 @@ function seedModel(id: string) {
     // that under-states the model's real one therefore throttles the answer — and
     // used to collapse it to a single token — while the model still has room.
     contextWindow: accountContextWindow(id) ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: 16384,
+    // The model's real output cap when published. Not cosmetic either: reasoning and
+    // the answer share this one budget, and pi only compact-and-retries a length stop
+    // that ended BELOW it — a thinking model that spends all of a too-small budget
+    // reasoning ends the run with "Response was truncated before completion."
+    // (measured: glm-5.3-flash spending all 16384 on 50k+ chars of reasoning, whose
+    // real cap is far higher). See also ext/truncationRecovery.ts.
+    maxTokens: accountMaxOutputTokens(id) ?? DEFAULT_MAX_OUTPUT_TOKENS,
   };
 }
 
@@ -296,14 +323,19 @@ function saveCachedCatalog(infos: AccountModelInfo[]): void {
     mkdirSync(globalDir(), { recursive: true });
     const kept = infos.slice(0, CATALOG_CACHE_MAX);
     const windows: Record<string, number> = {};
+    const maxOutputs: Record<string, number> = {};
     for (const info of kept) {
       if (info.contextWindow !== undefined) windows[info.id] = info.contextWindow;
+      if (info.maxOutputTokens !== undefined) maxOutputs[info.id] = info.maxOutputTokens;
     }
     const payload = {
       v: 2,
       fetchedAt: new Date().toISOString(),
       ids: kept.map((info) => info.id),
       windows,
+      // Same reasoning as `windows`: a capability needed at launch. Absent in older
+      // files, which then fall back per model.
+      maxOutputs,
     };
     writeFileSync(catalogCachePath(), JSON.stringify(payload) + "\n", "utf8");
     forgetCachedContextWindows();
@@ -316,33 +348,42 @@ function saveCachedCatalog(infos: AccountModelInfo[]): void {
 // the catalog on every registration, and the catalog re-registers whenever the shim
 // state changes — re-reading and re-parsing a 284-entry file each time would turn a
 // cheap lookup into hundreds of syscalls on the launch path.
-let cachedWindows: Map<string, number> | null = null;
+let cachedCapabilities: { windows: Map<string, number>; maxOutputs: Map<string, number> } | null = null;
 
-function cachedContextWindows(): Map<string, number> {
-  if (cachedWindows) return cachedWindows;
-  cachedWindows = new Map();
+function cachedCapabilityMaps(): { windows: Map<string, number>; maxOutputs: Map<string, number> } {
+  if (cachedCapabilities) return cachedCapabilities;
+  cachedCapabilities = { windows: new Map(), maxOutputs: new Map() };
   try {
     const path = catalogCachePath();
     if (existsSync(path)) {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as { windows?: unknown };
-      // A v1 file has no `windows` at all; every id then falls back, exactly as before.
-      if (parsed.windows && typeof parsed.windows === "object") {
-        for (const [id, value] of Object.entries(parsed.windows as Record<string, unknown>)) {
-          const window = validContextWindow(value);
-          if (window !== undefined && cachedWindows.size < CATALOG_CACHE_MAX) cachedWindows.set(id, window);
-        }
-      }
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as { windows?: unknown; maxOutputs?: unknown };
+      // A v1 file has no `windows` (and an older v2 no `maxOutputs`); every id then
+      // falls back, exactly as before. Re-validated on read: the file is input too.
+      readCapability(parsed.windows, validContextWindow, cachedCapabilities.windows);
+      readCapability(parsed.maxOutputs, validMaxOutputTokens, cachedCapabilities.maxOutputs);
     }
   } catch {
-    /* absent, unreadable, or garbage — every model just uses the fallback window */
+    /* absent, unreadable, or garbage — every model just uses the fallbacks */
   }
-  return cachedWindows;
+  return cachedCapabilities;
+}
+
+function readCapability(raw: unknown, valid: (value: unknown) => number | undefined, into: Map<string, number>): void {
+  if (!raw || typeof raw !== "object") return;
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    const n = valid(value);
+    if (n !== undefined && into.size < CATALOG_CACHE_MAX) into.set(id, n);
+  }
+}
+
+function cachedContextWindows(): Map<string, number> {
+  return cachedCapabilityMaps().windows;
 }
 
 // Drop the memo so the next read sees what was just written (and so a test can rewrite
 // the cache between assertions).
 function forgetCachedContextWindows(): void {
-  cachedWindows = null;
+  cachedCapabilities = null;
 }
 
 export function loadCachedCatalogIds(): string[] {
@@ -408,6 +449,9 @@ export interface AccountModelInfo {
   // Absent means "unknown" — seedModel falls back to DEFAULT_CONTEXT_WINDOW rather
   // than to a guess, so an older server behaves exactly as before.
   contextWindow?: number;
+  // The server's published per-turn output cap, already clamped to the proxy's
+  // ceiling. Absent means unknown — seedModel falls back to DEFAULT_MAX_OUTPUT_TOKENS.
+  maxOutputTokens?: number;
 }
 
 // The set of tier strings pi-privacy defines (posture/tiers.ts). We only trust a
@@ -454,6 +498,13 @@ export function accountContextWindow(id: string): number | undefined {
   return accountWindowMap.get(id) ?? cachedContextWindows().get(id);
 }
 
+// Published output caps, keyed by modelId — live catalog first, then the disk cache.
+const accountMaxOutputMap = new Map<string, number>();
+
+export function accountMaxOutputTokens(id: string): number | undefined {
+  return accountMaxOutputMap.get(id) ?? cachedCapabilityMaps().maxOutputs.get(id);
+}
+
 // The server-asserted baseline tier for an account model, or undefined if we haven't
 // seen it in a catalog fetch. Used by the /models picker (privateer-models.ts).
 export function accountBaselineTier(modelId: string): PrivacyTier | undefined {
@@ -483,7 +534,7 @@ export async function fetchAccountCatalog(): Promise<AccountModelInfo[]> {
       infos = fallback();
     } else {
       const data = (await res.json()) as {
-        models?: { modelId?: string; privacy?: { tier?: string }; contextLength?: unknown }[];
+        models?: { modelId?: string; privacy?: { tier?: string }; contextLength?: unknown; maxCompletionTokens?: unknown }[];
       };
       const parsed = (data.models ?? [])
         .map((m): AccountModelInfo | null =>
@@ -495,6 +546,7 @@ export async function fetchAccountCatalog(): Promise<AccountModelInfo[]> {
                 // absent entirely on a server older than the field — both mean
                 // "unknown", and validContextWindow collapses them to undefined.
                 contextWindow: validContextWindow(m.contextLength),
+                maxOutputTokens: validMaxOutputTokens(m.maxCompletionTokens),
               }
             : null,
         )
@@ -511,9 +563,11 @@ export async function fetchAccountCatalog(): Promise<AccountModelInfo[]> {
   }
   accountTierMap.clear();
   accountWindowMap.clear();
+  accountMaxOutputMap.clear();
   for (const info of infos) {
     accountTierMap.set(info.id, info.tier);
     if (info.contextWindow !== undefined) accountWindowMap.set(info.id, info.contextWindow);
+    if (info.maxOutputTokens !== undefined) accountMaxOutputMap.set(info.id, info.maxOutputTokens);
   }
   return infos;
 }
