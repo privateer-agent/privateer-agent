@@ -129,8 +129,23 @@ export async function callRag<T>(path: string, body: unknown): Promise<({ ok: tr
   if (res.status === 402 || /CAP|QUOTA|INSUFFICIENT|TOP_?UP/i.test(code)) {
     return { ok: false, message: serverMessage || "the account is out of credit for web access — top up or upgrade to continue" };
   }
-  if (res.status === 401 || res.status === 403) {
-    return { ok: false, message: "this agent is not signed in to a Privateer account, so it has no web access" };
+  // A 401 here has already survived authedFetch's refresh-and-retry, so the session
+  // really couldn't be renewed. A 403 is NOT a sign-in problem — a plan or account
+  // refusal, or the edge firewall in front of the API — and calling it "not signed in"
+  // had models telling signed-in users to log in. Pass the server's reason through.
+  if (res.status === 401) {
+    return {
+      ok: false,
+      message:
+        serverMessage ||
+        "Privateer refused this agent's session for web access (401) — running the command again opens a fresh one; if it keeps failing, check `privateer auth status`",
+    };
+  }
+  if (res.status === 403) {
+    return {
+      ok: false,
+      message: serverMessage || "Privateer refused this web request (403) — not a sign-in problem, so logging in again won't change it",
+    };
   }
   if (res.status === 400) {
     return { ok: false, message: serverMessage || `Privateer rejected the request${code ? ` (${code})` : ""}` };

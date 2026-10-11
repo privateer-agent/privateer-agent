@@ -597,7 +597,7 @@ export function describeErrorText(
         bare ? `${who} ${refused} this request was sent with (${status}).` : compactProviderError(s),
       ),
       hint: account
-        ? "This terminal's Privateer session was refused. It is renewed automatically on your next message; if it keeps failing, run /login (or `privateer auth status` to see whether this machine is signed in)."
+        ? "This run's Privateer session was refused. A fresh one is opened automatically — send the message again, or re-run a one-shot (`-p`) command. Only if it keeps failing, check `privateer auth status`."
         : `Check the API key for ${who} — run /login, or set the provider's API key env var.`,
     };
   }

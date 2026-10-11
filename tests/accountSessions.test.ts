@@ -4,28 +4,41 @@ process.env.PRIVATEER_HOME = "/private/tmp/claude-501/pv-account-sessions-test";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, rmSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, statSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   recordOwnedSession,
   forgetOwnedSession,
   orphanedSessions,
+  claimOrphan,
+  releaseOrphan,
   dropOwnedSession,
   clearOwnedSessions,
 } from "../src/auth/accountSessions.ts";
 import { acquireAccountCredential, saveCredentials, clearCredentials } from "../src/auth/privateer.ts";
-import { accountSessionsPath } from "../src/config/paths.ts";
+import { accountSessionsDir, accountSessionsPath } from "../src/config/paths.ts";
 
 // A pid that cannot be running: above every platform's pid_max, so signal 0 is
 // guaranteed to report ESRCH rather than accidentally naming a real process.
 const DEAD_PID = 4_194_305;
 
 function seedRegistry(entries: Record<string, { refresh: string; expires: number }>): void {
-  mkdirSync(process.env.PRIVATEER_HOME!, { recursive: true });
-  writeFileSync(accountSessionsPath(), JSON.stringify(entries, null, 2));
+  mkdirSync(accountSessionsDir(), { recursive: true });
+  for (const [pid, entry] of Object.entries(entries)) {
+    writeFileSync(join(accountSessionsDir(), `${pid}.json`), JSON.stringify(entry));
+  }
 }
 
+// The registry as a pid → entry map: one `<pid>.json` per owner. Claim files are left
+// out — they are mid-adoption and belong to nobody's listing.
 function readRegistry(): Record<string, { refresh: string; expires: number }> {
-  return JSON.parse(readFileSync(accountSessionsPath(), "utf8"));
+  if (!existsSync(accountSessionsDir())) return {};
+  const reg: Record<string, { refresh: string; expires: number }> = {};
+  for (const name of readdirSync(accountSessionsDir())) {
+    const m = /^(\d+)\.json$/.exec(name);
+    if (m) reg[m[1]] = JSON.parse(readFileSync(join(accountSessionsDir(), name), "utf8"));
+  }
+  return reg;
 }
 
 test("recordOwnedSession claims the session for this pid; forget drops it", () => {
@@ -36,7 +49,11 @@ test("recordOwnedSession claims the session for this pid; forget drops it", () =
   assert.deepEqual(Object.keys(reg), [String(process.pid)], "the entry is keyed by the owning pid");
   assert.equal(reg[String(process.pid)].refresh, "r1");
   // Holds refresh tokens — must never be world-readable.
-  assert.equal(statSync(accountSessionsPath()).mode & 0o077, 0, "registry must be 0600");
+  assert.equal(
+    statSync(join(accountSessionsDir(), `${process.pid}.json`)).mode & 0o077,
+    0,
+    "registry entries must be 0600",
+  );
 
   forgetOwnedSession();
   assert.deepEqual(readRegistry(), {});
@@ -276,6 +293,61 @@ test("acquireAccountCredential revokes the orphans it did not adopt", async () =
     if (prevUrl === undefined) delete process.env.PRIVATEER_SERVER_URL;
     else process.env.PRIVATEER_SERVER_URL = prevUrl;
   }
+});
+
+// The concurrency bug the per-pid layout exists for: two launches racing for one
+// orphan must not BOTH rotate it. The loser would replay a token the winner just spent,
+// and past the server's grace window that revokes the winner's session mid-run.
+test("only one launch can claim an orphan", () => {
+  clearOwnedSessions();
+  seedRegistry({ [String(DEAD_PID)]: { refresh: "orphan", expires: Date.now() + 60_000 } });
+
+  assert.equal(claimOrphan(DEAD_PID), true, "the first claimer wins");
+  assert.equal(claimOrphan(DEAD_PID), false, "a second claimer must be refused");
+  assert.deepEqual(orphanedSessions(), [], "a claimed orphan is no longer offered");
+
+  releaseOrphan(DEAD_PID);
+  assert.deepEqual(
+    orphanedSessions().map((o) => o.refresh),
+    ["orphan"],
+    "a released claim (refresh never reached the server) is reclaimable again",
+  );
+});
+
+// The other half of the old race: a process recording its own session must never
+// write back anyone else's entry. With one shared file, a stale read-modify-write
+// resurrected an already-adopted orphan whose token had been rotated.
+test("recording our session never resurrects an adopted orphan", () => {
+  clearOwnedSessions();
+  seedRegistry({ [String(DEAD_PID)]: { refresh: "spent", expires: Date.now() + 60_000 } });
+  assert.equal(claimOrphan(DEAD_PID), true);
+  dropOwnedSession(DEAD_PID); // adopted elsewhere
+
+  recordOwnedSession({ refresh: "mine", expires: Date.now() + 60_000 });
+  assert.deepEqual(Object.keys(readRegistry()), [String(process.pid)]);
+  assert.deepEqual(orphanedSessions(), []);
+});
+
+// A claimant that died mid-adoption may already have rotated the token, so its claim
+// is deleted, never handed back.
+test("a dead claimant's claim is pruned, not offered", () => {
+  clearOwnedSessions();
+  mkdirSync(accountSessionsDir(), { recursive: true });
+  const stale = join(accountSessionsDir(), `${DEAD_PID}.claim-${DEAD_PID + 1}`);
+  writeFileSync(stale, JSON.stringify({ refresh: "maybe-rotated", expires: Date.now() + 60_000 }));
+
+  assert.deepEqual(orphanedSessions(), []);
+  assert.equal(existsSync(stale), false);
+});
+
+test("the legacy single-file registry is never read, and logout removes it", () => {
+  clearOwnedSessions();
+  mkdirSync(process.env.PRIVATEER_HOME!, { recursive: true });
+  writeFileSync(accountSessionsPath(), JSON.stringify({ [String(DEAD_PID)]: { refresh: "old", expires: Date.now() + 60_000 } }));
+
+  assert.deepEqual(orphanedSessions(), [], "a legacy entry may hold a spent token");
+  clearOwnedSessions();
+  assert.equal(existsSync(accountSessionsPath()), false);
 });
 
 test.after(() => rmSync("/private/tmp/claude-501/pv-account-sessions-test", { recursive: true, force: true }));

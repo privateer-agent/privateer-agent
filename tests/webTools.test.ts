@@ -159,7 +159,11 @@ test("web_search surfaces cap and auth refusals in the delivered result", async 
   const cases: [number, string, string, RegExp][] = [
     [429, "DAILY_CAP_HIT", "Daily webSearch limit of 25 reached. Upgrade or top up to continue.", /Daily webSearch limit of 25/],
     [402, "INSUFFICIENT_BALANCE", "", /out of credit/i],
-    [401, "", "", /not signed in/i],
+    [401, "", "", /refused this agent's session.*privateer auth status/i],
+    // A 403 is a refusal, not a sign-in problem — saying "not signed in" sent models
+    // off telling signed-in users to log in.
+    [403, "", "", /not a sign-in problem/i],
+    [403, "ACCOUNT_PENDING_DELETION", "Account pending deletion", /Account pending deletion/],
     [502, "SEARCH_FAILED", "", /HTTP 502/],
   ];
   for (const [status, code, message, expected] of cases) {

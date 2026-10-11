@@ -45,6 +45,18 @@ export function configPath(): string {
 // session belonging to a STILL-RUNNING terminal from one orphaned by a crash, so it
 // can reclaim the orphan instead of spawning another and walking into the server's
 // per-device terminal cap. Holds refresh tokens — written 0600, like credentials.json.
+//
+// One file per owning pid in a directory, not one shared JSON file: concurrent launches
+// (an agent firing several `privateer -p` runs at once) each read-modify-wrote the whole
+// file, so one could write back an orphan another had already adopted (see
+// auth/accountSessions.ts).
+export function accountSessionsDir(): string {
+  return join(globalDir(), "account-sessions");
+}
+
+// The pre-directory single-file registry. Only ever deleted now (clearOwnedSessions);
+// its entries are never offered for reclamation, because a stale one is exactly the
+// token that trips the server's reuse detection.
 export function accountSessionsPath(): string {
   return join(globalDir(), "account-sessions.json");
 }

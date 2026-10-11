@@ -283,8 +283,11 @@ test("a bare connection failure and a bodiless 401 say what failed and what to d
 
   const unauth = describeErrorText("401 status code (no body)", { provider: "privateer" });
   assert.equal(unauth!.message, "Privateer rejected the credential this request was sent with (401).");
-  assert.match(unauth!.hint!, /renewed automatically/);
-  assert.match(unauth!.hint!, /\/login/);
+  assert.match(unauth!.hint!, /opened automatically/);
+  // One refused session is not a sign-out: a calling agent reading "/login" here told
+  // users who were signed in to log in.
+  assert.doesNotMatch(unauth!.hint!, /\/login/);
+  assert.match(unauth!.hint!, /privateer auth status/);
 
   const byo = describeErrorText("401 status code (no body)", { provider: "openrouter" });
   assert.match(byo!.message, /^OpenRouter rejected the credential/);

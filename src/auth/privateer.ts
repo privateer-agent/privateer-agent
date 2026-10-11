@@ -20,6 +20,8 @@ import {
   recordOwnedSession,
   forgetOwnedSession,
   orphanedSessions,
+  claimOrphan,
+  releaseOrphan,
   dropOwnedSession,
   clearOwnedSessions,
 } from "./accountSessions.ts";
@@ -811,13 +813,17 @@ export async function acquireAccountCredential(): Promise<AccountCredential> {
 
   while (attempted < orphans.length && !adopted) {
     const orphan = orphans[attempted++];
+    // Another launch racing us may already have it. Rotating it anyway would replay a
+    // token that launch just spent — reuse detection, and its session revoked mid-run.
+    if (!claimOrphan(orphan.pid)) continue;
     try {
       adopted = await refreshAccountCredentials(orphan.refresh);
       dropOwnedSession(orphan.pid); // the rotation above re-recorded it under OUR pid
     } catch (e) {
-      // Refused → the session is gone; stop tracking it. Unreachable → keep it, so a
-      // network blip doesn't strand a live row we could have reclaimed next launch.
+      // Refused → the session is gone; stop tracking it. Unreachable → put it back, so
+      // a network blip doesn't strand a live row we could have reclaimed next launch.
       if (isRefreshRejection(e)) dropOwnedSession(orphan.pid);
+      else releaseOrphan(orphan.pid);
     }
   }
 
@@ -836,12 +842,14 @@ export async function acquireAccountCredential(): Promise<AccountCredential> {
 // overwrite the entry for the credential this terminal is actually using.
 async function revokeOrphanedSessions(orphans: OwnedSession[], timeoutMs = 1500): Promise<void> {
   for (const orphan of orphans) {
+    if (!claimOrphan(orphan.pid)) continue; // another launch got there first
     try {
       const cred = await rotateSession(orphan.refresh);
       await deleteSession(cred.access, timeoutMs);
       dropOwnedSession(orphan.pid);
     } catch (e) {
       if (isRefreshRejection(e)) dropOwnedSession(orphan.pid);
+      else releaseOrphan(orphan.pid);
     }
   }
 }

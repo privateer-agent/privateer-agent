@@ -227,12 +227,22 @@ async function callAccount<T>(
   if (res.status === 402 || /INSUFFICIENT|QUOTA|TOP_?UP/i.test(code)) {
     return { ok: false, status: res.status, message: serverMessage || "the account is out of credit for media generation — top up or upgrade to continue" };
   }
-  if (res.status === 401 || res.status === 403) {
+  // Same split as callRag (tools/web.ts): a 401 survived authedFetch's retry, a 403 is
+  // a refusal that signing in again won't change.
+  if (res.status === 401) {
     return {
       ok: false, status: res.status,
       message:
         serverMessage ||
-        "this agent is not signed in to a Privateer account (or the plan doesn't include this), so it cannot generate media",
+        "Privateer refused this agent's session (401) — running the command again opens a fresh one; if it keeps failing, check `privateer auth status`",
+    };
+  }
+  if (res.status === 403) {
+    return {
+      ok: false, status: res.status,
+      message:
+        serverMessage ||
+        "Privateer refused this media request (403) — the plan may not include it; this is not a sign-in problem",
     };
   }
   if (res.status === 400 || res.status === 413) {
