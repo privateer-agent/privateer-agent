@@ -18,18 +18,18 @@ import { makeChartTools, type ChartOpBridge } from "./charts.ts";
 import { makeSaveToLibraryTool, type LibrarySaveBridge } from "./saveToLibrary.ts";
 import type { AttachmentStore } from "../util/attachmentStore.ts";
 
-// save_cargo rides with the file pair rather than with the media tools, because it
-// shares their precondition and not media's: it needs a CONNECTED APP, not a signed-in
-// account. Registering it in the moat's media block would put it in every harbor and
-// channels session, where there is no controller and every call would fail — see
-// remote/cargoSave.ts on why unattended runs deliver an artifact a different way.
-// save_to_library rides here for save_cargo's reason exactly — it needs a CONNECTED
+// save_cargo rides with the file pair because, in a session that HAS a relay, it should
+// try the attached app first: that path comes back with the stored row. With no app
+// attached it queues the artifact for the next app to file instead (remote/cargoSave.ts),
+// which is also how a session with no relay at all gets it — config/moat.ts registers a
+// queue-only copy there.
+// save_to_library rides here because it needs a CONNECTED
 // APP rather than a signed-in account, because only the app holds the master key that
 // a Library row's ciphertext is under. Putting it in the moat's media block would give
 // it to every harbor and channels session, where there is no controller and every call
 // would fail; an unattended run already delivers a file a different way, as a sealed
 // attachment on its Inbox result (routines/resultMedia.ts).
-// The chart tools ride here too, for the same reason save_cargo does and one more of
+// The chart tools ride here too, for save_to_library's reason and one more of
 // their own. Same reason: they need a CONNECTED APP, not a signed-in account, so the
 // moat's media block would put them in every harbor and channels session where there is
 // no controller and every call would fail. Their own reason: unlike cargo they also READ

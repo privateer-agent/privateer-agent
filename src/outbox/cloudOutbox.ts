@@ -26,12 +26,13 @@
 // per-instance caches this replaced.
 
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { apiRequest, defaultDeviceLabel } from "../auth/privateer.ts";
+import { apiRequest, defaultDeviceLabel, hasCredentials } from "../auth/privateer.ts";
 import { loadAccountSignKey } from "../crypto/accountTrust.ts";
 import { verifyOutboxKey } from "../crypto/accountVerify.ts";
 import { sealJson, seal, decodeAccountPublicKey } from "../crypto/outboxSeal.ts";
 import { routineRelayId, type OutboxKind } from "../routines/store.ts";
 import { MAX_ATTACHMENT_BYTES, type MediaClass, type StagedMedia } from "../routines/resultMedia.ts";
+import type { CargoSaveRequest } from "../remote/cargoSave.ts";
 
 export type { OutboxKind };
 
@@ -335,5 +336,79 @@ export async function postOutbox(
   } catch {
     await dropBlobs(blobIds);
     return false;
+  }
+}
+
+// ── Queued Cargo saves ───────────────────────────────────────────────────────
+//
+// `save_cargo` with no app attached (remote/cargoSave.ts has the why). Its own mailbox,
+// /api/outbox/cargo, not an outbox item: every shipped app acks every item it fetches,
+// so an artifact sent as one would be eaten — acked and never filed — by any device
+// still on an older build, and filing has to happen once per account, which needs the
+// server-side claim that mailbox has and this one doesn't.
+
+/** Ceiling on the sealed artifact, matching the server's MAX_CARGO_SEALED_BYTES. */
+export const MAX_QUEUED_CARGO_SEALED_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The plaintext the app opens — treeview client/utils/queuedCargoParse.ts reads exactly
+ * this. `type` (not `kind`) names the envelope: `kind` is the artifact's, and the app's
+ * reader refuses anything that isn't a cargo envelope rather than guessing.
+ */
+export function queuedCargoEnvelope(req: CargoSaveRequest, at: Date, origin: { id: string; label: string }) {
+  return {
+    v: 1,
+    type: "cargo",
+    kind: req.kind,
+    ...(req.title ? { title: req.title } : {}),
+    content: req.content,
+    at: at.toISOString(),
+    origin,
+  };
+}
+
+export type QueuedCargoResult = { ok: true; id: string } | { ok: false; reason: string };
+
+/**
+ * Seal one artifact to the account and park it for the app to file. Never throws;
+ * every failure comes back as a reason written for the model to repeat.
+ */
+export async function postQueuedCargo(req: CargoSaveRequest): Promise<QueuedCargoResult> {
+  if (!hasCredentials()) {
+    return { ok: false, reason: "this terminal is not signed in to a Privateer account — run /signin, then save again" };
+  }
+  const pub = await ensureOutboxPub();
+  if (!pub) {
+    // No pinned account key, or one the published key doesn't verify against. Either way
+    // sealing would be to a key nobody has shown belongs to this account — fail closed.
+    return {
+      ok: false,
+      reason:
+        "the account's encryption key could not be verified from this terminal — open the Privateer app once (it publishes the key), " +
+        "or re-link this terminal from the app, then save again",
+    };
+  }
+  const sealed = sealJson(pub, queuedCargoEnvelope(req, new Date(), machineOrigin()));
+  if (Math.floor((sealed.length * 3) / 4) > MAX_QUEUED_CARGO_SEALED_BYTES) {
+    return { ok: false, reason: "the artifact is too large to queue — trim it below 512 KB" };
+  }
+  try {
+    const res = await apiRequest("/api/outbox/cargo", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sealed }),
+    });
+    if (res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { id?: unknown };
+      return { ok: true, id: typeof data.id === "string" ? data.id : "" };
+    }
+    if (res.status === 404) {
+      return { ok: false, reason: "the Privateer server does not accept queued artifacts yet — attach the app to this terminal and save again" };
+    }
+    const err = (await res.json().catch(() => ({}))) as { message?: unknown };
+    const message = typeof err.message === "string" && err.message ? err.message : `the server answered ${res.status}`;
+    return { ok: false, reason: `the server refused to queue it: ${message}` };
+  } catch (e) {
+    return { ok: false, reason: `the server could not be reached (${(e as Error).message})` };
   }
 }

@@ -522,12 +522,15 @@ export class RemoteBridge {
   //    way the gate wraps remoteAsk, so a silent or too-old app would wedge the turn
   //    forever without one.
   saveCargoRemote = (req: CargoSaveRequest, signal?: AbortSignal): Promise<CargoSaveResult> => {
-    if (!this.relay) return Promise.resolve({ ok: false, reason: "remote access is not enabled — run /remote-access on and drive this terminal from the Privateer app" });
-    if (!this.relay.isConnected()) return Promise.resolve({ ok: false, reason: "the relay is not connected" });
+    // The three "nobody to ask" answers carry `unattached`, which is what lets the tool
+    // queue the artifact for the app instead (cargoSave.ts). Nothing was sent, so there is
+    // no chance a queued copy duplicates one the app stored.
+    if (!this.relay) return Promise.resolve({ ok: false, unattached: true, reason: "remote access is not enabled — run /remote-access on and drive this terminal from the Privateer app" });
+    if (!this.relay.isConnected()) return Promise.resolve({ ok: false, unattached: true, reason: "the relay is not connected" });
     // hasController is optional on RelayLike; a transport that can't tell is treated as
     // attached, matching how the rest of the bridge reads it.
     if (this.relay.hasController && !this.relay.hasController()) {
-      return Promise.resolve({ ok: false, reason: "the Privateer app is not attached to this terminal — only the app holds the key that encrypts an artifact, so open it and attach before saving" });
+      return Promise.resolve({ ok: false, unattached: true, reason: "the Privateer app is not attached to this terminal" });
     }
     const id = randomUUID();
     return new Promise<CargoSaveResult>((resolve) => {

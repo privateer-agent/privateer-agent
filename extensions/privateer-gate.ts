@@ -640,10 +640,10 @@ export default function privateerControl(pi: any): void {
   // driving. The daemon no longer loads this file, so there is nothing to shadow.
   pi.registerTool?.(makeSendFileTool(bridge));
   pi.registerTool?.(makeSaveAttachmentTool(attachments));
-  // save_cargo belongs with them: it is the same bridge, the same "needs a connected
-  // app" precondition, and the same failure mode if it were registered anywhere the
-  // relay isn't this file's. Unlike the pair it hands the app PLAINTEXT to encrypt —
-  // the terminal has no master key, so the round trip is the feature (cargoSave.ts).
+  // save_cargo belongs with them: it tries this bridge's attached app first, which hands
+  // the app PLAINTEXT to encrypt — the terminal has no master key (cargoSave.ts). With no
+  // app attached (remote access off, or nobody driving) it queues the artifact sealed to
+  // the account instead, and the next app to open files it.
   pi.registerTool?.(makeSaveCargoTool(bridge));
   // The chart tools, for the same reasons and one more. Same: this bridge, the same
   // "needs a connected app" precondition, the same plaintext-out/app-encrypts round trip

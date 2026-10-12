@@ -306,6 +306,18 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   if (opts.relayFiles) {
     const { makeRelayFileTools } = await import("../tools/relayFileTools.ts");
     factories.push(makeRelayFileTools(opts.relayFiles.bridge, opts.relayFiles.attachments));
+  } else {
+    // No relay of its own — a harbor run, a channels or ACP session — so no app can ever
+    // be attached. save_cargo still exists here, QUEUE-ONLY: it seals the artifact to the
+    // account and the next app to open files it (remote/cargoSave.ts). Signed-in only,
+    // because the queue is the account's; a signed-out session gets no tool rather than
+    // one that refuses every call. The rest of the relay set stays out: send_file needs
+    // a live app to receive bytes, and the chart tools READ decrypted content back.
+    const { hasCredentials } = await import("../auth/privateer.ts");
+    if (hasCredentials()) {
+      const { makeSaveCargoTool } = await import("../tools/cargo.ts");
+      factories.push((pi: any) => { pi.registerTool?.(makeSaveCargoTool()); });
+    }
   }
 
   if (opts.resultMedia) {

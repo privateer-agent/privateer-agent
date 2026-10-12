@@ -2,10 +2,12 @@
 // Cargo: a titled, runnable artifact they can open, edit, download and share
 // from any of their devices, not a path that only exists on this machine.
 //
-// The interesting part is not this file, it's why the save is a round trip
-// through the app at all — src/remote/cargoSave.ts has that (short version: the
-// terminal holds no master key, and a Cargo row is ciphertext). What matters
-// here is the shape that follows from it:
+// The interesting part is not this file, it's why the save goes through the app
+// at all — src/remote/cargoSave.ts has that (short version: the terminal holds no
+// master key, and a Cargo row is ciphertext). Two routes follow from it: with an
+// app attached, a live round trip that comes back with the stored row's id; with
+// none, the artifact is sealed to the account and QUEUED for the next app to file.
+// What matters here is the shape that follows:
 //
 // TAKES A PATH, NOT CONTENT. An artifact runs to half a megabyte. Inlining that
 // into a tool call would spend the whole thing in tokens, twice — once when the
@@ -28,6 +30,11 @@
 // generation's posture (media.ts's header is blunt about that). A model that
 // can't tell the two apart will describe one with the other's guarantees, so the
 // description states this one plainly and the success line repeats it.
+//
+// AND WHAT HASN'T HAPPENED YET. A queued save is not a saved one: it is in no
+// Cargo list until an app opens and files it. The queued line says so in as many
+// words, because "saved" would send the user to look for something that isn't
+// there yet.
 
 import { Type } from "typebox";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -39,9 +46,11 @@ import {
   isHtmlKind,
   kindForExtension,
   type CargoKind,
+  isUnattached,
   type CargoSaveRequest,
   type CargoSaveResult,
 } from "../remote/cargoSave.ts";
+import { postQueuedCargo, type QueuedCargoResult } from "../outbox/cloudOutbox.ts";
 
 function text(t: string) {
   return { content: [{ type: "text", text: t }], details: {} };
@@ -51,6 +60,9 @@ function text(t: string) {
 export interface CargoSaveBridge {
   saveCargoRemote(req: CargoSaveRequest, signal?: AbortSignal): Promise<CargoSaveResult>;
 }
+
+/** Where an artifact goes when no app is attached. Injectable for tests. */
+export type CargoQueue = (req: CargoSaveRequest) => Promise<QueuedCargoResult>;
 
 export const CARGO_TOOL_NAMES = ["save_cargo"] as const;
 
@@ -71,7 +83,11 @@ function kindMatchesExtension(kind: CargoKind, ext: string): boolean {
   return implied === "md" && (kind === "md" || kind === "pdf" || kind === "docx");
 }
 
-export function makeSaveCargoTool(bridge: CargoSaveBridge) {
+/**
+ * `bridge` is the live route — absent in a session with no relay of its own (a harbor
+ * run, a channels session), which then only ever queues. `queue` is the other route.
+ */
+export function makeSaveCargoTool(bridge?: CargoSaveBridge, queue: CargoQueue = postQueuedCargo) {
   return {
     name: "save_cargo",
     label: "Save to Cargo",
@@ -85,9 +101,11 @@ export function makeSaveCargoTool(bridge: CargoSaveBridge) {
       "inlined, since it opens with no network and no sibling files), .md (kind md, pdf or docx — the " +
       "kind picks what Download produces) and .csv (kind sheet). Max 512 KB; other file types cannot be " +
       "Cargo — use send_file_to_client to hand the user an image, video or PDF instead.\n" +
-      "Needs the Privateer app attached to this terminal: the app holds the key, and it encrypts the " +
-      "artifact on the device before storing it, so the content is never readable by the server. That is " +
-      "a stronger guarantee than the generate_* tools have — do not describe those the same way.",
+      "Works whether or not the Privateer app is attached. Attached: the app encrypts and stores it now. " +
+      "Not attached: the artifact is sealed to the user's account key and queued, and the app files it the " +
+      "next time it opens — it is NOT in Cargo until then, so say that rather than that it is saved. Either " +
+      "way only the user's app can read it; the server holds ciphertext. That is a stronger guarantee than " +
+      "the generate_* tools have — do not describe those the same way.",
     parameters: Type.Object({
       path: Type.String({
         description: "Path of the file to save, relative to cwd or absolute (e.g. 'build/tower-defence.html').",
@@ -165,11 +183,27 @@ export function makeSaveCargoTool(bridge: CargoSaveBridge) {
       }
       if (!content.trim()) return text(`${params.path} has no content to save.`);
 
-      const res = await bridge.saveCargoRemote(
-        { content, kind, title: params.title?.trim() || undefined },
-        signal,
-      );
+      const req: CargoSaveRequest = { content, kind, title: params.title?.trim() || undefined };
+      const res: CargoSaveResult = bridge
+        ? await bridge.saveCargoRemote(req, signal)
+        : { ok: false, unattached: true, reason: "no app is attached to this session" };
 
+      if (!res.ok && isUnattached(res)) {
+        const queued = await queue(req);
+        if (!queued.ok) {
+          return text(
+            `Couldn't save ${basename(target)} to Cargo. No Privateer app is attached (${res.reason}), ` +
+              `and queueing it for the app failed: ${queued.reason}.`,
+          );
+        }
+        const label = req.title ? `"${req.title}"` : basename(target);
+        return text(
+          `Queued ${label} for Cargo (${kind}, ${(stat.size / 1024).toFixed(0)} KB). No Privateer app is attached right now, ` +
+            `so it was sealed to the user's account key and parked on the server as ciphertext only their app can open. ` +
+            `It will appear in Cargo the next time the Privateer app opens on any of their devices — it is not there yet, ` +
+            `so tell the user that rather than that it is saved.`,
+        );
+      }
       if (!res.ok) return text(`Couldn't save ${basename(target)} to Cargo: ${res.reason}`);
       return text(
         `Saved "${res.title}" to Cargo (${kind}, ${(stat.size / 1024).toFixed(0)} KB, ${res.storageType} storage, id ${res.cargoId}). ` +

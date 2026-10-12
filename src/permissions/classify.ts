@@ -374,7 +374,7 @@ export function classifyToolCall(
       tool: toolName,
       kind: "write",
       title: protectedSrc ? "Save a protected file to Cargo in the app" : "Save to Cargo in the Privateer app",
-      detail: `${outside || protectedSrc ? abs : src}${kindNote}${titleNote} → the app encrypts it and stores it in Cargo`,
+      detail: `${outside || protectedSrc ? abs : src}${kindNote}${titleNote} → the app encrypts it and stores it in Cargo (queued, sealed, if no app is attached)`,
       protected: protectedSrc,
       outside,
       path: abs,

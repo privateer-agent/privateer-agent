@@ -18,10 +18,21 @@
 // model-authored one does. Nothing new reaches the server, and no new endpoint
 // exists.
 //
-// WHAT THAT COSTS. The app has to be attached. A harbor is headless by design and
-// there is no controller to ask, so save_cargo is not registered there — an
-// unattended run still delivers an artifact the way it always has, as a fence in
-// its Inbox result (routines/resultBrief.ts). Don't "fix" that by widening this.
+// WHEN NO APP IS ATTACHED. The live round trip needs an app on the other end, and
+// requiring one made save_cargo useless exactly where it was wanted most: a terminal
+// nobody is driving, and every harbor. So with no app attached the artifact is QUEUED
+// instead (outbox/cloudOutbox.ts postQueuedCargo): sealed to the account's X25519
+// outbox public key — the same write-only sealed box Inbox results use, verified
+// against the account signing key pinned at link — and parked at /api/outbox/cargo.
+// The next app to sync opens it and files it through the very same saveCargo()
+// (treeview client/services/queuedCargoService.ts). The master key still never
+// leaves the app, the server still holds only ciphertext, and the stored row is the
+// one the live path would have made. What the queue cannot do is confirm: there is no
+// cargoId until an app files it, and the tool says exactly that.
+//
+// Only an UNATTACHED failure falls back (`unattached: true` below). An app that
+// refused, timed out, or dropped mid-transfer may already have stored the artifact,
+// and queueing it as well is how a user ends up with two copies.
 
 /** Cargo artifact kinds — mirrors client/utils/cargoKinds.ts CargoKind. */
 export const CARGO_KINDS = ["webpage", "slides", "game", "pdf", "docx", "md", "sheet"] as const;
@@ -102,4 +113,7 @@ export interface CargoSaveRequest {
  */
 export type CargoSaveResult =
   | { ok: true; cargoId: string; title: string; storageType: string }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; unattached?: true };
+
+/** Is this failure "there was no app to ask" — the one a queued save may follow? */
+export const isUnattached = (r: CargoSaveResult): boolean => !r.ok && r.unattached === true;

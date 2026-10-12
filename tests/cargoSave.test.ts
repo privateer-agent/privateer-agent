@@ -7,6 +7,7 @@ import { RemoteBridge, type RelayLike } from "../src/remote/remoteBridge.ts";
 import { makeSaveCargoTool } from "../src/tools/cargo.ts";
 import { classifyToolCall } from "../src/permissions/classify.ts";
 import { MAX_CARGO_BYTES, kindForExtension } from "../src/remote/cargoSave.ts";
+import { queuedCargoEnvelope } from "../src/outbox/cloudOutbox.ts";
 
 // save_cargo is the one tool whose whole point is that the CLI CANNOT do the work
 // itself: it holds no master key, so the app has to encrypt. That makes the round trip
@@ -159,12 +160,14 @@ test("a save that never gets an answer times out instead of wedging the turn", a
 
 // ── the tool's own refusals (they never reach the app) ───────────────────────
 
-function toolWith(result: any) {
+function toolWith(result: any, queued: any = { ok: true, id: "q1" }) {
   const calls: any[] = [];
-  const tool = makeSaveCargoTool({
-    async saveCargoRemote(req) { calls.push(req); return result; },
-  });
-  return { tool, calls };
+  const queuedReqs: any[] = [];
+  const tool = makeSaveCargoTool(
+    { async saveCargoRemote(req) { calls.push(req); return result; } },
+    async (req) => { queuedReqs.push(req); return queued; },
+  );
+  return { tool, calls, queuedReqs };
 }
 
 const okResult = { ok: true as const, cargoId: "c1", title: "Report", storageType: "cloud" };
@@ -226,6 +229,113 @@ test("the app's refusal reaches the model verbatim", async () => {
     const res: any = await tool.execute("t", { path }, undefined, undefined, {});
     assert.match(res.content[0].text, /the app is locked — unlock it on this device/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── no app attached: queue it for the app instead of failing ─────────────────
+//
+// The fix for "save_cargo only works while the app is attached". The rule worth
+// pinning is WHICH failures may queue: only "there was nobody to ask". An app that
+// refused, timed out or dropped mid-transfer may already have stored the artifact.
+
+test("an unattached terminal queues the artifact and says it is NOT in Cargo yet", async () => {
+  const { dir, path } = tmpFile("deck.html", "<html>slides</html>");
+  try {
+    const bridge = new RemoteBridge({ onPrompt: () => {} });
+    bridge.attachRelay(makeFakeRelay({ controller: false }));
+    const queued: any[] = [];
+    const tool = makeSaveCargoTool(bridge, async (req) => { queued.push(req); return { ok: true, id: "q1" }; });
+    const res: any = await tool.execute("t", { path, kind: "slides", title: "Q3 Deck" }, undefined, undefined, {});
+    assert.equal(queued.length, 1);
+    assert.deepEqual(queued[0], { content: "<html>slides</html>", kind: "slides", title: "Q3 Deck" });
+    const out = res.content[0].text;
+    assert.match(out, /^Queued "Q3 Deck" for Cargo/);
+    assert.match(out, /next time the Privateer app opens/);
+    assert.match(out, /not there yet/);
+    assert.doesNotMatch(out, /^Saved/, "a queued save must never be reported as saved");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("remote access off and a dropped relay both queue too", async () => {
+  const { dir, path } = tmpFile("n.md", "# n");
+  try {
+    for (const attach of [false, true]) {
+      const bridge = new RemoteBridge({ onPrompt: () => {} });
+      if (attach) bridge.attachRelay(makeFakeRelay({ connected: false }));
+      let n = 0;
+      const tool = makeSaveCargoTool(bridge, async () => { n++; return { ok: true, id: "q" }; });
+      const res: any = await tool.execute("t", { path }, undefined, undefined, {});
+      assert.equal(n, 1, attach ? "disconnected relay" : "no relay");
+      assert.match(res.content[0].text, /^Queued n\.md for Cargo/);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a session with no bridge at all (a harbor run) only ever queues", async () => {
+  const { dir, path } = tmpFile("r.csv", "a,b\n1,2");
+  try {
+    let n = 0;
+    const tool = makeSaveCargoTool(undefined, async () => { n++; return { ok: true, id: "q" }; });
+    const res: any = await tool.execute("t", { path }, undefined, undefined, {});
+    assert.equal(n, 1);
+    assert.match(res.content[0].text, /^Queued/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an ATTACHED app's refusal, timeout or lost reply is never queued as well", async () => {
+  const { dir, path } = tmpFile("a.md", "# a");
+  try {
+    for (const reason of [
+      "the app is locked — unlock it on this device",
+      "the app did not answer within 60s",
+      "the connection to the app dropped before it confirmed the save — the artifact may or may not have been stored",
+    ]) {
+      const { tool, queuedReqs } = toolWith({ ok: false, reason });
+      const res: any = await tool.execute("t", { path }, undefined, undefined, {});
+      assert.equal(queuedReqs.length, 0, `queued after: ${reason}`);
+      assert.match(res.content[0].text, /^Couldn't save/);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an attached app that saves it is never queued", async () => {
+  const { dir, path } = tmpFile("a.md", "# a");
+  try {
+    const { tool, queuedReqs } = toolWith(okResult);
+    const res: any = await tool.execute("t", { path }, undefined, undefined, {});
+    assert.equal(queuedReqs.length, 0);
+    assert.match(res.content[0].text, /^Saved/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("when queueing fails too, the model hears both reasons", async () => {
+  const { dir, path } = tmpFile("a.md", "# a");
+  try {
+    const { tool } = toolWith(
+      { ok: false, unattached: true, reason: "the Privateer app is not attached to this terminal" },
+      { ok: false, reason: "this terminal is not signed in to a Privateer account — run /signin, then save again" },
+    );
+    const res: any = await tool.execute("t", { path }, undefined, undefined, {});
+    const out = res.content[0].text;
+    assert.match(out, /not attached/);
+    assert.match(out, /run \/signin/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the queued envelope is the shape the app's reader accepts", () => {
+  // treeview client/utils/queuedCargoParse.ts requires type 'cargo', a known kind and
+  // non-empty string content; it keeps title/at/origin.label. Pinned here so the two
+  // sides can't drift silently — a renamed field is an artifact the app drops.
+  const env: any = queuedCargoEnvelope(
+    { content: "<html></html>", kind: "game", title: "Snake" },
+    new Date("2026-10-13T00:00:00.000Z"),
+    { id: "term-1", label: "mac-mini" },
+  );
+  assert.deepEqual(env, {
+    v: 1, type: "cargo", kind: "game", title: "Snake", content: "<html></html>",
+    at: "2026-10-13T00:00:00.000Z", origin: { id: "term-1", label: "mac-mini" },
+  });
+  const untitled: any = queuedCargoEnvelope({ content: "# x", kind: "md" }, new Date(0), { id: "a", label: "b" });
+  assert.equal("title" in untitled, false, "no title → the app derives one, as for a live save");
 });
 
 // ── pure helpers ─────────────────────────────────────────────────────────────
