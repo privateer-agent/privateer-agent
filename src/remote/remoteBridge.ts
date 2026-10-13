@@ -15,7 +15,8 @@ import { noQuarterActive, setNoQuarter } from "../permissions/noQuarter.ts";
 // Pure env-var accessors (see config/privacyDisabled.ts) — no Pi, no node builtins,
 // so this stays safe to import from the bridge, which boot-ordered code reaches.
 import { onPrivacyDisabledChange, privacyDisabled, setPrivacyDisabled } from "../config/privacyDisabled.ts";
-import type { EngineEvent } from "../engine/events.ts";
+import { emptyUsage, type EngineEvent } from "../engine/events.ts";
+import { redactText } from "../util/redact.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/modeGate.ts";
 import type { RelayCallbacks } from "./relayClient.ts";
@@ -196,6 +197,14 @@ export class RemoteBridge {
   private turnDriven = false;
   private turnPrompt = "";
   private turnText = "";
+  // Did this turn already put finish/aborted/error on the wire? The app lights its
+  // working pill the moment it SENDS a prompt and only ever puts it out on one of
+  // those three, but Pi's prompt() has paths that never run the agent at all — an
+  // extension command or input hook that handles the text, a throw on the
+  // no-model / no-key / auth precheck, "compaction in progress". Each returned (or
+  // threw into a catch that only printed locally) with no terminal event, and the
+  // driver watched a spinner nothing would ever clear. settleTurn closes the gap.
+  private turnTerminalSent = false;
 
   // Unsubscribes the privacy watcher below. Held so a bridge that outlives its window
   // (the desktop builds one per window, in one process) stops writing to a transport
@@ -232,6 +241,7 @@ export class RemoteBridge {
       this.turnDriven = true;
       this.turnPrompt = text;
       this.turnText = "";
+      this.turnTerminalSent = false;
       const attachments = this.pendingAttachments;
       this.pendingAttachments = [];
       this.cfg.onPrompt(text, attachments);
@@ -460,20 +470,33 @@ export class RemoteBridge {
   // ── turn lifecycle + event forwarding ───────────────────────────────────────
 
   // Mark the end of a turn so the next (possibly local) turn isn't treated as
-  // remote. Call after each driven turn completes.
+  // remote. Call after each driven turn completes, passing the rejection message
+  // if prompt() threw.
+  //
+  // A DRIVEN turn always leaves here with exactly one terminal event on the wire
+  // (see turnTerminalSent): if the session never sent one, this sends it — `error`
+  // carrying the throw, or a plain `finish` for a prompt Pi handled without
+  // running the agent. Desktop's turnSupervisor emits its own terminal before it
+  // settles, so it is seen here and never doubled.
   //
   // Also the one moment we can tell whether the turn had an audience. If the app
   // drove it and is now gone, everything the turn streamed up was dropped by the
   // relay — so hand the answer to the owner for durable delivery rather than letting
   // a completed piece of work evaporate because someone closed their phone.
-  settleTurn(): void {
+  settleTurn(error?: string): void {
     const driven = this.turnDriven;
     const prompt = this.turnPrompt;
     const content = this.turnText.trim();
+    if (driven && !this.turnTerminalSent) {
+      this.forwardEvent(error
+        ? { type: "error", error: redactText(error) }
+        : { type: "finish", usage: emptyUsage(), finishReason: "stop" });
+    }
     this.remote = false;
     this.turnDriven = false;
     this.turnPrompt = "";
     this.turnText = "";
+    this.turnTerminalSent = false;
     if (!driven || !content) return;
     // Unknown (a relay that can't report presence) counts as watched: better to skip
     // delivery than to duplicate something the app already showed in its feed.
@@ -488,6 +511,7 @@ export class RemoteBridge {
     // Keep the driven turn's reply as it streams, in case settleTurn finds nobody
     // was there to read it. Text only: the outbox item is the answer, not a
     // transcript of every tool call.
+    if (ev.type === "finish" || ev.type === "aborted" || ev.type === "error") this.turnTerminalSent = true;
     if (this.turnDriven && ev.type === "text" && this.turnText.length < MAX_TURN_CAPTURE) {
       this.turnText += String(ev.text ?? "");
     }

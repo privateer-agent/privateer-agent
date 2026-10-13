@@ -140,6 +140,7 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   const runTurn = async (text: string): Promise<void> => {
     if (turnActive || stopped) return;
     turnActive = true;
+    let failure: string | undefined;
     lastAnswer = "";   // keep the CLOSING answer, not the whole session
     turnErrored = false;
     try {
@@ -161,10 +162,11 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
       await session.prompt(text + note);
     } catch (e) {
       turnErrored = true;
-      deps.log(`live task ${termId} turn error: ${(e as Error).message}`);
+      failure = (e as Error).message || "The turn failed.";
+      deps.log(`live task ${termId} turn error: ${failure}`);
     } finally {
       turnActive = false;
-      bridge.settleTurn();
+      bridge.settleTurn(failure);
     }
   };
 

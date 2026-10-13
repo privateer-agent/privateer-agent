@@ -523,3 +523,59 @@ test("dispose stops a bridge writing to a transport whose window is gone", async
     setPrivacyDisabled(false);
   }
 });
+
+// ── every driven turn ends on the wire ──────────────────────────────────────
+// The app lights its working pill on SEND and only clears it on a terminal event.
+// Pi's prompt() can return or throw without running the agent, so settleTurn has
+// to close what the session didn't.
+
+test("a driven turn that produced no terminal event is closed with finish", () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  bridge.callbacks.onPrompt("/some-extension-command");
+  bridge.settleTurn();
+  assert.deepEqual(relay.events.map((e) => e.type), ["finish"]);
+});
+
+test("a driven turn whose prompt() threw is closed with the error", () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  bridge.callbacks.onPrompt("hello");
+  bridge.settleTurn("No API key found for openrouter");
+  assert.equal(relay.events.length, 1);
+  const ev = relay.events[0];
+  assert.ok(ev.type === "error" && /No API key/.test(ev.error));
+});
+
+test("a turn that already sent its terminal event is not closed twice", () => {
+  for (const terminal of [
+    { type: "finish", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0 }, finishReason: "stop" },
+    { type: "aborted" },
+    { type: "error", error: "boom" },
+  ] as EngineEvent[]) {
+    const bridge = new RemoteBridge({ onPrompt: () => {} });
+    const relay = makeFakeRelay();
+    bridge.attachRelay(relay);
+    bridge.callbacks.onPrompt("hi");
+    bridge.forwardEvent({ type: "text", text: "hello" });
+    bridge.forwardEvent(terminal);
+    bridge.settleTurn("late throw");
+    assert.deepEqual(relay.events.map((e) => e.type), ["text", terminal.type]);
+  }
+});
+
+test("a local turn gets no synthesized terminal event, and the flag resets per turn", () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  bridge.settleTurn(); // local: not driven
+  assert.equal(relay.events.length, 0);
+  bridge.callbacks.onPrompt("one");
+  bridge.forwardEvent({ type: "aborted" });
+  bridge.settleTurn();
+  bridge.callbacks.onPrompt("two"); // a fresh turn must not inherit "already sent"
+  bridge.settleTurn();
+  assert.deepEqual(relay.events.map((e) => e.type), ["aborted", "finish"]);
+});

@@ -73,11 +73,17 @@ export function createEngineEventAdapter() {
   let turnTotal: UsageTotals = emptyUsage();
   let lastMessage: any;
   let terminalSent = false;
+  // Between agent_start and agent_settled. Compaction maps to `step-finish` to keep
+  // the app's busy pill lit through an auto-compaction INSIDE a run — but a manual
+  // `/compact` runs with no run around it, and a `step-finish` there opened a turn
+  // in the app that no `finish` would ever close: the pill spun until Stop.
+  let inRun = false;
 
   function toEngineEvents(ev: PiSessionEvent): EngineEvent[] {
     switch (ev.type) {
       case "agent_start":
         terminalSent = false;
+        inRun = true;
         return [];
 
       case "message_update": {
@@ -136,6 +142,7 @@ export function createEngineEventAdapter() {
       }
 
       case "agent_settled": {
+        inRun = false;
         if (terminalSent) return [];
         terminalSent = true;
         const msg = lastMessage;
@@ -158,7 +165,7 @@ export function createEngineEventAdapter() {
       }
 
       case "compaction_start":
-        return [{ type: "step-finish" }];
+        return inRun ? [{ type: "step-finish" }] : [];
       case "compaction_end":
         return [
           {

@@ -349,6 +349,7 @@ async function main() {
       return;
     }
     turnActive = true;
+    let failure: string | undefined;
     if (remote && echo) console.log(`\n${DIM}⟿ [app] ${text.slice(0, 80)}${RESET}`);
     try {
       // Re-arm the account channel BEFORE the prompt, because nothing downstream can.
@@ -375,10 +376,13 @@ async function main() {
       }
       await session.prompt(mentions.text, mentions.images.length ? { images: mentions.images } : undefined);
     } catch (e) {
-      console.log(`\n${RED}${(e as Error).message}${RESET}`);
+      failure = (e as Error).message || "The turn failed.";
+      console.log(`\n${RED}${failure}${RESET}`);
     } finally {
       turnActive = false;
-      if (remote) bridge.settleTurn();
+      // The failure goes to the app too: a throw here (no model, no key, auth
+      // precheck) used to print on this console only while the app's pill spun on.
+      if (remote) bridge.settleTurn(failure);
     }
   }
 

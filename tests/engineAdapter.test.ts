@@ -83,3 +83,15 @@ test("partial tool output is snapshot progress, never a result", () => {
   const out = a.toEngineEvents({ type: "tool_execution_end", toolCallId: "b1", toolName: "bash", result: "done" });
   assert.equal(out[0].type, "tool-result");
 });
+
+test("a manual compaction outside a run does not open a turn in the app", () => {
+  const a = createEngineEventAdapter();
+  // Idle session, /compact: nothing will ever send a finish for this.
+  assert.deepEqual(a.toEngineEvents({ type: "compaction_start", reason: "manual" }), []);
+  assert.equal(a.toEngineEvents({ type: "compaction_end", beforeTokens: 9, afterTokens: 3 })[0].type, "compacted");
+  // Inside a run it still keeps the pill lit.
+  a.toEngineEvents({ type: "agent_start" });
+  assert.deepEqual(a.toEngineEvents({ type: "compaction_start", reason: "threshold" }), [{ type: "step-finish" }]);
+  settle(a);
+  assert.deepEqual(a.toEngineEvents({ type: "compaction_start", reason: "manual" }), []);
+});
