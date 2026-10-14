@@ -82,3 +82,36 @@ test("private mode refuses --mode json, which would stream tool results to the c
   assert.equal(privateProblem(["-p", "x"]), null);
   assert.equal(privateProblem(["-p", "--", "--mode json"]), null);
 });
+
+// The report: agents asked to "use Privateer" ran `auth check --provider privateer` on a
+// signed-in machine and got provider_not_found — Pi checks with no extensions loaded.
+test("auth check for the privateer provider is answered from the account login", async () => {
+  const { privateerAuthAnswer, authHelp } = await import("../bin/headless-flags.mjs");
+  const ready = privateerAuthAnswer(["auth", "check", "--provider", "privateer", "--json"], true)!;
+  assert.deepEqual(JSON.parse(ready.out), { status: "ready", provider: "privateer", authType: "oauth" });
+  assert.equal(ready.code, 0);
+  assert.equal(privateerAuthAnswer(["auth", "check", "--provider=privateer"], true)!.out, "ready");
+  assert.equal(privateerAuthAnswer(["auth", "check", "--model", "privateer/glm-5.2"], true)!.code, 0);
+
+  const out = privateerAuthAnswer(["auth", "check", "--provider", "privateer", "--json"], false)!;
+  assert.equal(JSON.parse(out.out).reason, "credentials_not_configured");
+  assert.equal(out.code, 1);
+  assert.match(out.err, /\/login/);
+
+  // The account token is the login itself: never printed.
+  const print = privateerAuthAnswer(["auth", "print-api-key", "--provider", "privateer"], true)!;
+  assert.equal(print.out, "");
+  assert.match(print.err, /isn't printed/);
+  const creds = privateerAuthAnswer(["auth", "check", "--provider", "privateer", "--credentials", "--json"], true)!;
+  assert.equal(JSON.parse(creds.out).reason, "credential_not_available");
+  assert.ok(!creds.out.includes("token"));
+
+  // Everything else is still Pi's.
+  assert.equal(privateerAuthAnswer(["auth", "check", "--provider", "openai"], true), null);
+  assert.equal(privateerAuthAnswer(["auth", "check", "--model", "openai/gpt-5"], true), null);
+  assert.equal(privateerAuthAnswer(["auth", "status"], true), null);
+  assert.equal(privateerAuthAnswer(["hello", "check", "--provider", "privateer"], true), null);
+
+  assert.ok(!/\bpi auth\b/.test(authHelp("privateer")), "help names our command, not Pi's");
+  assert.match(authHelp("privateer"), /--provider privateer/);
+});

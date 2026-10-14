@@ -204,3 +204,74 @@ export function authProblem(args, cmd = "privateer") {
     `Nothing was sent to a model. To sign in, run \`${cmd}\` and type /login.`,
   ].join("\n");
 }
+
+// The value of --provider / --model in `args`, in either `--flag v` or `--flag=v` form.
+function flagValue(args, flag) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag) return args[i + 1];
+    if (args[i].startsWith(flag + "=")) return args[i].slice(flag.length + 1);
+  }
+  return undefined;
+}
+
+/**
+ * `auth check|print-api-key|print-bearer-token` for the `privateer` provider, answered
+ * here. Pi runs these with no extensions loaded, and `privateer` is registered by ours,
+ * so Pi always said `provider_not_found` — and agents probing a signed-in machine with
+ * the exact command `auth status` suggests concluded it was signed out. Readiness comes
+ * from the account login (the same file `auth status` reads); the per-launch session
+ * in auth.json is minted from it. The account token is never printed: it's the login
+ * itself, and nothing outside Privateer can use it as a provider key anyway.
+ *
+ * Returns { out, err, code } to print, or null for Pi to handle.
+ */
+export function privateerAuthAnswer(args, signedIn, cmd = "privateer") {
+  if (args[0] !== "auth" || !AUTH_SUBCOMMANDS.includes(args[1])) return null;
+  if (args.includes("--help") || args.includes("-h")) return null;
+  const provider = flagValue(args, "--provider");
+  const model = flagValue(args, "--model");
+  if (provider !== "privateer" && !(provider === undefined && model?.startsWith("privateer/"))) return null;
+
+  const run = `${cmd} -p "<task>"`;
+  if (args[1] !== "check") {
+    return {
+      out: "",
+      err: [
+        `${cmd} auth ${args[1]}: the privateer provider's credential is your account login, and it isn't printed.`,
+        signedIn ? `This machine is signed in — run a task with: ${run}` : `Sign in first: run \`${cmd}\` and type /login.`,
+      ].join("\n"),
+      code: 1,
+    };
+  }
+  if (args.includes("--credentials")) {
+    // Pi's contract: --credentials emits the credential or reports it unavailable.
+    const result = { status: "not_ready", provider: "privateer", reason: "credential_not_available" };
+    return { out: args.includes("--json") ? JSON.stringify(result) : result.status, err: "", code: 1 };
+  }
+  const result = signedIn
+    ? { status: "ready", provider: "privateer", authType: "oauth" }
+    : { status: "not_ready", provider: "privateer", reason: "credentials_not_configured" };
+  return {
+    out: args.includes("--json") ? JSON.stringify(result) : result.status,
+    err: signedIn ? "" : `Not signed in: run \`${cmd}\` and type /login.`,
+    code: signedIn ? 0 : 1,
+  };
+}
+
+/** `auth --help` with our command name, the provider agents look for, and how to run a task. */
+export function authHelp(cmd = "privateer") {
+  return [
+    "Usage:",
+    `  ${cmd} auth status`,
+    `  ${cmd} auth check [--provider <provider>] [--model <model>] [--json] [--credentials] [--no-refresh]`,
+    `  ${cmd} auth print-api-key [--provider <provider>] [--model <model>]`,
+    `  ${cmd} auth print-bearer-token [--provider <provider>] [--model <model>] [--min-expiry <duration>]`,
+    "",
+    "status reports whether this machine is signed in to a Privateer account.",
+    "check and print-* need --provider or --model. Your account's models are provider",
+    `\`privateer\`: \`${cmd} auth check --provider privateer\`. Its credential is the account`,
+    "login and is never printed. Other providers (openai, anthropic, …) use their own keys.",
+    "",
+    `To run a task non-interactively once signed in: ${cmd} -p "<task>"`,
+  ].join("\n");
+}

@@ -29,7 +29,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { applyPatchesIfNeeded, resolveDep } from "./apply-patches.mjs";
 import { routeUpdate } from "./update-route.mjs";
-import { APPROVE_IN_APP_ENV, CLI_SPEND_ENV, PI_SUBCOMMANDS, PRIVATE_ENV, authProblem, extractHeadlessFlags, extractPrivateFlag, privateProblem } from "./headless-flags.mjs";
+import { APPROVE_IN_APP_ENV, CLI_SPEND_ENV, PI_SUBCOMMANDS, PRIVATE_ENV, authHelp, authProblem, extractHeadlessFlags, privateerAuthAnswer, extractPrivateFlag, privateProblem } from "./headless-flags.mjs";
 import { runToCompletion } from "./run-to-completion.mjs";
 import { modelArgs } from "./model-args.mjs";
 import { filterRespawnArgs, listTerminals, requestFresh, runSupervised } from "./fresh-supervisor.mjs";
@@ -669,6 +669,16 @@ else if (PI_SUBCOMMANDS.includes(sub)) {
     printAuthStatus(cmd);
     process.exit(0);
   }
+  if (sub === "auth" && (args[1] === undefined || args[1] === "help" || args.includes("--help") || args.includes("-h"))) {
+    console.log(authHelp(cmd));
+    process.exit(0);
+  }
+  const own = sub === "auth" ? privateerAuthAnswer(args, accountSignedIn(), cmd) : null;
+  if (own) {
+    if (own.out) console.log(own.out);
+    if (own.err) process.stderr.write(own.err + "\n");
+    process.exit(own.code);
+  }
   const CLI = resolveDep(REPO, "@earendil-works/pi-coding-agent", "dist", "cli.js");
   if (!CLI || !fs.existsSync(CLI)) {
     console.error(
@@ -1030,13 +1040,21 @@ function warnKeylessLaunch() {
 
 // `privateer auth status` — the question people (and agents) actually ask, answered
 // from local state only: no network, nothing sent anywhere, and no secret printed.
-function printAuthStatus(cmd) {
-  let creds = null;
+function readAccountCredentials() {
   try {
-    creds = JSON.parse(fs.readFileSync(path.join(PRIVATEER_HOME, "credentials.json"), "utf8"));
-  } catch { /* absent or unreadable → signed out */ }
+    const creds = JSON.parse(fs.readFileSync(path.join(PRIVATEER_HOME, "credentials.json"), "utf8"));
+    return creds && typeof creds.accessToken === "string" ? creds : null;
+  } catch { return null; /* absent or unreadable → signed out */ }
+}
+
+function accountSignedIn() {
+  return readAccountCredentials() !== null;
+}
+
+function printAuthStatus(cmd) {
+  const creds = readAccountCredentials();
   const lines = [];
-  if (creds && typeof creds.accessToken === "string") {
+  if (creds) {
     const who = creds.user?.email || "your account";
     lines.push(`Privateer account: signed in as ${who}${creds.serverBaseUrl ? ` (${creds.serverBaseUrl})` : ""}`);
     lines.push("  This checks the local login only; a session revoked from the app shows up on the next request.");
@@ -1046,7 +1064,8 @@ function printAuthStatus(cmd) {
   }
   const keys = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "TINFOIL_API_KEY", "PRIVATEER_API_KEY"].filter(haveKey);
   lines.push(`Provider keys in the environment: ${keys.length ? keys.join(", ") : "none"}`);
-  lines.push(`To check one provider end to end: ${cmd} auth check --provider <name>`);
+  lines.push(`Your account's models are provider \`privateer\`: ${cmd} auth check --provider privateer`);
+  if (creds) lines.push(`To run a task non-interactively: ${cmd} -p "<task>"`);
   console.log(lines.join("\n"));
 }
 
