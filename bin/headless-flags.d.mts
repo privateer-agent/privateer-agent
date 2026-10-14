@@ -30,3 +30,13 @@ export function extractPrivateFlag(args: string[]): boolean;
 export function privateProblem(args: string[]): string | null;
 
 export function authProblem(args: string[], cmd?: string): string | null;
+
+/** `auth check|print-*` for the privateer provider, answered by the launcher; null for Pi. */
+export function privateerAuthAnswer(
+  args: string[],
+  signedIn: boolean,
+  cmd?: string,
+): { out: string; err: string; code: number } | null;
+
+/** `auth --help` with our command name and the provider agents look for. */
+export function authHelp(cmd?: string): string;
