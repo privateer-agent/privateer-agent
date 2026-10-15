@@ -769,6 +769,21 @@ else {
     if (s.quietStartup === undefined) { s.quietStartup = true; m = true; }
     if (s.collapseChangelog === undefined) { s.collapseChangelog = true; m = true; }
     if (s.lastChangelogVersion === undefined) { s.lastChangelogVersion = "9999.0.0"; m = true; }
+    // Pi 1.0 made fullscreen the default; our footer, splash and compaction patches are
+    // built for the regular scrollback UI. A user who picks fullscreen keeps it.
+    if (s.tuiMode === undefined) { s.tuiMode = "regular"; m = true; }
+    // Pi 1.3's `/share` defaults to "auto", which uploads to Earendil's Radius when the
+    // user is signed in there. A share leaves the machine only to the user's own gist.
+    if (s.sessionShareDestination === undefined) { s.sessionShareDestination = "gist"; m = true; }
+    // Pi 0.99 auto-loads built-in extensions. builtin:mcp reads the same agent/mcp.json as
+    // pi-mcp-adapter, so leaving both on connects every server twice; codemode,
+    // tool-search and llama.cpp stay off until we adopt them deliberately. Each is added
+    // once — a user's own +/- entry for that built-in is left alone.
+    const ext = Array.isArray(s.extensions) ? s.extensions : [];
+    for (const name of ["builtin:mcp", "builtin:codemode", "builtin:tool-search", "builtin:llama.cpp"]) {
+      if (!ext.some((e) => typeof e === "string" && e.replace(/^[+\-!]/, "") === name)) { ext.push(`-${name}`); m = true; }
+    }
+    if (ext.length) s.extensions = ext;
     if (m) fs.writeFileSync(sp, JSON.stringify(s, null, 2) + "\n");
   } catch { /* best-effort */ }
 

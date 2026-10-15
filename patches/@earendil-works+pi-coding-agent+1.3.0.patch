@@ -1,8 +1,8 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/config.js b/node_modules/@earendil-works/pi-coding-agent/dist/config.js
-index 872dd55..edd61db 100644
+index 62eb303..b5e56ff 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/config.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/config.js
-@@ -399,9 +399,72 @@ catch (e) {
+@@ -469,9 +469,72 @@ catch (e) {
  const piConfigName = pkg.piConfig?.name;
  export const PACKAGE_NAME = pkg.name || "@earendil-works/pi-coding-agent";
  export const APP_NAME = piConfigName || "pi";
@@ -77,13 +77,13 @@ index 872dd55..edd61db 100644
  export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
  export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index 638646d..ba1da98 100644
+index 11ab140..46acdfd 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -39,6 +39,129 @@ import { createLocalBashOperations } from "./tools/bash.js";
- import { createAllToolDefinitions } from "./tools/index.js";
+@@ -46,6 +46,129 @@ import { createAllToolDefinitions } from "./tools/index.js";
  import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
- import { addUsageToTotals, createUsageTotals } from "./usage-totals.js";
+ import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.js";
+ import { findLatestResponse, getBranchSelection, getVirtualModelState, isVirtualModel, VIRTUAL_MODEL_STATE_ENTRY, } from "./virtual-models.js";
 +// ============================================================================
 +// Privateer patch: provider errors that aren't API responses
 +//
@@ -210,16 +210,16 @@ index 638646d..ba1da98 100644
  /**
   * Parse a skill block from message text.
   * Returns null if the text doesn't contain a skill block.
-@@ -101,6 +224,8 @@ export class AgentSession {
+@@ -108,6 +231,8 @@ export class AgentSession {
      // Retry state
      _retryAbortController = undefined;
      _retryAttempt = 0;
 +    // Privateer patch: when the provider last exhausted the retry budget on a 429.
 +    _pvThrottledAt = 0;
-     // Bash execution state
-     _bashAbortControllers = new Set();
-     _pendingBashMessages = [];
-@@ -192,6 +317,14 @@ export class AgentSession {
+     /**
+      * Failed response that the next request repeats, set by auto-retry and overflow recovery. The
+      * retry is routed with it as `failed`, since the context no longer contains it.
+@@ -240,6 +365,14 @@ export class AgentSession {
          }
          const isOAuth = this._modelRuntime.isUsingOAuth(model.provider);
          if (isOAuth) {
@@ -234,7 +234,7 @@ index 638646d..ba1da98 100644
              throw new Error(`Authentication failed for "${model.provider}". ` +
                  `Credentials may have expired or network is unavailable. ` +
                  `Run '/login ${model.provider}' to re-authenticate.`);
-@@ -401,6 +534,16 @@ export class AgentSession {
+@@ -749,6 +882,16 @@ export class AgentSession {
                  }
              }
          }
@@ -248,11 +248,26 @@ index 638646d..ba1da98 100644
 +            typeof event.message.errorMessage === "string") {
 +            event.message.errorMessage = compactProviderError(event.message.errorMessage);
 +        }
-         // Emit to extensions first
+         // Emit to extensions first, then notify public listeners.
          await this._emitExtensionEvent(event);
-         // Notify all listeners
-@@ -904,6 +1047,33 @@ export class AgentSession {
-                 finalError: msg.errorMessage,
+         this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+@@ -1450,7 +1593,13 @@ export class AgentSession {
+         // Check if we need to compact before sending (catches aborted responses).
+         // The starting message is sent below, so do not call agent.continue() here.
+         const lastAssistant = this._findLastAssistantMessage();
+-        if (lastAssistant) {
++        // Privateer patch: skip this while the provider is still throttling us.
++        // Compaction here is another LLM call to the endpoint that just spent our
++        // whole retry budget on 429s; it cannot succeed, and its failure is reported
++        // as "Auto-compaction cancelled" — burying the user's actual prompt. One
++        // rate-limit window of patience, then we try again as normal. The context is
++        // not lost: the next turn re-checks compaction once the window has passed.
++        if (lastAssistant && Date.now() - this._pvThrottledAt >= PV_MAX_RETRY_DELAY_MS) {
+             await this._checkCompaction(lastAssistant, false);
+         }
+         const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
+@@ -1526,6 +1675,33 @@ export class AgentSession {
+                 finalError: message.errorMessage,
              });
              this._retryAttempt = 0;
 +            // Privateer patch: remember that the endpoint is throttling us. The
@@ -260,7 +275,7 @@ index 638646d..ba1da98 100644
 +            // and firing it now just spends the summarizer budget on another 429 —
 +            // which is what answered the user's next message with "Auto-compaction
 +            // cancelled" instead of a reply. See the guard in prompt().
-+            if (isThrottleFailure(msg.errorMessage)) {
++            if (isThrottleFailure(message.errorMessage)) {
 +                this._pvThrottledAt = Date.now();
 +            }
 +            // Privateer patch: a transient error that survived the full retry budget
@@ -280,15 +295,15 @@ index 638646d..ba1da98 100644
 +        // classifies the raw HTML body as transient (it contains "500"/"502"), so the
 +        // agent looks hung — retrying a compaction that can never succeed — until the
 +        // summarizer budget burns. Context overflow never matches isHardHttpFailure.
-+        if (msg.stopReason === "error" && isHardHttpFailure(msg.errorMessage)) {
++        if (message.stopReason === "error" && isHardHttpFailure(message.errorMessage)) {
 +            return false;
          }
-         if (await this._checkCompaction(msg)) {
+         if (await this._checkCompaction(message, true, toolResults)) {
              return !this._agentRunAbortRequested;
-@@ -991,6 +1161,14 @@ export class AgentSession {
-             if (!hasConfiguredAuth) {
-                 const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
-                 if (isOAuth) {
+@@ -1655,6 +1831,14 @@ export class AgentSession {
+         if (!hasConfiguredAuth) {
+             const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
+             if (isOAuth) {
 +                    // Privateer patch: the account channel has no API key that could expire —
 +                    // the terminal is simply not signed in yet (a fresh install now boots on
 +                    // `privateer/*`, which is the model it will run once logged in). Stock Pi's
@@ -297,27 +312,12 @@ index 638646d..ba1da98 100644
 +                    if (this.model.provider === "privateer") {
 +                        throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 +                    }
-                     throw new Error(`Authentication failed for "${this.model.provider}". ` +
-                         `Credentials may have expired or network is unavailable. ` +
-                         `Run '/login ${this.model.provider}' to re-authenticate.`);
-@@ -1000,7 +1178,13 @@ export class AgentSession {
-             // Check if we need to compact before sending (catches aborted responses).
-             // The user's new prompt is sent below, so do not call agent.continue() here.
-             const lastAssistant = this._findLastAssistantMessage();
--            if (lastAssistant) {
-+            // Privateer patch: skip this while the provider is still throttling us.
-+            // Compaction here is another LLM call to the endpoint that just spent our
-+            // whole retry budget on 429s; it cannot succeed, and its failure is reported
-+            // as "Auto-compaction cancelled" — burying the user's actual prompt. One
-+            // rate-limit window of patience, then we try again as normal. The context is
-+            // not lost: the next turn re-checks compaction once the window has passed.
-+            if (lastAssistant && Date.now() - this._pvThrottledAt >= PV_MAX_RETRY_DELAY_MS) {
-                 await this._checkCompaction(lastAssistant, false);
-             }
-             // Build messages array (custom message if any, then user message)
-@@ -2351,6 +2535,34 @@ export class AgentSession {
+                 throw new Error(`Authentication failed for "${this.model.provider}". ` +
+                     `Credentials may have expired or network is unavailable. ` +
+                     `Run '/login ${this.model.provider}' to re-authenticate.`);
+@@ -3012,6 +3196,34 @@ export class AgentSession {
          // Context overflow is handled by compaction, not retry.
-         if (isContextOverflow(message, this.model?.contextWindow ?? 0))
+         if (isContextOverflow(message, (this._modelForMessage(message) ?? this.model)?.contextWindow ?? 0))
              return false;
 +        // Privateer patch: an HTTP status is a fact; a substring of the body is a guess.
 +        // pi classifies by regex over the whole error text, so a 403 whose body merely
@@ -350,7 +350,7 @@ index 638646d..ba1da98 100644
          return isRetryableAssistantError(message);
      }
      /**
-@@ -2408,7 +2620,10 @@ export class AgentSession {
+@@ -3069,7 +3281,10 @@ export class AgentSession {
              this._retryAttempt--;
              return false;
          }
@@ -408,7 +408,7 @@ index 197bccc..bc9ac3f 100644
  //# sourceMappingURL=auth-guidance.js.map
 \ No newline at end of file
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-index be748bf..378f4c7 100644
+index f9292e8..07c79da 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 @@ -6,7 +6,7 @@ import * as fs from "node:fs";
@@ -420,7 +420,7 @@ index be748bf..378f4c7 100644
  import { resolvePath } from "../../utils/paths.js";
  import { createEventBus } from "../event-bus.js";
  import { execCommand } from "../exec.js";
-@@ -401,12 +401,15 @@ async function loadExtensionModule(extensionPath, cacheToken) {
+@@ -468,12 +468,15 @@ async function loadExtensionModule(extensionPath, cacheToken) {
      const createJitiImpl = await getCreateJiti();
      // Compiled binaries and the bundled Node distribution use embedded modules.
      // Source TypeScript reuses host modules and root tsconfig paths. Unbundled
@@ -438,7 +438,7 @@ index be748bf..378f4c7 100644
      const jiti = createJitiImpl(import.meta.url, {
          moduleCache: false,
          ...resolutionOptions,
-@@ -607,9 +610,23 @@ export async function discoverAndLoadExtensions(configuredPaths, cwd, agentDir =
+@@ -674,9 +677,23 @@ export async function discoverAndLoadExtensions(configuredPaths, cwd, agentDir =
              }
          }
      };
@@ -466,7 +466,7 @@ index be748bf..378f4c7 100644
      const globalExtDir = path.join(resolvedAgentDir, "extensions");
      addPaths(discoverExtensionsInDir(globalExtDir));
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js
-index 696e98c..7585930 100644
+index 4d54e22..3c59e90 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js
 @@ -24,7 +24,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -477,8 +477,8 @@ index 696e98c..7585930 100644
 +import { projectConfigDirs, projectConfigWriteDir, resolveProjectConfigPath } from "../config.js";
  import { spawnProcess, spawnProcessSync } from "../utils/child-process.js";
  import { parseGitUrl } from "../utils/git.js";
- import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.js";
-@@ -711,23 +711,29 @@ export class DefaultPackageManager {
+ import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, normalizePath, resolvePath, } from "../utils/paths.js";
+@@ -717,28 +717,36 @@ export class DefaultPackageManager {
          const packageSources = this.dedupePackages(allPackages);
          await this.resolvePackageSources(packageSources, accumulator, onMissing);
          const globalBaseDir = this.agentDir;
@@ -512,10 +512,18 @@ index 696e98c..7585930 100644
          }
 -        this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir);
 +        this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDirs);
+         // Built-in extensions are enabled unless the user `extensions` setting excludes them, for example
+         // with `-builtin:mcp`. A matching `+`, `-`, or `!` entry in the project setting overrides that.
++        // Privateer patch: built-in paths are not relative, so the first (preferred)
++        // project config dir is the base for their override patterns.
+         for (const name of this.builtinExtensions) {
+             const path = `${BUILTIN_PATH_PREFIX}${name}`;
+-            const projectEnabled = applyAutoloadDisabledPatterns([path], getOverridePatterns(projectSettings.extensions ?? []), projectBaseDir).get(path);
++            const projectEnabled = applyAutoloadDisabledPatterns([path], getOverridePatterns(projectSettings.extensions ?? []), projectBaseDirs[0]).get(path);
+             this.addResource(accumulator.extensions, path, { source: "builtin", scope: projectEnabled === undefined ? "user" : "project", origin: "top-level" }, projectEnabled ?? isEnabledByOverrides(path, globalSettings.extensions ?? [], globalBaseDir));
+         }
          return this.toResolvedPaths(accumulator);
-     }
-     async resolveExtensionSources(sources, options) {
-@@ -1681,13 +1687,30 @@ export class DefaultPackageManager {
+@@ -1727,13 +1735,30 @@ export class DefaultPackageManager {
              writeFileSync(ignorePath, "*\n!.gitignore\n", "utf-8");
          }
      }
@@ -547,7 +555,7 @@ index 696e98c..7585930 100644
          }
          return join(this.agentDir, "npm");
      }
-@@ -1726,7 +1749,9 @@ export class DefaultPackageManager {
+@@ -1772,7 +1797,9 @@ export class DefaultPackageManager {
          }
          if (scope === "project") {
              this.assertProjectTrustedForScope(scope);
@@ -558,7 +566,7 @@ index 696e98c..7585930 100644
          }
          return join(this.agentDir, "npm", "node_modules", source.name);
      }
-@@ -1762,7 +1787,7 @@ export class DefaultPackageManager {
+@@ -1809,7 +1836,7 @@ export class DefaultPackageManager {
          }
          if (scope === "project") {
              this.assertProjectTrustedForScope(scope);
@@ -567,7 +575,7 @@ index 696e98c..7585930 100644
          }
          return join(this.agentDir, "git");
      }
-@@ -1785,7 +1810,7 @@ export class DefaultPackageManager {
+@@ -1832,7 +1859,7 @@ export class DefaultPackageManager {
      getBaseDirForScope(scope) {
          if (scope === "project") {
              this.assertProjectTrustedForScope(scope);
@@ -576,7 +584,7 @@ index 696e98c..7585930 100644
          }
          if (scope === "user") {
              return this.agentDir;
-@@ -1796,7 +1821,30 @@ export class DefaultPackageManager {
+@@ -1843,7 +1870,30 @@ export class DefaultPackageManager {
          return resolvePath(input, this.cwd, { homeDir: getHomeDir(), trim: true });
      }
      resolvePathFromBase(input, baseDir) {
@@ -608,7 +616,7 @@ index 696e98c..7585930 100644
      }
      collectPackageResources(packageRoot, accumulator, filter, metadata) {
          if (filter) {
-@@ -1936,19 +1984,24 @@ export class DefaultPackageManager {
+@@ -1983,19 +2033,24 @@ export class DefaultPackageManager {
              this.addResource(target, f, metadata, enabledPaths.has(f));
          }
      }
@@ -637,7 +645,7 @@ index 696e98c..7585930 100644
          const userOverrides = {
              extensions: (globalSettings.extensions ?? []),
              skills: (globalSettings.skills ?? []),
-@@ -1967,12 +2020,12 @@ export class DefaultPackageManager {
+@@ -2014,12 +2069,12 @@ export class DefaultPackageManager {
              prompts: join(globalBaseDir, "prompts"),
              themes: join(globalBaseDir, "themes"),
          };
@@ -656,7 +664,7 @@ index 696e98c..7585930 100644
          const userAgentsSkillsDir = join(getHomeDir(), ".agents", "skills");
          const projectTrusted = this.settingsManager.isProjectTrusted();
          const projectAgentsSkillDirs = projectTrusted
-@@ -1986,10 +2039,13 @@ export class DefaultPackageManager {
+@@ -2033,10 +2088,13 @@ export class DefaultPackageManager {
              }
          };
          if (projectTrusted) {
@@ -674,7 +682,7 @@ index 696e98c..7585930 100644
          }
          // Project skills from .agents/ (each with its own baseDir)
          for (const agentsSkillsDir of projectAgentsSkillDirs) {
-@@ -2001,8 +2057,11 @@ export class DefaultPackageManager {
+@@ -2048,8 +2106,11 @@ export class DefaultPackageManager {
              addResources("skills", collectAutoSkillEntries(agentsSkillsDir, "agents"), agentsMetadata, projectOverrides.skills, agentsBaseDir);
          }
          if (projectTrusted) {
@@ -689,13 +697,14 @@ index 696e98c..7585930 100644
          // User extensions from ~/.pi/agent/
          addResources("extensions", collectAutoExtensionEntries(userDirs.extensions), userMetadata, userOverrides.extensions, globalBaseDir);
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/project-trust.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/project-trust.js
-index 2f85768..328b27b 100644
+index 0ff35ba..2bf0d59 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/project-trust.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/project-trust.js
-@@ -1,8 +1,8 @@
+@@ -1,9 +1,9 @@
 -import { APP_NAME, CONFIG_DIR_NAME } from "../config.js";
 +import { APP_NAME, formatProjectConfigDirNames } from "../config.js";
  import { emitProjectTrustEvent } from "./extensions/runner.js";
+ import { SETTINGS_DEFAULTS } from "./settings-defaults.js";
  import { getProjectTrustOptions, hasTrustRequiringProjectResources, } from "./trust-manager.js";
  function formatProjectTrustPrompt(cwd) {
 -    return `Trust project folder?\n${cwd}\n\nThis allows ${APP_NAME} to load ${CONFIG_DIR_NAME} settings and resources, install missing project packages, and execute project extensions.`;
@@ -704,7 +713,7 @@ index 2f85768..328b27b 100644
  async function selectProjectTrustOption(cwd, ctx) {
      const options = getProjectTrustOptions(cwd, { includeSessionOnly: true });
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/prompt-templates.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/prompt-templates.js
-index 3700c08..79cb85e 100644
+index c37ea83..3043d61 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/prompt-templates.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/prompt-templates.js
 @@ -1,6 +1,6 @@
@@ -715,9 +724,9 @@ index 3700c08..79cb85e 100644
  import { parseFrontmatter } from "../utils/frontmatter.js";
  import { resolvePath } from "../utils/paths.js";
  import { createSyntheticSourceInfo } from "./source-info.js";
-@@ -157,7 +157,8 @@ export function loadPromptTemplates(options) {
-     const includeDefaults = options.includeDefaults;
-     const templates = [];
+@@ -186,7 +186,8 @@ export function loadPromptTemplates(options) {
+         diagnostics.push(...result.diagnostics);
+     };
      const globalPromptsDir = join(resolvedAgentDir, "prompts");
 -    const projectPromptsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "prompts");
 +    // Privateer patch: `.privateer/prompts` then `.pi/prompts`.
@@ -725,7 +734,7 @@ index 3700c08..79cb85e 100644
      const isUnderPath = (target, root) => {
          const normalizedRoot = resolve(root);
          if (target === normalizedRoot) {
-@@ -174,7 +175,8 @@ export function loadPromptTemplates(options) {
+@@ -203,7 +204,8 @@ export function loadPromptTemplates(options) {
                  baseDir: globalPromptsDir,
              });
          }
@@ -735,31 +744,31 @@ index 3700c08..79cb85e 100644
              return createSyntheticSourceInfo(resolvedPath, {
                  source: "local",
                  scope: "project",
-@@ -188,7 +190,9 @@ export function loadPromptTemplates(options) {
+@@ -217,7 +219,9 @@ export function loadPromptTemplates(options) {
      };
      if (includeDefaults) {
-         templates.push(...loadTemplatesFromDir(globalPromptsDir, getSourceInfo));
--        templates.push(...loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
+         addResult(loadTemplatesFromDir(globalPromptsDir, getSourceInfo));
+-        addResult(loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
 +        for (const projectPromptsDir of projectPromptsDirs) {
-+            templates.push(...loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
++            addResult(loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
 +        }
      }
      // 3. Load explicit prompt paths
      for (const rawPath of promptPaths) {
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js
-index c5ed4d7..d9f50ae 100644
+index 563d7d5..4f669b6 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/resource-loader.js
-@@ -1,7 +1,7 @@
- import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
  import { basename, dirname, join, resolve, sep } from "node:path";
+ import { detectCapabilities, getTerminalColorMode } from "@earendil-works/pi-tui";
  import chalk from "chalk";
 -import { CONFIG_DIR_NAME } from "../config.js";
 +import { findProjectConfigPath, projectConfigDirCandidates, projectConfigDirs } from "../config.js";
  import { loadThemeFromPath } from "../modes/interactive/theme/theme.js";
  import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.js";
  import { stripBom } from "../utils/text.js";
-@@ -625,12 +625,14 @@ export class DefaultResourceLoader {
+@@ -759,12 +759,14 @@ export class DefaultResourceLoader {
              join(this.agentDir, "themes"),
              join(this.agentDir, "extensions"),
          ];
@@ -780,7 +789,7 @@ index c5ed4d7..d9f50ae 100644
          for (const root of agentRoots) {
              if (this.isUnderPath(normalizedPath, root)) {
                  return { path: filePath, source: "local", scope: "user", origin: "top-level", baseDir: root };
-@@ -669,7 +671,11 @@ export class DefaultResourceLoader {
+@@ -803,7 +805,11 @@ export class DefaultResourceLoader {
          const themes = [];
          const diagnostics = [];
          if (includeDefaults) {
@@ -791,9 +800,9 @@ index c5ed4d7..d9f50ae 100644
 +                ...projectConfigDirs(this.cwd).map((dir) => join(dir, "themes")),
 +            ];
              for (const dir of defaultDirs) {
-                 this.loadThemesFromDir(dir, themes, diagnostics);
+                 this.loadThemesFromDir(dir, themes, diagnostics, colorMode);
              }
-@@ -807,8 +813,9 @@ export class DefaultResourceLoader {
+@@ -942,8 +948,9 @@ export class DefaultResourceLoader {
          return { themes: Array.from(seen.values()), diagnostics };
      }
      discoverSystemPromptFile() {
@@ -805,7 +814,7 @@ index c5ed4d7..d9f50ae 100644
              return projectPath;
          }
          const globalPath = join(this.agentDir, "SYSTEM.md");
-@@ -818,8 +825,9 @@ export class DefaultResourceLoader {
+@@ -953,8 +960,9 @@ export class DefaultResourceLoader {
          return undefined;
      }
      discoverAppendSystemPromptFile() {
@@ -818,10 +827,10 @@ index c5ed4d7..d9f50ae 100644
          }
          const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
-index ed9d8d2..34d344c 100644
+index d5ce9cd..a456908 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
-@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
+@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
  import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
  import { dirname, join } from "path";
  import lockfile from "proper-lockfile";
@@ -830,7 +839,7 @@ index ed9d8d2..34d344c 100644
  import { normalizePath, resolvePath } from "../utils/paths.js";
  import { stripBom } from "../utils/text.js";
  import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.js";
-@@ -52,14 +52,112 @@ function toSettingsError(scope, error, path) {
+@@ -114,14 +114,112 @@ function toSettingsError(scope, error, path) {
          error: error instanceof Error ? error : new Error(String(error)),
      };
  }
@@ -944,7 +953,7 @@ index ed9d8d2..34d344c 100644
      }
      acquireLockSyncWithRetry(path) {
          const maxAttempts = 10;
-@@ -86,7 +184,13 @@ export class FileSettingsStorage {
+@@ -148,7 +246,13 @@ export class FileSettingsStorage {
          throw lastError ?? new Error("Failed to acquire settings lock");
      }
      withLock(scope, fn) {
@@ -959,7 +968,7 @@ index ed9d8d2..34d344c 100644
          const dir = dirname(path);
          let release;
          try {
-@@ -164,7 +268,7 @@ export class SettingsManager {
+@@ -226,7 +330,7 @@ export class SettingsManager {
          const storage = new FileSettingsStorage(resolvedCwd, resolvedAgentDir);
          return SettingsManager.fromStorageWithPaths(storage, options, {
              global: join(resolvedAgentDir, "settings.json"),
@@ -968,7 +977,7 @@ index ed9d8d2..34d344c 100644
          });
      }
      /** Create a SettingsManager from an arbitrary storage backend */
-@@ -646,7 +750,15 @@ export class SettingsManager {
+@@ -723,7 +827,15 @@ export class SettingsManager {
      getProviderRetrySettings() {
          return {
              timeoutMs: this.settings.retry?.provider?.timeoutMs,
@@ -982,11 +991,11 @@ index ed9d8d2..34d344c 100644
 +            // 2 here is deliberately small: it is a *per-attempt* budget that nests inside
 +            // the session retry, and each of its waits already honours the server's number.
 +            maxRetries: this.settings.retry?.provider?.maxRetries ?? 2,
-             maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
+             maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? SETTINGS_DEFAULTS.retry.provider.maxRetryDelayMs,
          };
      }
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
-index d101003..540b972 100644
+index 65aa0b1..51537ef 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js
 @@ -1,7 +1,7 @@
@@ -998,7 +1007,7 @@ index d101003..540b972 100644
  import { parseFrontmatter } from "../utils/frontmatter.js";
  import { canonicalizePath, resolvePath } from "../utils/paths.js";
  import { createSyntheticSourceInfo } from "./source-info.js";
-@@ -348,10 +348,15 @@ export function loadSkills(options) {
+@@ -353,10 +353,15 @@ export function loadSkills(options) {
      }
      if (includeDefaults) {
          addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
@@ -1016,7 +1025,7 @@ index d101003..540b972 100644
      const isUnderPath = (target, root) => {
          const normalizedRoot = resolve(root);
          if (target === normalizedRoot) {
-@@ -364,7 +369,7 @@ export function loadSkills(options) {
+@@ -369,7 +374,7 @@ export function loadSkills(options) {
          if (!includeDefaults) {
              if (isUnderPath(resolvedPath, userSkillsDir))
                  return "user";
@@ -1026,23 +1035,23 @@ index d101003..540b972 100644
          }
          return "path";
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/slash-commands.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/slash-commands.js
-index 170a066..b535f72 100644
+index 25cc1c5..8a90edd 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/slash-commands.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/slash-commands.js
 @@ -8,7 +8,7 @@ export const BUILTIN_SLASH_COMMANDS = [
      { name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
      { name: "import", description: "Import and resume a session from a JSONL file" },
-     { name: "share", description: "Share session as a secret GitHub gist" },
+     { name: "share", description: "Share session via a Radius artifact or a GitHub gist" },
 -    { name: "bug", description: "Report a bug to the Pi developers", argumentHint: "<description>" },
 +    { name: "bug", description: "Export a bug report to email to Privateer support", argumentHint: "<description>" },
      { name: "copy", description: "Copy last agent message to clipboard" },
      { name: "name", description: "Set session display name" },
      { name: "session", description: "Show session info and stats" },
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/output-accumulator.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/output-accumulator.js
-index 7241668..7b79305 100644
+index 640d225..a376a21 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/output-accumulator.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/output-accumulator.js
-@@ -10,6 +10,30 @@ function defaultTempFilePath(prefix) {
+@@ -4,6 +4,30 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from "./truncate.j
  function byteLength(text) {
      return Buffer.byteLength(text, "utf-8");
  }
@@ -1073,7 +1082,7 @@ index 7241668..7b79305 100644
  /**
   * Incrementally tracks streaming output with bounded memory.
   *
-@@ -32,6 +56,11 @@ export class OutputAccumulator {
+@@ -26,6 +50,11 @@ export class OutputAccumulator {
      completedLines = 0;
      totalLines = 0;
      currentLineBytes = 0;
@@ -1085,7 +1094,7 @@ index 7241668..7b79305 100644
      hasOpenLine = false;
      finished = false;
      tempFilePath;
-@@ -40,6 +69,8 @@ export class OutputAccumulator {
+@@ -34,6 +63,8 @@ export class OutputAccumulator {
          this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
          this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
          this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
@@ -1094,7 +1103,7 @@ index 7241668..7b79305 100644
          this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
      }
      append(data) {
-@@ -122,8 +153,11 @@ export class OutputAccumulator {
+@@ -151,8 +182,11 @@ export class OutputAccumulator {
          }
          const bytes = byteLength(text);
          this.totalDecodedBytes += bytes;
@@ -1108,7 +1117,7 @@ index 7241668..7b79305 100644
          if (this.tailBytes > this.maxRollingBytes * 2) {
              this.trimTail();
          }
-@@ -145,6 +179,42 @@ export class OutputAccumulator {
+@@ -174,6 +208,42 @@ export class OutputAccumulator {
          }
          this.totalLines = this.completedLines + (this.hasOpenLine ? 1 : 0);
      }
@@ -1152,7 +1161,7 @@ index 7241668..7b79305 100644
          const buffer = Buffer.from(this.tailText, "utf-8");
          if (buffer.length <= this.maxRollingBytes) {
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js
-index 0877ee7..faa2559 100644
+index 5562460..12516b9 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js
 @@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -1164,7 +1173,7 @@ index 0877ee7..faa2559 100644
  import { canonicalizePath, resolvePath } from "../utils/paths.js";
  import { stripBom } from "../utils/text.js";
  const TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES = [
-@@ -151,9 +151,13 @@ export function hasTrustRequiringProjectResources(cwd) {
+@@ -152,9 +152,13 @@ export function hasTrustRequiringProjectResources(cwd) {
      const homeDir = canonicalizePath(resolvePath(process.env.HOME || homedir()));
      const userAgentsSkillsDir = join(homeDir, ".agents", "skills");
      let currentDir = canonicalizePath(resolvePath(cwd));
@@ -1182,7 +1191,7 @@ index 0877ee7..faa2559 100644
      while (true) {
          const agentsSkillsDir = join(currentDir, ".agents", "skills");
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts b/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts
-index 205144d..14080a2 100644
+index 3821d9f..b58133c 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts
 @@ -1,7 +1,7 @@
@@ -1195,7 +1204,7 @@ index 205144d..14080a2 100644
  export { type BranchPreparation, type BranchSummaryResult, type CollectEntriesResult, type CompactionResult, type CutPointResult, calculateContextTokens, collectEntriesForBranchSummary, compact, DEFAULT_COMPACTION_SETTINGS, estimateTokens, type FileOperations, findCutPoint, findTurnStartIndex, type GenerateBranchSummaryOptions, generateBranchSummary, generateSummary, generateSummaryWithUsage, getLastAssistantUsage, prepareBranchEntries, serializeConversation, shouldCompact, } from "./core/compaction/index.ts";
  export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/index.js b/node_modules/@earendil-works/pi-coding-agent/dist/index.js
-index 01017cd..c2b8722 100644
+index ab5cfcc..09fb05b 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/index.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/index.js
 @@ -3,7 +3,7 @@ export { parseArgs } from "./cli/args.js";
@@ -1208,10 +1217,10 @@ index 01017cd..c2b8722 100644
  export { calculateContextTokens, collectEntriesForBranchSummary, compact, DEFAULT_COMPACTION_SETTINGS, estimateTokens, findCutPoint, findTurnStartIndex, generateBranchSummary, generateSummary, generateSummaryWithUsage, getLastAssistantUsage, prepareBranchEntries, serializeConversation, shouldCompact, } from "./core/compaction/index.js";
  export { createEventBus } from "./core/event-bus.js";
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/main.js b/node_modules/@earendil-works/pi-coding-agent/dist/main.js
-index be10307..636fbf4 100644
+index e4fb658..8af5e0d 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/main.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/main.js
-@@ -802,7 +802,58 @@ export async function main(args, options) {
+@@ -821,7 +821,58 @@ export async function main(args, options) {
          if (exitCode !== 0) {
              process.exitCode = exitCode;
          }
@@ -1306,10 +1315,10 @@ index c30d6b8..ad1654a 100644
      return warnings;
  }
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.d.ts b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.d.ts
-index 7eae594..b21fae3 100644
+index d7b6c7b..10af81f 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.d.ts
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.d.ts
-@@ -8,7 +8,7 @@ interface BugReportContext {
+@@ -10,7 +10,7 @@ interface BugReportContext {
      showStatus: (message: string) => void;
      showError: (message: string) => void;
  }
@@ -1320,10 +1329,10 @@ index 7eae594..b21fae3 100644
  //# sourceMappingURL=bug-report.d.ts.map
 \ No newline at end of file
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.js
-index 59ae447..68cf842 100644
+index 3918684..42db58d 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/bug-report.js
-@@ -1,18 +1,21 @@
+@@ -1,28 +1,27 @@
  import * as path from "node:path";
 -import { getAuthCredential } from "../../cli/auth-command.js";
  import { BUG_REPORT_CUSTOM_ENTRY_TYPE, bugReportArchiveFileName, collectBugReportDiagnostics, collectBugReportMetadata, writeBugReportArchive, } from "../../core/bug-report.js";
@@ -1332,7 +1341,7 @@ index 59ae447..68cf842 100644
 -import { getRadiusGatewayUrl, RADIUS_PROVIDER_ID } from "../../core/radius.js";
  import { serializeSessionBranch } from "../../core/session-export.js";
  import { BorderedLoader } from "./components/bordered-loader.js";
- import { ExtensionInputComponent } from "./components/extension-input.js";
+ import { ExtensionEditorComponent } from "./components/extension-editor.js";
  import { ExtensionSelectorComponent } from "./components/extension-selector.js";
  import { createShareTrailingEntries } from "./session-share.js";
  import { theme } from "./theme/theme.js";
@@ -1350,7 +1359,17 @@ index 59ae447..68cf842 100644
  export async function reportBug(context, initialHint) {
      const options = await promptForOptions(context, initialHint);
      if (!options) {
-@@ -47,16 +50,6 @@ export async function reportBug(context, initialHint) {
+         context.showStatus("Bug report cancelled");
+         return;
+     }
+-    if (options.delivery === "upload" && process.env.PI_OFFLINE) {
+-        context.showError("Uploading bug reports requires online mode. Use Export as Zip instead.");
+-        return;
+-    }
+     let summary;
+     if (options.includeSummary) {
+         const loader = showLoader(context, `Writing summary with ${context.session.model?.name ?? "the current model"}...`);
+@@ -51,16 +50,6 @@ export async function reportBug(context, initialHint) {
          context.showError(`Failed to build bug report: ${errorMessage(error)}`);
          return;
      }
@@ -1367,7 +1386,7 @@ index 59ae447..68cf842 100644
      await exportZip(context, bundle);
  }
  async function promptForOptions(context, initialHint) {
-@@ -76,14 +69,13 @@ async function promptForOptions(context, initialHint) {
+@@ -80,14 +69,13 @@ async function promptForOptions(context, initialHint) {
          includeSummary = summary !== "No";
      }
      const description = hint.trim();
@@ -1384,7 +1403,7 @@ index 59ae447..68cf842 100644
      };
  }
  function buildBundle(session, options, summary) {
-@@ -111,28 +103,6 @@ function buildBundle(session, options, summary) {
+@@ -115,28 +103,6 @@ function buildBundle(session, options, summary) {
              : undefined,
      };
  }
@@ -1413,7 +1432,7 @@ index 59ae447..68cf842 100644
  async function exportZip(context, bundle) {
      const archivePath = path.join(process.cwd(), bugReportArchiveFileName(bundle.metadata.id));
      try {
-@@ -143,7 +113,7 @@ async function exportZip(context, bundle) {
+@@ -147,7 +113,7 @@ async function exportZip(context, bundle) {
          return;
      }
      recordInSession(context.session, bundle, { delivery: "zip", path: archivePath });
@@ -1423,7 +1442,7 @@ index 59ae447..68cf842 100644
  function recordInSession(session, bundle, delivery) {
      session.sessionManager.appendCustomEntry(BUG_REPORT_CUSTOM_ENTRY_TYPE, {
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js
-index 6f7ed6a..b0ed0ae 100644
+index 3825648..9bd656b 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/config-selector.js
 @@ -4,7 +4,7 @@
@@ -1432,10 +1451,10 @@ index 6f7ed6a..b0ed0ae 100644
  import { Container, getKeybindings, Input, matchesKey, Spacer, truncateToWidth, visibleWidth, } from "@earendil-works/pi-tui";
 -import { CONFIG_DIR_NAME } from "../../../config.js";
 +import { CONFIG_DIR_NAME, PROJECT_CONFIG_DIR_NAMES, formatProjectConfigDirNames, projectConfigDirs, projectConfigWriteDir } from "../../../config.js";
+ import { BUILTIN_PATH_PREFIX } from "../../../core/source-info.js";
  import { canonicalizePath, isLocalPath, resolvePath } from "../../../utils/paths.js";
  import { theme } from "../theme/theme.js";
- import { DynamicBorder } from "./dynamic-border.js";
-@@ -43,7 +43,7 @@ function getGroupLabel(metadata, agentDir) {
+@@ -47,7 +47,7 @@ function getGroupLabel(metadata, agentDir) {
                  ? `User (${formatBaseDir(metadata.baseDir)})`
                  : `Project (${formatBaseDir(metadata.baseDir)})`;
          }
@@ -1444,7 +1463,7 @@ index 6f7ed6a..b0ed0ae 100644
      }
      return metadata.scope === "user" ? "User settings" : "Project settings";
  }
-@@ -141,7 +141,7 @@ class ConfigSelectorHeader {
+@@ -148,7 +148,7 @@ class ConfigSelectorHeader {
          const hint = switchHint + actionHint + sep + rawKeyHint("esc", "close");
          const spacing = Math.max(1, width - visibleWidth(title) - visibleWidth(hint));
          const scopeHint = this.writeScope === "project"
@@ -1453,7 +1472,7 @@ index 6f7ed6a..b0ed0ae 100644
              : theme.fg("muted", `~/${CONFIG_DIR_NAME}/agent/settings.json`);
          return [
              truncateToWidth(`${title}${" ".repeat(spacing)}${hint}`, width, ""),
-@@ -695,7 +695,12 @@ class ResourceList {
+@@ -703,7 +703,12 @@ class ResourceList {
          return item.metadata.scope === "project" ? "project" : "user";
      }
      getTopLevelBaseDir(scope) {
@@ -1466,9 +1485,9 @@ index 6f7ed6a..b0ed0ae 100644
 +        return projectConfigDirs(this.cwd)[0] ?? projectConfigWriteDir(this.cwd);
      }
      getResourcePattern(item) {
-         const scope = item.metadata.scope;
+         if (item.metadata.source === "builtin")
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
-index 0e2811e..c0326e3 100644
+index cf40733..c31e867 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js
 @@ -1,7 +1,6 @@
@@ -1524,7 +1543,7 @@ index 0e2811e..c0326e3 100644
  /**
   * Format token counts for compact footer display.
   */
-@@ -41,8 +77,11 @@ export function formatCwdForFooter(cwd, home) {
+@@ -41,14 +77,16 @@ export function formatCwdForFooter(cwd, home) {
      return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
  }
  /**
@@ -1538,14 +1557,40 @@ index 0e2811e..c0326e3 100644
   */
  export class FooterComponent {
      autoCompactEnabled = true;
-@@ -74,32 +113,9 @@ export class FooterComponent {
+     session;
+     footerData;
+-    sessionStats;
+     constructor(session, footerData) {
+         this.session = session;
+         this.footerData = footerData;
+@@ -73,67 +111,10 @@ export class FooterComponent {
+     dispose() {
+         // Git watcher cleanup handled by provider
      }
-     render(width) {
-         const state = this.session.state;
+-    /**
+-     * Usage totals and context usage scan the whole session, and the footer renders on every frame.
+-     * Entries are append-only and every append moves the leaf, so the results only change with the
+-     * session, leaf, entry count, or the model whose context window applies.
+-     */
+-    getSessionStats() {
+-        const sessionManager = this.session.sessionManager;
+-        const entryCount = sessionManager.getEntryCount();
+-        const sessionId = sessionManager.getSessionId();
+-        const leafId = sessionManager.getLeafId();
+-        const limitsModel = this.session.routedModel?.model ?? this.session.model;
+-        const cached = this.sessionStats;
+-        if (cached &&
+-            cached.session === this.session &&
+-            cached.sessionId === sessionId &&
+-            cached.leafId === leafId &&
+-            cached.entryCount === entryCount &&
+-            cached.limitsModel === limitsModel) {
+-            return cached;
+-        }
 -        // Calculate cumulative usage from ALL session entries (not just post-compaction messages)
 -        const usageTotals = createUsageTotals();
 -        let latestCacheHitRate;
--        for (const entry of this.session.sessionManager.getEntries()) {
+-        for (const entry of sessionManager.getEntries()) {
 -            if (entry.type === "usage") {
 -                addUsageToTotals(usageTotals, entry.usage);
 -            }
@@ -1565,16 +1610,30 @@ index 0e2811e..c0326e3 100644
 -        // Calculate context usage from session (handles compaction correctly).
 -        // After compaction, tokens are unknown until the next LLM response.
 -        const contextUsage = this.session.getContextUsage();
+-        this.sessionStats = {
+-            session: this.session,
+-            sessionId,
+-            leafId,
+-            entryCount,
+-            limitsModel,
+-            usageTotals,
+-            latestCacheHitRate,
+-            contextUsage,
+-        };
+-        return this.sessionStats;
+-    }
+     render(width) {
+         const state = this.session.state;
+-        const { usageTotals, latestCacheHitRate, contextUsage } = this.getSessionStats();
 -        const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 -        const contextPercentValue = contextUsage?.percent ?? 0;
 -        const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 +        // Privateer: no token counters, cache-hit rate, cost or context gauge in the
-+        // footer — so the accumulation that fed them is gone too. Upstream walked EVERY
-+        // session entry on EVERY render to build numbers we no longer draw.
++        // footer — so upstream's getSessionStats() scan that fed them is gone too.
          // Replace home directory with ~
          let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
          // Add git branch if available
-@@ -112,56 +128,24 @@ export class FooterComponent {
+@@ -146,56 +127,24 @@ export class FooterComponent {
          if (sessionName) {
              pwd = `${pwd} • ${sessionName}`;
          }
@@ -1646,7 +1705,7 @@ index 0e2811e..c0326e3 100644
          const minPadding = 2;
          // Add thinking level indicator if model supports reasoning
          let rightSideWithoutProvider = modelName;
-@@ -174,50 +158,48 @@ export class FooterComponent {
+@@ -214,50 +163,48 @@ export class FooterComponent {
          let rightSide = rightSideWithoutProvider;
          if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
              rightSide = `(${state.model.provider}) ${rightSideWithoutProvider}`;
@@ -1716,14 +1775,14 @@ index 0e2811e..c0326e3 100644
          return lines;
      }
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
-index 6d0356c..ca0aa98 100644
+index d447db5..8f7de42 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
 @@ -1,9 +1,36 @@
 -import { Box, Container, getCapabilities, Image, MouseRegion, Spacer, Text, } from "@earendil-works/pi-tui";
 +import { Box, Container, getCapabilities, Image, MouseRegion, Spacer, visibleWidth, Text, } from "@earendil-works/pi-tui";
- import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.js";
- import { convertToPng } from "../../../utils/image-convert.js";
+ import { formatToolCallWithArgs, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.js";
+ import { ensurePngTranscoder } from "../../../utils/image-convert.js";
  import { theme } from "../theme/theme.js";
  import { keyHint } from "./keybinding-hints.js";
  const FALLBACK_PREVIEW_LINES = 10;
@@ -1757,7 +1816,7 @@ index 6d0356c..ca0aa98 100644
  export class ToolExecutionComponent extends Container {
      contentBox;
      contentText;
-@@ -44,8 +71,13 @@ export class ToolExecutionComponent extends Container {
+@@ -47,8 +74,13 @@ export class ToolExecutionComponent extends Container {
          // Always create all shell variants. contentBox is used for default renderer-based composition.
          // selfRenderContainer is used when the tool renders its own framing.
          // contentText is reserved for generic fallback rendering when no tool definition exists.
@@ -1773,9 +1832,9 @@ index 6d0356c..ca0aa98 100644
          this.contentTextRegion = this.createResultRegion(this.contentText);
          this.selfRenderContainer = new Container();
          if (this.hasRendererDefinition()) {
-@@ -90,6 +122,13 @@ export class ToolExecutionComponent extends Container {
+@@ -95,6 +127,13 @@ export class ToolExecutionComponent extends Container {
      createCallFallback() {
-         return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
+         return new Text(formatToolCallWithArgs(this.toolName, this.args, theme, this.expanded), 0, 0);
      }
 +    /** Privateer: red-flag a failed call, pass a pending/succeeded one straight through. */
 +    decorateCall(component) {
@@ -1787,7 +1846,7 @@ index 6d0356c..ca0aa98 100644
      createResultFallback() {
          const output = this.getTextOutput();
          if (!output) {
-@@ -237,19 +276,22 @@ export class ToolExecutionComponent extends Container {
+@@ -213,19 +252,22 @@ export class ToolExecutionComponent extends Container {
              renderContainer.clear();
              const callRenderer = this.getCallRenderer();
              if (!callRenderer) {
@@ -1813,7 +1872,7 @@ index 6d0356c..ca0aa98 100644
                      hasContent = true;
                  }
              }
-@@ -322,7 +364,8 @@ export class ToolExecutionComponent extends Container {
+@@ -309,7 +351,8 @@ export class ToolExecutionComponent extends Container {
          return getRenderedTextOutput(this.result, this.showImages);
      }
      formatToolExecution() {
@@ -1824,19 +1883,19 @@ index 6d0356c..ca0aa98 100644
          if (content) {
              text += `\n\n${content}`;
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-index d82182c..08bec2d 100644
+index d2343a5..8487713 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js
-@@ -10,7 +10,7 @@ import * as TuiLayouts from "@earendil-works/pi-tui";
+@@ -11,7 +11,7 @@ import * as TuiLayouts from "@earendil-works/pi-tui";
  import { CombinedAutocompleteProvider, Container, fuzzyFilter, getCapabilities, hyperlink, Markdown, matchesKey, Spacer, setCapabilityOverrides, setKeybindings, Text, TruncatedText, TuiAltScreen, TuiMainScreen, visibleWidth, } from "@earendil-works/pi-tui";
  import chalk from "chalk";
  import { spawn } from "child_process";
--import { APP_NAME, APP_TITLE, CONFIG_DIR_NAME, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, VERSION, } from "../../config.js";
-+import { APP_NAME, APP_TITLE, formatProjectConfigDirNames, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, VERSION, } from "../../config.js";
+-import { APP_NAME, APP_TITLE, CONFIG_DIR_NAME, detectInstallChange, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, VERSION, } from "../../config.js";
++import { APP_NAME, APP_TITLE, detectInstallChange, formatProjectConfigDirNames, getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, VERSION, } from "../../config.js";
  import { parseSkillBlock } from "../../core/agent-session.js";
  import { SessionImportFileNotFoundError } from "../../core/agent-session-runtime.js";
  import { CACHE_TTL_MS, collectCacheMisses, computeCacheWaste, detectCacheMiss, } from "../../core/cache-stats.js";
-@@ -141,7 +141,12 @@ export function formatResumeCommand(sessionManager) {
+@@ -177,7 +177,12 @@ export function formatResumeCommand(sessionManager) {
      const sessionFile = sessionManager.getSessionFile();
      if (!sessionFile || !fs.existsSync(sessionFile))
          return undefined;
@@ -1850,8 +1909,8 @@ index d82182c..08bec2d 100644
      if (!sessionManager.usesDefaultSessionDir()) {
          args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
      }
-@@ -192,6 +197,77 @@ function formatLoginProviderCompletionDescription(provider) {
-     const authTypes = provider.authTypes.map(formatAuthSelectorProviderType).join("/");
+@@ -232,6 +237,77 @@ function formatLoginProviderCompletionDescription(provider) {
+         .join("/");
      return provider.name === provider.id ? authTypes : `${provider.name} · ${authTypes}`;
  }
 +// Privateer patch: describe an error we only have the TEXT of. Mirrors
@@ -1928,7 +1987,7 @@ index d82182c..08bec2d 100644
  export class InteractiveMode {
      runtimeHost;
      renderer;
-@@ -404,9 +480,15 @@ export class InteractiveMode {
+@@ -451,9 +527,15 @@ export class InteractiveMode {
      }
      getBuiltInCommandConflictDiagnostics(extensionRunner) {
          const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
@@ -1945,7 +2004,7 @@ index d82182c..08bec2d 100644
              .map((command) => ({
              type: "warning",
              message: command.invocationName === command.name
-@@ -775,20 +857,18 @@ export class InteractiveMode {
+@@ -841,20 +923,18 @@ export class InteractiveMode {
                  this.showNewVersionNotification(newRelease);
              }
          });
@@ -1978,16 +2037,16 @@ index d82182c..08bec2d 100644
          // Check tmux keyboard setup asynchronously
          this.checkTmuxKeyboardSetup().then((warning) => {
              if (warning) {
-@@ -1568,7 +1648,7 @@ export class InteractiveMode {
+@@ -1651,7 +1731,7 @@ export class InteractiveMode {
          if (this.bugReportHintShown)
              return;
          this.bugReportHintShown = true;
--        this.chatContainer.addChild(new Text(theme.fg("muted", `If this looks like a ${APP_NAME} bug, /bug sends a report to the developers.`), this.outputPad, 0));
-+        this.chatContainer.addChild(new Text(theme.fg("muted", `If this looks like a ${APP_NAME} bug, /bug exports a report you can email to support@privateer.pro.`), this.outputPad, 0));
+-        this.chatContainer.addChild(new ThemedText(() => theme.fg("muted", `If this looks like a ${APP_NAME} bug, /bug sends a report to the developers.`), this.outputPad, 0));
++        this.chatContainer.addChild(new ThemedText(() => theme.fg("muted", `If this looks like a ${APP_NAME} bug, /bug exports a report you can email to support@privateer.pro.`), this.outputPad, 0));
          this.ui.requestRender();
      }
-     renderCurrentSessionState() {
-@@ -2419,7 +2499,17 @@ export class InteractiveMode {
+     maybeSuggestBugReport(message) {
+@@ -2558,7 +2638,17 @@ export class InteractiveMode {
              if (text === "/model" || text.startsWith("/model ")) {
                  const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -2006,7 +2065,7 @@ index d82182c..08bec2d 100644
                  return;
              }
              if (text === "/thinking" || text.startsWith("/thinking ")) {
-@@ -2497,12 +2587,42 @@ export class InteractiveMode {
+@@ -2636,12 +2726,42 @@ export class InteractiveMode {
              if (text === "/login" || text.startsWith("/login ")) {
                  const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
                  this.editor.setText("");
@@ -2051,7 +2110,7 @@ index d82182c..08bec2d 100644
                  return;
              }
              if (text === "/new") {
-@@ -2827,9 +2947,19 @@ export class InteractiveMode {
+@@ -3006,9 +3126,19 @@ export class InteractiveMode {
                      if (entries[0]?.type !== "compaction") {
                          throw new Error("Completed compaction is missing from the session context");
                      }
@@ -2074,20 +2133,20 @@ index d82182c..08bec2d 100644
                      this.addMessageToChat(createCompactionSummaryMessage(event.result.summary, event.result.tokensBefore, new Date().toISOString()));
                      if (event.result.usage) {
                          this.addCompactionCostNotice({
-@@ -3253,7 +3383,7 @@ export class InteractiveMode {
+@@ -3441,7 +3571,7 @@ export class InteractiveMode {
          if (this.chatContainer.children.length > 0) {
              this.chatContainer.addChild(new Spacer(1));
          }
--        this.chatContainer.addChild(new Text(theme.fg("warning", `This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart pi.`), 1, 0));
-+        this.chatContainer.addChild(new Text(theme.fg("warning", `This project is not trusted. Project ${formatProjectConfigDirNames()} resources and packages are ignored. Use /trust to save a trust decision, then restart ${process.env.PRIVATEER_CMD || APP_NAME}.`), 1, 0));
+-        this.chatContainer.addChild(new ThemedText(() => theme.fg("warning", `This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart pi.`), 1, 0));
++        this.chatContainer.addChild(new ThemedText(() => theme.fg("warning", `This project is not trusted. Project ${formatProjectConfigDirNames()} resources and packages are ignored. Use /trust to save a trust decision, then restart ${process.env.PRIVATEER_CMD || APP_NAME}.`), 1, 0));
      }
      async getUserInput() {
          const queuedInput = this.pendingUserInputs.shift();
-@@ -3597,7 +3727,17 @@ export class InteractiveMode {
+@@ -3795,7 +3925,17 @@ export class InteractiveMode {
      }
      showError(errorMessage) {
          this.chatContainer.addChild(new Spacer(1));
--        this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), this.outputPad, 0));
+-        this.chatContainer.addChild(new ThemedText(() => theme.fg("error", `Error: ${errorMessage}`), this.outputPad, 0));
 +        // Privateer patch: by the time an error reaches here it is only a string — the
 +        // structured fields describeError() reads are long gone, so the user was shown
 +        // the SDK's own words ("429 status code (no body)"), which say nothing about
@@ -2095,49 +2154,65 @@ index d82182c..08bec2d 100644
 +        // it and say what describeError would. Mirrors describeErrorText in
 +        // src/engine/errors.ts. Anything without a leading status prints unchanged.
 +        const described = pvDescribeErrorText(errorMessage);
-+        this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${described?.message ?? errorMessage}`), this.outputPad, 0));
++        this.chatContainer.addChild(new ThemedText(() => theme.fg("error", `Error: ${described?.message ?? errorMessage}`), this.outputPad, 0));
 +        if (described?.hint) {
-+            this.chatContainer.addChild(new Text(theme.fg("muted", described.hint), this.outputPad, 0));
++            this.chatContainer.addChild(new ThemedText(() => theme.fg("muted", described.hint), this.outputPad, 0));
 +        }
          this.ui.requestRender();
      }
      showWarning(warningMessage) {
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
-index 3f4c698..e0152d0 100644
+index 0a82c28..f9c106b 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json
-@@ -42,9 +42,9 @@
- 		"customMessageBg": "customMsgBg",
- 		"customMessageText": "text",
- 		"customMessageLabel": "#9575cd",
--		"toolPendingBg": "toolPendingBg",
--		"toolSuccessBg": "toolSuccessBg",
--		"toolErrorBg": "toolErrorBg",
+@@ -34,9 +34,9 @@
+ 		"customMessageBg": "okhsl(295 42% 24%)",
+ 		"customMessageText": "muted",
+ 		"customMessageLabel": "violet",
+-		"toolPendingBg": "okhsl(229 5% 24%)",
+-		"toolSuccessBg": "okhsl(158 46% 25%)",
+-		"toolErrorBg": "okhsl(19 54% 25%)",
 +		"toolPendingBg": "",
 +		"toolSuccessBg": "",
 +		"toolErrorBg": "",
  		"toolTitle": "text",
- 		"toolOutput": "gray",
- 
+ 		"toolOutput": "muted",
+ 		"mdHeading": "yellow",
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
-index 20f6783..49fc151 100644
+index 3d870c0..57a2cb5 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/light.json
-@@ -41,9 +41,9 @@
- 		"customMessageBg": "customMsgBg",
- 		"customMessageText": "text",
- 		"customMessageLabel": "#7e57c2",
--		"toolPendingBg": "toolPendingBg",
--		"toolSuccessBg": "toolSuccessBg",
--		"toolErrorBg": "toolErrorBg",
+@@ -34,9 +34,9 @@
+ 		"customMessageBg": "okhsl(295 25% 91%)",
+ 		"customMessageText": "muted",
+ 		"customMessageLabel": "violet",
+-		"toolPendingBg": "okhsl(248 3% 91%)",
+-		"toolSuccessBg": "okhsl(156 21% 91%)",
+-		"toolErrorBg": "okhsl(24 23% 91%)",
 +		"toolPendingBg": "",
 +		"toolSuccessBg": "",
 +		"toolErrorBg": "",
  		"toolTitle": "text",
- 		"toolOutput": "mediumGray",
- 
+ 		"toolOutput": "muted",
+ 		"mdHeading": "yellow",
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js
+index d50acea..0ff5f27 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js
+@@ -409,6 +409,11 @@ function createSystemTheme(mode) {
+         saturation: terminalColorsPending ? 0 : 1,
+         appearanceHint: getTerminalTheme(),
+     });
++    // Privateer patch: flat tool calls — no tinted panel behind pending/success/error tool
++    // blocks, matching dark.json/light.json. "" means the terminal's own background, so a
++    // tool call reads as part of the transcript; the red ✗ marks a failure on its own.
++    for (const token of ["toolPendingBg", "toolSuccessBg", "toolErrorBg"])
++        generated.colors[token] = "";
+     const { fgColors, bgColors } = splitThemeColors(withThemeTokenFallbacks(generated.colors));
+     return new Theme(fgColors, bgColors, mode ?? getTerminalColorMode(), {
+         name: SYSTEM_THEME_NAME,
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
-index 3f101e6..51c7f73 100644
+index 6f56150..a68a510 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/package-manager-cli.js
 @@ -5,7 +5,7 @@ import chalk from "chalk";
@@ -2149,7 +2224,7 @@ index 3f101e6..51c7f73 100644
  import { ModelRuntime } from "./core/model-runtime.js";
  import { DefaultPackageManager } from "./core/package-manager.js";
  import { resolveProjectTrusted } from "./core/project-trust.js";
-@@ -221,7 +221,7 @@ Without -l, starts in global settings (~/${CONFIG_DIR_NAME}/agent/settings.json)
+@@ -245,7 +245,7 @@ Without -l, starts in global settings (~/${CONFIG_DIR_NAME}/agent/settings.json)
  Press Tab in the TUI to switch between global and project-local modes.
  
  Options:
@@ -2158,7 +2233,7 @@ index 3f101e6..51c7f73 100644
    -a, --approve     Trust project-local files for this command with -l
    -na, --no-approve Ignore project-local files for this command with -l
  `);
-@@ -235,7 +235,7 @@ function printPackageCommandHelp(command) {
+@@ -259,7 +259,7 @@ function printPackageCommandHelp(command) {
  Install a package and add it to settings.
  
  Options:
@@ -2167,7 +2242,7 @@ index 3f101e6..51c7f73 100644
    -a, --approve     Trust project-local files for this command
    -na, --no-approve Ignore project-local files for this command
  
-@@ -256,7 +256,7 @@ Remove a package and its source from settings.
+@@ -280,7 +280,7 @@ Remove a package and its source from settings.
  Alias: ${APP_NAME} uninstall <source> [-l]
  
  Options:

@@ -1,11 +1,11 @@
 diff --git a/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js b/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
-index 216a45f..a1e3214 100644
+index 4e36f35..8a3f8a5 100644
 --- a/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
 +++ b/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
-@@ -1,11 +1,38 @@
+@@ -2,11 +2,39 @@ import { clampThinkingLevel } from "../models.js";
  import { estimateContextTokens } from "../utils/estimate.js";
  const CONTEXT_SAFETY_TOKENS = 4096;
--const MIN_MAX_TOKENS = 1;
+ const MIN_MAX_TOKENS = 1;
 +// Privateer patch: floor the answer budget at a usable answer, not at one token.
 +//
 +// Stock pi floored this at 1, so the moment the (chars/4) context estimate reached
@@ -36,11 +36,10 @@ index 216a45f..a1e3214 100644
 +// Mirrors src/engine/contextBudget.ts, which is where this is specified and tested.
  export function clampMaxTokensToContext(model, context, maxTokens) {
      if (model.contextWindow <= 0)
--        return Math.max(MIN_MAX_TOKENS, maxTokens);
-+        return Math.max(1, maxTokens);
+         return Math.max(MIN_MAX_TOKENS, maxTokens);
      const available = model.contextWindow - estimateContextTokens(context).tokens - CONTEXT_SAFETY_TOKENS;
 -    return Math.min(maxTokens, Math.max(MIN_MAX_TOKENS, available));
 +    return Math.min(maxTokens, Math.max(MIN_ANSWER_TOKENS, available));
  }
- export function buildBaseOptions(model, context, options, apiKey) {
-     const samplingParams = model.samplingParams || options?.samplingParams
+ export function resolveSamplingParams(model, thinkingLevel, requestParams) {
+     const effectiveThinkingLevel = clampThinkingLevel(model, thinkingLevel);
