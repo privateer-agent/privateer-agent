@@ -21,6 +21,10 @@
   <img src="https://img.shields.io/badge/inference-TEE%20attested%20·%20on--device%20PII%20gate-5b8def" alt="Private inference" />
 </p>
 
+<p align="center">
+  <img src="brand/demo.gif" alt="Opening Privateer in a terminal and running a command" width="720" />
+</p>
+
 ```bash
 curl -fsSL https://privateer.pro/install.sh | sh    # macOS / Linux: installs the `privateer` command
 irm https://privateer.pro/install.ps1 | iex         # Windows (PowerShell)
