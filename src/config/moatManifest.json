@@ -29,7 +29,7 @@
     { "entry": "extensions/privateer-web.ts", "name": "privateer-web", "note": "web_search/web_fetch — account search when signed in, else the user's own provider (rpiv-web-tools); crypto_lookup — account market data, in both cases" },
     { "dep": ["@juicesharp/rpiv-ask-user-question", "index.ts"], "name": "rpiv-ask-user-question", "note": "ask_user_question" },
     { "dep": ["pi-mcp-adapter", "index.ts"], "name": "pi-mcp-adapter", "note": "MCP servers as first-class tools" },
-    { "dep": ["pi-subagents", "src", "extension", "index.ts"], "name": "pi-subagents", "note": "bounded parallel sub-agents" },
+    { "dep": ["pi-subagents", "index.js"], "name": "pi-subagents", "note": "bounded parallel sub-agents" },
     { "dep": ["pi-background-tasks", "extensions", "anthropic-attribution.ts"], "name": "anthropic-attribution", "note": "Anthropic OAuth attribution and prompt sanitization" },
     { "dep": ["pi-background-tasks", "extensions", "background-tasks.ts"], "name": "pi-background-tasks", "note": "durable background tasks, delegated agents, and fusion" }
   ]

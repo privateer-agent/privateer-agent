@@ -1,5 +1,28 @@
+diff --git a/node_modules/pi-background-tasks/src/core/anthropic-attribution.ts b/node_modules/pi-background-tasks/src/core/anthropic-attribution.ts
+index 2a4d905..3a689f5 100644
+--- a/node_modules/pi-background-tasks/src/core/anthropic-attribution.ts
++++ b/node_modules/pi-background-tasks/src/core/anthropic-attribution.ts
+@@ -7,6 +7,7 @@ import type {
+   Context as HostContext,
+   Model as HostModel,
+   SimpleStreamOptions as HostSimpleStreamOptions,
++  TranscriptContext as HostTranscriptContext,
+ } from '@earendil-works/pi-ai';
+ 
+ export const CLAUDE_CODE_SESSION_HEADER = 'X-Claude-Code-Session-Id';
+@@ -3024,7 +3025,9 @@ async function fetchAnthropicResponse(
+ }
+ 
+ type HostForwardingModel = PiModelLike & HostModel<'anthropic-messages'>;
+-type HostForwardingContext = PiStreamContext & HostContext;
++// Privateer: pi-ai 1.x brands the host's context type (TranscriptContext). The value
++// passed through is the host's own context object, so only the type needs the brand.
++type HostForwardingContext = PiStreamContext & HostContext & HostTranscriptContext;
+ type HostForwardingOptions = PiSimpleStreamOptions & HostSimpleStreamOptions;
+ type HostForwardingStream = AssistantMessageEventStreamLike & HostAssistantMessageEventStream;
+ 
 diff --git a/node_modules/pi-background-tasks/src/core/registry.ts b/node_modules/pi-background-tasks/src/core/registry.ts
-index cfbf133..c632390 100644
+index df6e6f4..cbab9f2 100644
 --- a/node_modules/pi-background-tasks/src/core/registry.ts
 +++ b/node_modules/pi-background-tasks/src/core/registry.ts
 @@ -1,11 +1,11 @@
@@ -7,7 +30,7 @@ index cfbf133..c632390 100644
 -import { randomBytes } from 'node:crypto';
 +import { createHash, randomBytes } from 'node:crypto';
  import { createWriteStream, existsSync } from 'node:fs';
- import { mkdir, realpath, writeFile } from 'node:fs/promises';
+ import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 -import { join } from 'node:path';
 +import { join, resolve } from 'node:path';
  import type { Api, Model } from '@earendil-works/pi-ai';
@@ -17,7 +40,7 @@ index cfbf133..c632390 100644
  import {
    boundedRead,
    deriveTaskNameFromCommand,
-@@ -781,9 +781,29 @@ export class BackgroundTaskRegistry {
+@@ -1263,9 +1263,29 @@ export class BackgroundTaskRegistry {
      if (this.runtimeDir) return this.runtimeDir;
      const sessionId = sanitizePathSegment(ctx.sessionId ?? `session-${String(process.pid)}`);
      const runId = `${sessionId}-${String(process.pid)}`;
@@ -51,29 +74,21 @@ index cfbf133..c632390 100644
      return this.runtimeDir;
    }
 diff --git a/node_modules/pi-background-tasks/src/extension.ts b/node_modules/pi-background-tasks/src/extension.ts
-index 3afbd8e..d003a57 100644
+index c966df5..b073a15 100644
 --- a/node_modules/pi-background-tasks/src/extension.ts
 +++ b/node_modules/pi-background-tasks/src/extension.ts
-@@ -473,14 +473,15 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
-   pi.on('session_start', async (_event, ctx) => {
-     registry.setShuttingDown(false);
+@@ -710,8 +710,8 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
      currentCtx = ctx;
--    await registry.ensureRuntimeDir(ctx);
+     const nextRegistryCtx = currentRegistryCtx ?? registryContext(ctx);
+     currentRegistryCtx = nextRegistryCtx;
+-    await registry.ensureRuntimeDir(nextRegistryCtx);
+-    if (disposed) return;
 +    // Privateer: no project writes just to open a session. Each task-start path
 +    // creates its runtime directory on demand, with a per-user fallback.
      updateUi(ctx);
-     if (statusInterval) clearInterval(statusInterval);
-     statusInterval = setInterval(() => {
-       updateUi();
-     }, STATUS_INTERVAL_MS);
--    // One-shot, non-blocking: never awaited on the session-start path or the status tick.
--    void scheduleUpdateCheck(ctx);
-+    // Privateer: update check disabled. Privateer manages updates at the distribution
-+    // level via `privateer update`; individual tool packs shouldn't check npm or prompt /bg-update.
-   });
- 
-   pi.on('session_shutdown', async (_event, ctx) => {
-@@ -565,22 +566,11 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+     hostService.markReady();
+     if (disposed) return;
+@@ -830,22 +830,11 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
    });
  
    pi.registerCommand('bg-update', {
@@ -99,7 +114,7 @@ index 3afbd8e..d003a57 100644
        ];
        ctx.ui.notify(lines.join('\n'), 'info');
        return Promise.resolve();
-@@ -682,7 +672,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+@@ -958,7 +947,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
    pi.registerTool<typeof BgRunParams, BgRunDetails>({
      name: 'bg_run',
      label: 'Background Run',

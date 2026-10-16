@@ -222,7 +222,7 @@ test("background tasks update check and notice are suppressed in Privateer", asy
     events: { on: () => () => {}, emit: () => {} },
     appendSessionOutput: () => {},
   };
-  bgExt(mockPi as any);
+  await bgExt(mockPi as any); // async since pi-background-tasks 2.6
 
   // /bg-update provides Privateer distribution update guidance instead of npm install instructions
   const bgUpdate = commands.get("bg-update");
@@ -239,6 +239,7 @@ test("background tasks update check and notice are suppressed in Privateer", asy
   const statuses: Array<{ key: string; text?: string }> = [];
   const ctx = {
     cwd: home,
+    sessionManager: { getSessionId: () => "updates-test" },
     ui: { setStatus: (key: string, text?: string) => statuses.push({ key, text }) },
   };
   await sessionStart({}, ctx);
