@@ -14,7 +14,7 @@
 import type { PermissionMode } from "../config/permissionMode.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import { ModeGate, type AskOutcome } from "../permissions/modeGate.ts";
-import { classifyToolCall } from "../permissions/classify.ts";
+import { classifyToolCall, type ToolHints } from "../permissions/classify.ts";
 import { redactText } from "../util/redact.ts";
 import { coauthorGitCommits } from "../util/coauthor.ts";
 import { DEFAULT_DENYLIST } from "../permissions/danger.ts";
@@ -136,6 +136,7 @@ export async function decideToolCall(
   toolName: string,
   input: unknown,
   ctx: ToolCallCtx,
+  hints: ToolHints = {},
 ): Promise<GateBlock | undefined> {
   // Remote-driven turn: a few tools can't be driven from the app because their own
   // interactive prompts render on the host terminal, not the relay (pi-subagents
@@ -162,7 +163,7 @@ export async function decideToolCall(
     confineToCwd: ctrl.confineToCwd,
     allowedOutsideRoots: ctrl.allowedOutsideRoots,
     guardSecretReads: ctrl.hardConfine,
-  });
+  }, hints);
   if (!req) return undefined; // no gate needed — read-only/in-scope/meta
 
   // Attach the picture a GUI action is actually about. Done HERE rather than in
@@ -284,12 +285,14 @@ export function makePermissionGate(ctrl: GateController) {
           toolName: string;
           toolCallId: string;
           content: Array<{ type: string; text?: string; [k: string]: unknown }>;
+          structuredContent?: unknown;
           details?: unknown;
           isError?: boolean;
         },
         ctx: unknown,
-      ) => { content?: unknown[] } | undefined,
+      ) => { content?: unknown[]; structuredContent?: unknown } | undefined,
     ): void;
+    getAllTools?(): Array<{ name: string; annotations?: { readOnlyHint?: boolean } }>;
   }
 
   return function permissionGate(pi: PiExtensionApi): void {
@@ -297,13 +300,32 @@ export function makePermissionGate(ctrl: GateController) {
     // the command that will actually run (util/coauthor.ts).
     pi.on("tool_call", (event, ctx) => {
       coauthorGitCommits(event.toolName, event.input);
-      return decideToolCall(ctrl, event.toolName, event.input, ctx);
+      return decideToolCall(ctrl, event.toolName, event.input, ctx, hintsFor(event.toolName));
     });
+
+    // What an MCP tool declares about itself (Pi reports server annotations through
+    // getAllTools). Looked up per call rather than cached: servers connect, reconnect
+    // and change their tool lists during a session.
+    function hintsFor(toolName: string): ToolHints {
+      if (!toolName.startsWith("mcp__")) return {};
+      try {
+        const info = pi.getAllTools?.().find((t) => t.name === toolName);
+        return { readOnly: info?.annotations?.readOnlyHint === true };
+      } catch {
+        return {};
+      }
+    }
 
     // Redact secrets from tool output before it reaches the model / relay.
     // tool_result delivers content PARTS (per the Pi extension contract), not a
     // bare string — patch text parts and return a partial { content }; omitted
     // fields keep their current values.
+    //
+    // structuredContent too. A codemode script receives a nested call's
+    // structuredContent INSTEAD of its text (bash's full output, an MCP tool's JSON),
+    // and whatever the script prints goes to the model — so redacting only `content`
+    // would leave the script a clean path around it. Pi also drops structuredContent
+    // when a handler replaces `content` without it, so it is always returned alongside.
     pi.on("tool_result", (event) => {
       let touched = false;
       const content = event.content.map((part) => {
@@ -314,9 +336,39 @@ export function makePermissionGate(ctrl: GateController) {
         }
         return part;
       });
-      return touched ? { content } : undefined;
+      if (event.structuredContent === undefined) return touched ? { content } : undefined;
+      const structured = redactJson(event.structuredContent, redact);
+      if (structured !== event.structuredContent) touched = true;
+      return touched ? { content, structuredContent: structured } : undefined;
     });
   };
+}
+
+// Redact every string in a JSON value, keys included. Returns the SAME value when
+// nothing changed, so the caller can tell a no-op from a rewrite without a deep compare.
+export function redactJson(value: unknown, redact: (s: string) => string): unknown {
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value)) {
+    let changed = false;
+    const out = value.map((v) => {
+      const r = redactJson(v, redact);
+      if (r !== v) changed = true;
+      return r;
+    });
+    return changed ? out : value;
+  }
+  if (value && typeof value === "object") {
+    let changed = false;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      const rk = redact(k);
+      const rv = redactJson(v, redact);
+      if (rk !== k || rv !== v) changed = true;
+      out[rk] = rv;
+    }
+    return changed ? out : value;
+  }
+  return value;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number | undefined, signal?: AbortSignal): Promise<T> {

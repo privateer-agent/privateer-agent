@@ -80,6 +80,12 @@ export function createEngineEventAdapter() {
   let inRun = false;
 
   function toEngineEvents(ev: PiSessionEvent): EngineEvent[] {
+    // A tool call a codemode script made (Pi sets parentToolCallId; the id is
+    // "<parent>/<n>"). Not surfaced: the EngineEvent vocabulary has no nesting, so it
+    // would land as a top-level tool card for a call that isn't in the transcript. The
+    // script's own result reports what it did, and each nested call still went through
+    // the permission gate — any approval it needed was asked for.
+    if (ev.type.startsWith("tool_execution_") && ev.parentToolCallId) return [];
     switch (ev.type) {
       case "agent_start":
         terminalSent = false;

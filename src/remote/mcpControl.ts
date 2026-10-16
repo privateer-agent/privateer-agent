@@ -5,13 +5,13 @@
  * relay (the harbor today; an interactive terminal by the same shape).
  *
  * The client itself can NEVER run MCP — a browser tab / RN runtime can't spawn a
- * stdio child or hold the adapter. So "serving MCP to phone/web" means MANAGING the
+ * stdio child or hold a server connection. So "serving MCP to phone/web" means MANAGING the
  * config here, on a host that executes it. This control owns that config.
  *
  * SAME FILE MODEL AS THE DESKTOP (treeview/desktop/src/main/mcpService.ts): the
  * source of truth is `${agentDir}/mcp-desktop.json` — every server with an `enabled`
  * flag — and from it we PROJECT the standard `${agentDir}/mcp.json` (enabled servers
- * only, `{mcpServers:{}}` shape) that pi-mcp-adapter reads. Sharing those two files
+ * only, `{mcpServers:{}}` shape) that Pi's built-in MCP support reads. Sharing those two files
  * means a machine has ONE coherent MCP config whether it was edited from the desktop
  * over IPC or from the phone over the relay.
  *
@@ -43,15 +43,16 @@ import { writeFileAtomic } from "../util/atomicWrite.ts";
 export type McpTransport = "stdio" | "http";
 
 /**
- * How an HTTP connector authenticates — our vocabulary, projected onto the adapter's
- * `auth` field. "none" is a server that needs no credential at all (or carries one
- * entirely in custom headers); stdio connectors are always "none".
+ * How an HTTP connector authenticates — our vocabulary, kept in mcp-desktop.json and on
+ * the relay, and projected onto Pi's config (see toPiServerEntry). "none" is a server that
+ * needs no credential at all (or carries one entirely in custom headers); stdio
+ * connectors are always "none".
  */
 export type McpAuth = "oauth" | "bearer" | "none";
 
 // One server as stored in the source file (mcp-desktop.json). Mirrors the desktop's
-// SourceEntry: the standard fields the adapter needs plus our `enabled` flag.
-interface SourceEntry {
+// SourceEntry: the standard server fields plus our auth vocabulary and `enabled` flag.
+export interface SourceEntry {
   transport?: McpTransport;
   command?: string;
   args?: string[];
@@ -63,7 +64,7 @@ interface SourceEntry {
   bearerTokenEnv?: string;
   // LEGACY, read-only: entries written before `auth` existed carry a boolean here.
   // authOf() folds it in; nothing new ever writes it, and project() never emits it
-  // (the adapter's own `oauth` field is an OAuthConfig object, not a boolean).
+  // (Pi's own `oauth` field is an OAuthConfig object, not a boolean).
   oauth?: boolean;
   enabled?: boolean;
 }
@@ -78,14 +79,10 @@ function isAuth(v: unknown): v is McpAuth {
 
 // What this entry will actually do when it connects. Explicit `auth` wins; a bearer
 // token implies bearer; a legacy `oauth: false` means no auth; otherwise HTTP servers
-// auto-detect OAuth, which is the adapter's own default.
-//
-// The headers rule mirrors pi-mcp-adapter's supportsOAuth(): "configured custom headers
-// take precedence over implicit OAuth auto-detection." Without this we'd project an
-// EXPLICIT auth:"oauth" for a headers-carrying entry, and the adapter checks
-// auth === "oauth" BEFORE its headers check — so we'd force OAuth on exactly the
-// connectors it means to skip it for. Only implicit auth defers to headers; an explicit
-// `auth` from the user still wins.
+// auto-detect OAuth, which is Pi's own behaviour (sign-in is offered when the server
+// answers 401). Only implicit auth defers to custom headers — an entry that carries its
+// credential in a header isn't an OAuth connector — while an explicit `auth` from the
+// user still wins.
 function authOf(e: SourceEntry, transport: McpTransport): McpAuth {
   if (transport !== "http") return "none";
   if (isAuth(e.auth)) return e.auth;
@@ -139,6 +136,9 @@ export interface McpDraft {
 }
 
 export interface McpControl {
+  // Re-write mcp.json from mcp-desktop.json. Run once at launch by
+  // migrateMcpProjection, for a file an older release wrote in pi-mcp-adapter's format.
+  reproject(): void;
   // Every managed server, non-secret projection. Enabled or not — the app shows
   // disabled connectors so they can be toggled back on.
   list(): RemoteMcpServer[];
@@ -167,6 +167,89 @@ function hostOf(url: string): string | undefined {
 function cleanArgs(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined;
   return v.map((x) => String(x ?? "")).filter((s) => s.length > 0);
+}
+
+// Pi's server-name rule (core/mcp-servers.js), and an environment variable name.
+const SERVER_NAME = /^[A-Za-z0-9_-]+$/;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function isSseUrl(url: string): boolean {
+  try {
+    return /\/sse\/?$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Make a literal survive Pi's config-value expansion (core/resolve-config-value.js):
+ * "$$" is a literal "$", and a leading "!" — which would otherwise run the value as a
+ * shell command — is written "$!". The value Pi resolves is then exactly the input.
+ */
+export function escapeConfigValue(value: string): string {
+  const doubled = value.replace(/\$/g, "$$$$");
+  return doubled.startsWith("!") ? `$${doubled}` : doubled;
+}
+
+function escapeValues(values: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(values)) out[k] = escapeConfigValue(String(v ?? ""));
+  return out;
+}
+
+/**
+ * One-time upgrade of a projection written for pi-mcp-adapter. Its marker is the
+ * `settings.toolPrefix` pin every earlier release wrote; such a file carries `auth`
+ * strings and `bearerToken` fields that Pi rejects, so every HTTP connector in it would
+ * vanish. Re-projecting from mcp-desktop.json rewrites it in Pi's format. A file
+ * without the marker — Pi's own, or hand-written — is left alone.
+ */
+export function migrateMcpProjection(dir: () => string = agentDir): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(join(dir(), "mcp.json"), "utf8"));
+    if (raw?.settings?.toolPrefix === undefined) return false;
+  } catch {
+    return false;
+  }
+  makeMcpControl({ dir }).reproject();
+  return true;
+}
+
+// One managed entry as a Pi `mcpServers` entry. Exported for the desktop's connector
+// manager (treeview desktop/src/main/mcpService.ts), which writes the same files and
+// must write them the same way. Built field by field rather than
+// spread, because our vocabulary and Pi's differ:
+//
+//   • Pi has no bearer field. A static token becomes an `Authorization` header, and a
+//     token read from the environment becomes "Bearer ${VAR}". A header named
+//     Authorization is also what tells Pi NOT to start OAuth for the server.
+//   • Pi's `auth` is `{ provider }` — a Pi /login provider's token — not our
+//     "oauth" | "bearer" | "none". Any other value makes Pi reject the whole entry, so
+//     ours never reaches the file. OAuth needs no field at all: Pi offers sign-in when
+//     a server without an Authorization header answers 401.
+//   • Pi EXPANDS env and header values: "$VAR" / "${VAR}" read the environment and a
+//     value starting with "!" is run as a shell command. Every value here is a literal
+//     someone typed — a token, a key — so each is escaped (escapeConfigValue). An
+//     unescaped token containing "$" would be mangled; one starting with "!" would be
+//     executed on this machine.
+export function toPiServerEntry(e: SourceEntry): Record<string, unknown> {
+  const transport: McpTransport = e.transport ?? (e.url ? "http" : "stdio");
+  const std: Record<string, unknown> = {};
+  if (transport === "stdio") {
+    if (e.command) std.command = e.command;
+    if (e.args?.length) std.args = e.args;
+    if (e.env && Object.keys(e.env).length > 0) std.env = escapeValues(e.env);
+  } else {
+    if (e.url) std.url = e.url;
+    const headers: Record<string, string> = escapeValues(e.headers ?? {});
+    if (authOf(e, transport) === "bearer") {
+      // A stored token wins over the env var name.
+      if (e.bearerToken) headers.Authorization = `Bearer ${escapeConfigValue(e.bearerToken)}`;
+      else if (e.bearerTokenEnv && ENV_NAME.test(e.bearerTokenEnv)) headers.Authorization = `Bearer \${${e.bearerTokenEnv}}`;
+    }
+    if (Object.keys(headers).length > 0) std.headers = headers;
+  }
+  return std;
 }
 
 export function makeMcpControl(opts?: {
@@ -205,59 +288,21 @@ export function makeMcpControl(opts?: {
     project(src);
   }
 
-  // Project the enabled servers into the standard mcp.json the adapter reads. An
-  // entry with no explicit transport is treated as stdio if it has a command, http
-  // if it has a url — matching the adapter's own inference.
+  // Project the servers into the standard mcp.json Pi reads. An entry with no
+  // explicit transport is treated as stdio if it has a command, http if it has a url —
+  // matching Pi's own inference.
   //
-  // `toolPrefix` is pinned rather than left to the adapter's default because a
-  // routine's "<server>__<tool>" selector is translated into a REGISTERED tool name
-  // before it can grant anything (src/mcp/toolNames.ts), and that translation depends
-  // on the mode. "server" is the adapter's own default, so pinning it changes nothing
-  // today and stops a future default flip from silently voiding every allow-list.
+  // A disabled server is written with Pi's own `enabled: false` rather than left out:
+  // Pi keeps it listed (and skips connecting it), and `mcp login` can still find it —
+  // a desktop window may activate a connector that is off by default and need to sign
+  // in to it.
   function project(src: SourceFile): void {
     const mcpServers: Record<string, unknown> = {};
     for (const [name, e] of Object.entries(src.servers)) {
-      if (e.enabled === false) continue;
-      mcpServers[name] = toStandard(e);
+      mcpServers[name] = e.enabled === false ? { ...toPiServerEntry(e), enabled: false } : toPiServerEntry(e);
     }
     mkdirSync(dirname(projectionPath()), { recursive: true });
-    writeFileAtomic(
-      projectionPath(),
-      JSON.stringify({ mcpServers, settings: { toolPrefix: "server" } }, null, 2) + "\n",
-    );
-  }
-
-  // One managed entry as pi-mcp-adapter's ServerEntry. Built field by field rather
-  // than spread, because our vocabulary and the adapter's differ in two places that
-  // matter: our `auth: "none"` is its `auth: false`, and our legacy boolean `oauth`
-  // collides with its `oauth` (an OAuthConfig OBJECT) and must never reach the file.
-  //
-  // Getting `auth` right is load-bearing, not cosmetic. The adapter only attaches an
-  // Authorization header when `auth === "bearer"` (server-manager.ts), and its
-  // supportsOAuth() refuses OAuth outright once custom headers are configured — so an
-  // omitted `auth` silently means "no bearer token was ever sent".
-  function toStandard(e: SourceEntry): Record<string, unknown> {
-    const transport: McpTransport = e.transport ?? (e.url ? "http" : "stdio");
-    const std: Record<string, unknown> = {};
-    if (transport === "stdio") {
-      if (e.command) std.command = e.command;
-      if (e.args?.length) std.args = e.args;
-    } else {
-      if (e.url) std.url = e.url;
-      if (e.headers && Object.keys(e.headers).length > 0) std.headers = e.headers;
-      const auth = authOf(e, transport);
-      if (auth === "bearer") {
-        std.auth = "bearer";
-        if (e.bearerToken) std.bearerToken = e.bearerToken;
-        if (e.bearerTokenEnv) std.bearerTokenEnv = e.bearerTokenEnv;
-      } else if (auth === "oauth") {
-        std.auth = "oauth";
-      } else {
-        std.auth = false;
-      }
-    }
-    if (e.env && Object.keys(e.env).length > 0) std.env = e.env;
-    return std;
+    writeFileAtomic(projectionPath(), JSON.stringify({ mcpServers }, null, 2) + "\n");
   }
 
   function toRemote(name: string, e: SourceEntry): RemoteMcpServer {
@@ -306,6 +351,10 @@ export function makeMcpControl(opts?: {
   }
 
   return {
+    reproject(): void {
+      project(readSource());
+    },
+
     list(): RemoteMcpServer[] {
       const src = readSource();
       return Object.entries(src.servers).map(([name, e]) => toRemote(name, e));
@@ -314,6 +363,9 @@ export function makeMcpControl(opts?: {
     save(draft: McpDraft): { ok: boolean; message?: string } {
       const name = String(draft?.name ?? "").trim();
       if (!name) return { ok: false, message: "A connector needs a name." };
+      // Pi's rule for server names; anything else is skipped as invalid at connect time.
+      if (!SERVER_NAME.test(name))
+        return { ok: false, message: "A connector name may use only letters, digits, \"-\" and \"_\"." };
       if (draft.transport !== undefined && !isTransport(draft.transport))
         return { ok: false, message: "Unknown transport." };
       if (draft.auth !== undefined && !isAuth(draft.auth))
@@ -362,9 +414,9 @@ export function makeMcpControl(opts?: {
           else delete entry.headers;
         }
         // A token that arrived without an explicit `auth` means bearer — otherwise the
-        // adapter stores the token and never sends it (it only sets the Authorization
-        // header when auth === "bearer"), which reads to the user as "my token is
-        // saved and the connector still 401s".
+        // token is stored and never projected into an Authorization header (toPiServerEntry
+        // only sends it for bearer), which reads to the user as "my token is saved and
+        // the connector still 401s".
         if (draft.auth === undefined && (entry.bearerToken || entry.bearerTokenEnv)) entry.auth = "bearer";
         // Once `auth` is set, the legacy boolean is noise that authOf would have to
         // keep tie-breaking. Drop it.
@@ -372,6 +424,15 @@ export function makeMcpControl(opts?: {
         delete entry.command;
         delete entry.args;
         if (!entry.url) return { ok: false, message: "A remote (http) connector needs a URL." };
+        // Pi speaks streamable HTTP only. An SSE endpoint would save and then fail on
+        // every connect, so say so now — most servers serve streamable HTTP at /mcp.
+        if (isSseUrl(entry.url))
+          return {
+            ok: false,
+            message: "That looks like a legacy SSE endpoint, which isn't supported. Use the server's streamable HTTP URL (often ending in /mcp).",
+          };
+        if (entry.bearerTokenEnv && !ENV_NAME.test(entry.bearerTokenEnv))
+          return { ok: false, message: "The token variable must be an environment variable name, like GITHUB_TOKEN." };
         if (authOf(entry, "http") === "bearer" && !entry.bearerToken && !entry.bearerTokenEnv)
           return { ok: false, message: "A bearer connector needs a token, or the name of an env var holding one." };
       }

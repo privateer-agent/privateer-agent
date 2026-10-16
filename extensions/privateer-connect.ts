@@ -2,10 +2,9 @@
  * The Privateer `/connect` panel — add, toggle, and remove MCP connectors without
  * leaving the terminal.
  *
- * WHY THIS EXISTS: pi-mcp-adapter owns `/mcp`, but that command is a *status and
- * connection* surface — its setup flow can only adopt configs from other hosts,
- * scaffold an EMPTY `.mcp.json`, or quick-add RepoPrompt. There is no way to type in
- * a server. So the terminal was the one surface where adding a connector meant
+ * WHY THIS EXISTS: Pi's `/mcp` is a *status and connection* surface — inspect,
+ * sign in, reconnect, toggle. It has no catalog and no form for typing in a server, so
+ * without this the terminal was the one surface where adding a connector meant
  * hand-editing JSON, while the phone and the desktop both had a real editor.
  *
  * ONE CONFIG, THREE SURFACES: this is deliberately a thin UI over the SAME
@@ -16,8 +15,8 @@
  * routine runs. Nothing about this panel is terminal-specific except the pixels.
  *
  * SECRETS: env values are typed into a masked field and written in PLAINTEXT to the
- * config on this machine — correct, and the same thing the desktop does: the adapter
- * has to hand the real token to the server process. The masking is shoulder-surfing
+ * config on this machine — correct, and the same thing the desktop does: Pi has to
+ * hand the real token to the server process. The masking is shoulder-surfing
  * and screen-share hygiene, not a storage claim. (Over the relay it's different —
  * there the value is sealed to the terminal's key; see mcpControl's header.)
  */
@@ -31,6 +30,7 @@ import {
 } from "@earendil-works/pi-tui";
 import {
   makeMcpControl,
+  migrateMcpProjection,
   type McpDraft,
   type RemoteMcpServer,
 } from "../src/remote/mcpControl.ts";
@@ -55,7 +55,7 @@ interface TuiLike {
 
 // What the panel hands back to the command handler when it closes.
 export interface ConnectResult {
-  // True when the config changed, so the handler knows to reload the adapter.
+  // True when the config changed, so the handler knows to reload MCP.
   changed: boolean;
   message?: string;
 }
@@ -183,8 +183,8 @@ function customSteps(existing?: RemoteMcpServer): Step[] {
       key: "target",
       prompt: hosted ? "Server URL" : "Launch command, or an https:// URL",
       hint: hosted
-        ? "e.g. https://mcp.example.com/sse — a hosted agent can't run a local command."
-        : "e.g. npx -y @modelcontextprotocol/server-memory  ·  or  https://mcp.example.com/sse",
+        ? "e.g. https://mcp.example.com/mcp — a hosted agent can't run a local command."
+        : "e.g. npx -y @modelcontextprotocol/server-memory  ·  or  https://mcp.example.com/mcp",
       initial: target,
       validate: hosted
         ? (v) =>
@@ -253,13 +253,12 @@ function buildCustomDraft(answers: Record<string, string>): McpDraft {
     const hasHeaders = Object.keys(headers).length > 0;
     if (hasHeaders) draft.headers = headers;
     if (token) {
-      // A static token: the adapter only sends the Authorization header when auth is
-      // explicitly "bearer", so this pairing is not optional.
+      // A static token: mcpControl projects it into an Authorization header only when
+      // auth is "bearer", so this pairing is not optional.
       draft.auth = "bearer";
       draft.bearerToken = token;
     } else if (hasHeaders) {
-      // Custom headers ARE the credential here — the adapter's supportsOAuth() refuses
-      // OAuth once headers are configured, so claiming "oauth" would be a lie.
+      // Custom headers ARE the credential here, so claiming "oauth" would be a lie.
       draft.auth = "none";
     } else {
       draft.auth = "oauth";
@@ -325,7 +324,7 @@ function pendingFromCatalog(e: CatalogEntry): Pending {
     },
     note:
       e.needs === "oauth"
-        ? `Authorize it in a browser on THIS machine: /mcp-auth ${e.name}`
+        ? `Authorize it in a browser on THIS machine: /mcp login ${e.name}`
         : e.localHttp
           // Not a warning — a localHttp connector is correct the moment it saves. But
           // it answers only while its host app is up, so a later failure means "the
@@ -507,7 +506,7 @@ class ConnectPanel extends Container {
   private statusOf(s: RemoteMcpServer): string {
     const t = this.theme;
     if (s.transport === "http" && s.oauth) {
-      return t.fg("warning", `⚠ authorize: /mcp-auth ${s.name}`);
+      return t.fg("warning", `⚠ authorize: /mcp login ${s.name}`);
     }
     if (s.envKeys.length > 0) {
       const missing = s.envKeys.filter((k) => !s.secretsSet.includes(k));
@@ -880,6 +879,9 @@ export default function privateerConnect(pi: {
   registerCommand?: (name: string, opts: unknown) => void;
 }): void {
   if (typeof pi.registerCommand !== "function") return;
+  // Before Pi's MCP support reads mcp.json at session_start: a file an older release
+  // wrote in pi-mcp-adapter's format would otherwise lose every HTTP connector in it.
+  migrateMcpProjection();
 
   pi.registerCommand("connect", {
     description: "Add, enable, or remove MCP connectors (GitHub, Notion, Linear, …)",
@@ -896,9 +898,10 @@ export default function privateerConnect(pi: {
       );
 
       if (!result?.changed) return;
-      // Reload so pi-mcp-adapter re-reads mcp.json in this session — the same thing
-      // its own `/mcp setup` does after a write. Without it the new connector only
-      // appears on the next launch, which reads as "it didn't work".
+      // Reload so Pi's MCP support re-reads mcp.json in this session (its own docs:
+      // "Run /reload after adding, removing, or changing a server outside the
+      // session"). Without it the new connector only appears on the next launch,
+      // which reads as "it didn't work".
       try {
         await ctx.reload?.();
       } catch {

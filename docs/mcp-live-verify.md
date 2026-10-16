@@ -22,7 +22,7 @@ cd ../treeview/desktop && node --import tsx scripts/check-mcp-relay.mjs
 
 Those cover the crypto and the config layer. What they **cannot** cover — and what this
 document exists for — is: the relay actually routing `mcp_*` frames, the harbor's
-callbacks firing, the adapter really spawning a server, and MCP tools passing the moat.
+callbacks firing, Pi's MCP support really spawning a server, and MCP tools passing the moat.
 
 ---
 
@@ -43,7 +43,7 @@ Config the harbor reads (both should change as you act from the app):
 
 ```bash
 cat ~/.privateer/agent/mcp-desktop.json   # source of truth, incl. `enabled`
-cat ~/.privateer/agent/mcp.json           # projection the adapter reads
+cat ~/.privateer/agent/mcp.json           # projection Pi's MCP support reads
 ```
 
 **Isolating the relay from everything else.** Since 0.6.9 the terminal edits those two
@@ -55,7 +55,7 @@ steps 1–4 below will tell you which. If `/connect` can't either, nothing about
 is involved and step 5 is where to look.
 
 Note that `/connect` deliberately does NOT exercise the sealed-box path — on this
-machine the credential is simply written in plaintext, which is what the adapter needs.
+machine the credential is simply written in plaintext, which is what Pi needs to hand it on.
 Step 3 remains the only test of the seal.
 
 ---
@@ -97,7 +97,7 @@ Quick-add → **GitHub** → paste a real PAT → Save.
       "sealable" — its identity key doesn't match the link-time pin; re-link it)
 - [ ] Saves cleanly
 - [ ] `mcp.json` on the host shows the token **in plaintext** — correct, it's on your own
-      machine, that's where it has to be for the adapter to use it
+      machine, that's where it has to be for Pi to use it
 - [ ] Back in the app, the connector shows "Credentials set" and **never** displays the
       token itself
 
@@ -125,14 +125,15 @@ This is the one that proves MCP *executes*, not just that config was written.
 With the GitHub (or Memory) connector enabled, spawn a task from the app that needs it —
 **Spawn a task**, with a prompt that forces a tool call, e.g.
 *"List my most recent GitHub issues."* If the routine/task takes an explicit tool list,
-include the MCP tool by its `server__tool` name (e.g. `github__list_issues`); the
-allow-list now passes `split.mcp` through.
+include the MCP tool by its `server__tool` selector (e.g. `github__list_issues`, or
+`github__*`); the harbor turns it into Pi's `mcp__github__list_issues` allow-list entry.
+The model reaches it through `codemode`.
 
 - [ ] The harbor log shows the MCP server starting (an `npx` child process for stdio)
 - [ ] The task result reflects real MCP data, not a refusal or a hallucination
 - [ ] A tool the routine did **not** list is still refused
 
-**Proves:** `runSession` loads the adapter, the moat gates MCP tools like any other, and
+**Proves:** `runSession` binds Pi's MCP support, the moat gates MCP tools like any other, and
 the signed tool list is the real authorization boundary.
 
 This is the most likely step to surface something, because it's the least covered by
@@ -144,10 +145,10 @@ Add **Linear** (or any `needs: oauth` entry) from the phone.
 
 - [ ] The amber callout appears naming the host machine
 - [ ] Saving works, but its tools fail until you authorize
-- [ ] Open Privateer **on the host computer**, authorize in the browser
-- [ ] The harbor can now use it — tokens land in
-      `~/.privateer/agent/mcp-oauth/sha256-<hash>/tokens.json` and are shared with the
-      desktop app, and refresh headlessly from there
+- [ ] On the host computer, run `privateer mcp login linear` (or `/mcp login linear` in a
+      session) and authorize in the browser
+- [ ] The harbor can now use it — tokens land in `~/.privateer/agent/mcp-auth.json`, keyed
+      by server name and URL, are shared with the desktop app, and refresh headlessly
 
 **Known limitation, not a bug:** the harbor can't *initiate* that browser flow itself.
 On a genuinely headless host (VPS/container) an OAuth connector can't be authorized at
@@ -164,7 +165,7 @@ all. See `mcp-over-relay` notes for the options if that ever matters.
 | "Couldn't verify this change came from your account" | signature — app `signControlFrame` args vs harbor `authorizeControl` args must canonicalize identically |
 | "Couldn't decrypt the connector credentials" | sealed to the wrong terminal key — re-link to re-pin |
 | "This terminal can't accept changes… re-link it" | no pinned account key on that terminal |
-| Saves fine, tools never fire | Step 5 — adapter loading or the tool allow-list, not the relay |
+| Saves fine, tools never fire | Step 5 — `privateer mcp list` (does it connect?), then the tool allow-list, not the relay |
 
 Record what you find in the `mcp-over-relay` memory so the next pass starts from reality
 rather than from this checklist's assumptions.

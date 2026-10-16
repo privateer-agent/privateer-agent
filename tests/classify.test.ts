@@ -72,6 +72,35 @@ test("unknown/custom tool → safe-by-default bash-kind ask", () => {
   assert.equal(r?.tool, "some_mcp_tool");
 });
 
+// ── Pi's MCP support and codemode ───────────────────────────────────────────
+
+test("an MCP tool is classified by its server and name, before the name heuristics", () => {
+  // "fetch_url" on a connector is NOT a plain network fetch: it could do anything.
+  const r = classifyToolCall("mcp__github__fetch_url", { url: "x" }, scope);
+  assert.equal(r?.kind, "bash"); // asks in default, denies in plan — as every MCP call did
+  assert.equal(r?.title, "Run fetch_url on github");
+});
+
+test("an MCP tool that declares itself read-only is a read from that connector", () => {
+  const r = classifyToolCall("mcp__github__get_file", { path: "a" }, scope, { readOnly: true });
+  assert.equal(r?.kind, "fetch"); // still asks — but may ASK in plan mode instead of denying
+  assert.equal(r?.title, "Read from github: get_file");
+});
+
+test("codemode and tool_search are not gated — the calls a script makes are", () => {
+  assert.equal(classifyToolCall("codemode", "await tools.bash({command: 'rm -rf /'})", scope), null);
+  assert.equal(classifyToolCall("tool_search", { query: "issues" }, scope), null);
+  // The nested call that script would make is classified on its own.
+  assert.equal(classifyToolCall("bash", { command: "rm -rf /" }, scope)?.kind, "bash");
+});
+
+test("MCP resource tools are reads from a connector", () => {
+  assert.equal(classifyToolCall("list_mcp_resources", {}, scope)?.kind, "fetch");
+  const r = classifyToolCall("read_mcp_resource", { server: "docs", uri: "file:///x" }, scope);
+  assert.equal(r?.kind, "fetch");
+  assert.equal(r?.detail, "file:///x");
+});
+
 test("allowedOutsideRoots suppress the outside flag", () => {
   const s = { cwd: CWD, allowedOutsideRoots: ["/elsewhere"] };
   assert.equal(isOutsideScope(s, "/elsewhere/a.ts"), false);

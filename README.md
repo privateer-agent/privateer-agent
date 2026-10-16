@@ -78,7 +78,7 @@ What Privateer adds is a *moat* of Pi extensions layered on top:
 | `privateer-posture`, `privateer-tools` | live attestation shield + Privateer tool pack |
 | `privateer-web` | `web_search`/`web_fetch` — your account's search once signed in, or your own provider (`rpiv-web-tools`: self-hosted SearXNG, Brave, Tavily…) |
 | `rpiv-ask-user-question` | `ask_user_question` — a structured questionnaire the agent puts to you instead of guessing |
-| `pi-mcp-adapter`, `pi-subagents` | MCP servers · bounded parallel sub-agents |
+| `privateer-codemode`, `pi-subagents` | codemode (how MCP tools are called — Pi's built-in MCP support) · bounded parallel sub-agents |
 
 They're ordinary Pi extensions — inspect them, replace them, or build your own alongside.
 **Extend by discovery:** drop an extension into `~/.privateer/agent/extensions/` (move the home
@@ -641,7 +641,7 @@ built-ins. Two kinds:
 
 ```
 /connect        # add, enable, disable, or remove connectors
-/mcp            # pi-mcp-adapter's own status view — what actually connected
+/mcp            # Pi's own status view — what connected; `/mcp login <name>` to sign in
 ```
 
 `/connect` opens a picker over a curated catalog of 21 connectors — GitHub, Slack, Notion,
@@ -748,9 +748,9 @@ plan-mode deny is the one thing it doesn't talk around.
 Everything below is a **Pi extension** loaded by discovery (see [Built on Pi](#built-on-pi)) —
 drop your own into `~/.privateer/agent/extensions/` and it loads the same way, gated like the rest.
 
-- **MCP servers** (`pi-mcp-adapter`) — declare them and their tools become first-class, gated
-  like the rest (local stdio, or remote HTTP with interactive OAuth). Add them with
-  `/connect`; see [Connectors — MCP](#connectors--mcp).
+- **MCP servers** (Pi's built-in MCP support) — declare them and the model reaches their tools
+  through codemode, each call gated like the rest (local stdio, or remote streamable HTTP with
+  interactive OAuth). Add them with `/connect`; see [Connectors — MCP](#connectors--mcp).
 - **Sub-agents** (`pi-subagents`) — delegate investigations to bounded parallel agents. Children
   run as headless child processes that **inherit the moat**, so their actions hit the same
   permission gate and their approvals surface on your phone.

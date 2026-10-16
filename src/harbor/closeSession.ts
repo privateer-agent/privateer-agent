@@ -1,6 +1,6 @@
 // Tear a headless session all the way down. dispose() alone stops the agent but never
 // emits session_shutdown — that is AgentSessionRuntime's job, and we build sessions
-// without one — so every extension that cleans up on it (pi-mcp-adapter's connections,
+// without one — so every extension that cleans up on it (Pi's MCP server connections,
 // OAuth runtime and lifecycle state among them) leaked once per run, for the life of a
 // resident process. Reason "new", not "quit": to our own extensions "quit" means the
 // PROCESS is exiting (privateer-brand revokes the machine's sessions on it), and the

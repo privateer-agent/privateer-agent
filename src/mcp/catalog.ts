@@ -44,8 +44,8 @@ export interface CatalogEntry {
    * flag rather than falling out of the URL: every other http entry here is a remote
    * service the user authorizes, so "must authenticate" is derived from
    * `transport === "http"` alone. That is false here — there is nothing to authorize
-   * — so the flag is what makes draftFromCatalog emit `auth: "none"`. Without it the
-   * adapter goes hunting for an authorization server that does not exist.
+   * — so the flag is what makes draftFromCatalog emit `auth: "none"`, and the app
+   * doesn't tell the user to sign in to something with no sign-in.
    *
    * Always pair with `hosted: false`: a hosted enclave has no route to the user's
    * loopback, and hostedCapable()'s derived rule keys on `oauth`, not on this.
@@ -199,7 +199,8 @@ export const MCP_CATALOG: CatalogEntry[] = [
     label: "Jira & Confluence",
     blurb: "Atlassian issues and pages. Sign in via browser.",
     transport: "http",
-    url: "https://mcp.atlassian.com/v1/sse",
+    // Streamable HTTP; /v1/sse is the legacy SSE endpoint, which Pi does not speak.
+    url: "https://mcp.atlassian.com/v1/mcp",
     oauth: true,
     needs: "oauth",
   },
@@ -219,7 +220,9 @@ export const MCP_CATALOG: CatalogEntry[] = [
     label: "Asana",
     blurb: "Tasks and projects. Sign in via browser.",
     transport: "http",
-    url: "https://mcp.asana.com/sse",
+    // Streamable HTTP on the same OAuth server as the legacy /sse endpoint, which Pi does
+    // not speak. (/v2/mcp is a separate app-registration flow.)
+    url: "https://mcp.asana.com/mcp",
     oauth: true,
     needs: "oauth",
   },
@@ -453,11 +456,9 @@ export function draftFromCatalog(
     draft.args = (e.args ?? []).map((a) => (e.fill && a === e.fill && filled ? filled : a));
   } else {
     draft.url = input.url?.trim() || e.url;
-    // Emit the adapter's own vocabulary (`auth`) rather than the legacy boolean, so
-    // the projection carries a string and not a bogus boolean in the adapter's
-    // OAuthConfig slot. A localHttp entry authenticates to nothing — saying "oauth"
-    // there would send the adapter looking for an authorization server that does not
-    // exist, which fails at connect time rather than at save time.
+    // Emit our `auth` vocabulary rather than the legacy boolean. A localHttp entry
+    // authenticates to nothing — saying "oauth" there would put a sign-in prompt in
+    // front of a server that has no sign-in.
     draft.auth = e.localHttp ? "none" : (e.oauth ?? true) ? "oauth" : "none";
   }
 

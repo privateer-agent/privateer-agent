@@ -3,7 +3,20 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeMcpControl } from "../src/remote/mcpControl.ts";
+import { makeMcpControl, escapeConfigValue, migrateMcpProjection } from "../src/remote/mcpControl.ts";
+// Not in the package exports — Pi's own config validation and value expansion, so the
+// projection is checked against what Pi will actually accept and resolve.
+import { validateMcpServerConfig } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/mcp-servers.js";
+import { resolveConfigValue } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/resolve-config-value.js";
+
+// Every projected entry must pass Pi's validator — an entry it rejects is a connector
+// that silently disappears.
+function assertPiAccepts(dir: string): void {
+  for (const [name, entry] of Object.entries<any>(readProj(dir).mcpServers)) {
+    const r = validateMcpServerConfig(name, entry);
+    assert.equal(typeof r, "object", `Pi rejects "${name}": ${r}`);
+  }
+}
 
 // Run `fn` with a throwaway agent dir so mcpControl reads/writes an isolated
 // mcp-desktop.json + mcp.json, cleaning up after.
@@ -33,19 +46,18 @@ test("mcpControl: save stdio projects into mcp.json and lists non-secret", () =>
     });
     assert.ok(res.ok, res.message);
 
-    // Projected into the standard mcp.json the adapter reads, WITHOUT our `enabled` flag.
+    // Projected into the standard mcp.json Pi reads, WITHOUT our `enabled` flag.
     const proj = readProj(dir).mcpServers.github;
     assert.ok(proj, "github projected");
     assert.equal(proj.enabled, undefined, "projection is standard shape (no enabled)");
     assert.equal(proj.command, "npx");
     assert.deepEqual(proj.args, ["-y", "@modelcontextprotocol/server-github"]);
-    // The projection DOES carry the env (the adapter needs it locally) — the secrecy
-    // boundary is the RELAY (list()), not the on-disk file.
+    // The projection DOES carry the env (Pi needs it locally) — the secrecy boundary is
+    // the RELAY (list()), not the on-disk file.
     assert.equal(proj.env.GITHUB_PERSONAL_ACCESS_TOKEN, "ghp_secret123");
-    // The tool-prefix mode is PINNED: a routine's "<server>__<tool>" selector is
-    // translated into a registered tool name using it (src/mcp/toolNames.ts), so a
-    // change of adapter default must not silently void every per-routine allow-list.
-    assert.equal(readProj(dir).settings.toolPrefix, "server");
+    // No adapter-era settings block: its toolPrefix pin is the migration marker.
+    assert.equal(readProj(dir).settings, undefined);
+    assertPiAccepts(dir);
 
     // list() is the RELAY projection — it must NEVER echo a token value.
     const item = ctrl.list().find((s) => s.name === "github")!;
@@ -62,14 +74,20 @@ test("mcpControl: save stdio projects into mcp.json and lists non-secret", () =>
 test("mcpControl: save http infers oauth + surfaces host for the privacy badge", () => {
   withDir((dir) => {
     const ctrl = makeMcpControl({ dir: () => dir });
-    assert.ok(ctrl.save({ name: "linear", transport: "http", url: "https://mcp.linear.app/sse", oauth: true }).ok);
+    assert.ok(ctrl.save({ name: "linear", transport: "http", url: "https://mcp.linear.app/mcp", oauth: true }).ok);
     const item = ctrl.list().find((s) => s.name === "linear")!;
     assert.equal(item.transport, "http");
-    assert.equal(item.url, "https://mcp.linear.app/sse");
+    assert.equal(item.url, "https://mcp.linear.app/mcp");
     assert.equal(item.host, "mcp.linear.app", "host parsed for the badge");
     assert.equal(item.oauth, true);
     assert.deepEqual(item.envKeys, []);
-    assert.equal(readProj(dir).mcpServers.linear.url, "https://mcp.linear.app/sse");
+    const proj = readProj(dir).mcpServers.linear;
+    assert.equal(proj.url, "https://mcp.linear.app/mcp");
+    // OAuth needs no field: Pi offers sign-in when a server without an Authorization
+    // header answers 401. Our "oauth" string would make Pi reject the entry outright.
+    assert.equal(proj.auth, undefined);
+    assert.equal(proj.headers, undefined);
+    assertPiAccepts(dir);
   });
 });
 
@@ -89,12 +107,13 @@ test("mcpControl: a bearer token projects auth:bearer, which is what actually se
     );
 
     const proj = readProj(dir).mcpServers.acme;
-    // server-manager.ts adds the Authorization header ONLY when auth === "bearer".
-    // Storing the token without this is storing a token that never gets sent.
-    assert.equal(proj.auth, "bearer");
-    assert.equal(proj.bearerToken, "sk_live_abc");
-    assert.deepEqual(proj.headers, { "X-Api-Version": "2" });
-    assert.equal(proj.oauth, undefined, "the legacy boolean must never reach the adapter");
+    // Pi has no bearer field: the token travels as an Authorization header, which is
+    // also what stops Pi from starting OAuth for this server.
+    assert.deepEqual(proj.headers, { "X-Api-Version": "2", Authorization: "Bearer sk_live_abc" });
+    assert.equal(proj.auth, undefined, "our auth string must never reach Pi");
+    assert.equal(proj.bearerToken, undefined);
+    assert.equal(proj.oauth, undefined, "the legacy boolean must never reach Pi");
+    assertPiAccepts(dir);
 
     // The RELAY projection names the secrets without ever echoing one.
     const item = ctrl.list().find((s) => s.name === "acme")!;
@@ -115,7 +134,13 @@ test("mcpControl: bearerTokenEnv is a NAME, so it rides in the clear and needs n
     assert.equal(item.auth, "bearer");
     assert.equal(item.bearerTokenEnv, "ACME_TOKEN");
     assert.equal(item.bearerTokenSet, false, "no literal token is stored");
-    assert.equal(readProj(dir).mcpServers.acme.bearerTokenEnv, "ACME_TOKEN");
+    // Pi reads the variable when it connects.
+    assert.equal(readProj(dir).mcpServers.acme.headers.Authorization, "Bearer ${ACME_TOKEN}");
+    assert.equal(
+      resolveConfigValue(readProj(dir).mcpServers.acme.headers.Authorization, { ACME_TOKEN: "tok" }),
+      "Bearer tok",
+    );
+    assertPiAccepts(dir);
   });
 });
 
@@ -142,15 +167,17 @@ test("mcpControl: re-saving without re-typing keeps the stored token and headers
     assert.ok(ctrl.save({ name: "acme", url: "https://b.test/mcp" }).ok);
     const proj = readProj(dir).mcpServers.acme;
     assert.equal(proj.url, "https://b.test/mcp");
-    assert.equal(proj.bearerToken, "sk_live_abc", "an omitted token keeps the stored one");
-    assert.deepEqual(proj.headers, { "X-One": "1", "X-Two": "2" });
+    assert.deepEqual(
+      proj.headers,
+      { "X-One": "1", "X-Two": "2", Authorization: "Bearer sk_live_abc" },
+      "an omitted token keeps the stored one",
+    );
 
     // An explicit empty string is the clear signal, for both shapes.
     assert.ok(ctrl.save({ name: "acme", bearerTokenEnv: "ACME_TOKEN", bearerToken: "", headers: { "X-Two": "" } }).ok);
     const after = readProj(dir).mcpServers.acme;
-    assert.equal(after.bearerToken, undefined);
-    assert.deepEqual(after.headers, { "X-One": "1" });
-    assert.equal(after.auth, "bearer", "still bearer — the env var now supplies the token");
+    // Still bearer — the env var now supplies the token.
+    assert.deepEqual(after.headers, { "X-One": "1", Authorization: "Bearer ${ACME_TOKEN}" });
   });
 });
 
@@ -222,11 +249,12 @@ test("mcpControl: setEnabled toggles projection but keeps the managed entry", ()
     assert.ok(readProj(dir).mcpServers.echo, "enabled → projected");
 
     assert.ok(ctrl.setEnabled("echo", false).ok);
-    assert.ok(!readProj(dir).mcpServers.echo, "disabled → dropped from projection");
+    // Pi's own `enabled: false`: listed, never connected — and `mcp login` can find it.
+    assert.equal(readProj(dir).mcpServers.echo.enabled, false, "disabled → switched off in the projection");
     assert.equal(ctrl.list().find((s) => s.name === "echo")!.enabled, false, "still in managed list");
 
     assert.ok(ctrl.setEnabled("echo", true).ok);
-    assert.ok(readProj(dir).mcpServers.echo, "re-enabled → back in projection");
+    assert.equal(readProj(dir).mcpServers.echo.enabled, undefined, "re-enabled → on again (Pi's default)");
     assert.equal(ctrl.setEnabled("nope", true).ok, false, "unknown name rejected");
   });
 });
@@ -299,10 +327,9 @@ test("mcpControl: custom headers with no token mean 'the headers ARE the credent
   withDir((dir) => {
     const ctrl = makeMcpControl({ dir: () => dir });
     assert.ok(ctrl.save({ name: "acme", transport: "http", url: "https://a.test/mcp", headers: { Authorization: "Basic xyz" } }).ok);
-    // Mirrors pi-mcp-adapter's supportsOAuth: headers beat implicit OAuth auto-detect.
-    // Projecting an explicit auth:"oauth" here would FORCE OAuth on, because the adapter
-    // checks auth === "oauth" before it checks headers.
-    assert.equal(readProj(dir).mcpServers.acme.auth, false);
+    // Headers beat implicit OAuth: the header is projected as typed, and Pi doesn't
+    // start OAuth for a server that carries an Authorization header.
+    assert.deepEqual(readProj(dir).mcpServers.acme.headers, { Authorization: "Basic xyz" });
     assert.equal(ctrl.list().find((s) => s.name === "acme")!.auth, "none");
   });
 });
@@ -313,6 +340,84 @@ test("mcpControl: an EXPLICIT auth still wins over the headers rule", () => {
     assert.ok(
       ctrl.save({ name: "acme", transport: "http", url: "https://a.test/mcp", auth: "oauth", headers: { "X-Api-Version": "2" } }).ok,
     );
-    assert.equal(readProj(dir).mcpServers.acme.auth, "oauth");
+    assert.equal(ctrl.list().find((s) => s.name === "acme")!.auth, "oauth");
+    assertPiAccepts(dir);
+  });
+});
+
+// Pi expands env and header values: "$VAR" reads the environment and a leading "!" is
+// RUN AS A SHELL COMMAND. Every value we project is a literal someone typed.
+test("mcpControl: projected values are escaped, so Pi resolves exactly what was typed", () => {
+  withDir((dir) => {
+    const ctrl = makeMcpControl({ dir: () => dir });
+    const nasty = ["!touch /tmp/pwned", "pa$$word", "$HOME", "${PATH}", "plain", "a$!b", "!"];
+    ctrl.save({
+      name: "local",
+      transport: "stdio",
+      command: "srv",
+      env: Object.fromEntries(nasty.map((v, i) => [`K${i}`, v])),
+    });
+    ctrl.save({ name: "remote", transport: "http", url: "https://a.test/mcp", bearerToken: "!rm -rf ~ $SECRET" });
+    const proj = readProj(dir).mcpServers;
+    nasty.forEach((v, i) => {
+      assert.equal(resolveConfigValue(proj.local.env[`K${i}`], {}), v, `env value ${JSON.stringify(v)}`);
+    });
+    assert.equal(resolveConfigValue(proj.remote.headers.Authorization, {}), "Bearer !rm -rf ~ $SECRET");
+    for (const v of nasty) assert.equal(resolveConfigValue(escapeConfigValue(v), { HOME: "/h", PATH: "/p" }), v);
+    assertPiAccepts(dir);
+  });
+});
+
+test("mcpControl: names Pi would reject, SSE endpoints and bad variable names are refused at save", () => {
+  withDir((dir) => {
+    const ctrl = makeMcpControl({ dir: () => dir });
+    assert.equal(ctrl.save({ name: "my server", transport: "stdio", command: "x" }).ok, false);
+    assert.equal(ctrl.save({ name: "old", transport: "http", url: "https://mcp.example.com/sse" }).ok, false);
+    assert.equal(ctrl.save({ name: "old", transport: "http", url: "https://mcp.example.com/v1/sse/" }).ok, false);
+    assert.equal(
+      ctrl.save({ name: "acme", transport: "http", url: "https://a.test/mcp", bearerTokenEnv: "NOT A VAR" }).ok,
+      false,
+    );
+    assert.equal(ctrl.list().length, 0, "nothing written on a refusal");
+  });
+});
+
+// An older release wrote mcp.json for pi-mcp-adapter: `auth` strings, `bearerToken`
+// fields, and a settings.toolPrefix pin. Pi rejects every HTTP entry in that shape.
+test("mcpControl: an adapter-era mcp.json is re-projected once, and a Pi-format one is left alone", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "mcp-desktop.json"),
+      JSON.stringify({
+        servers: {
+          acme: { transport: "http", url: "https://a.test/mcp", auth: "bearer", bearerToken: "tok", enabled: true },
+          linear: { transport: "http", url: "https://mcp.linear.app/mcp", auth: "oauth", enabled: true },
+          off: { transport: "stdio", command: "x", enabled: false },
+        },
+      }),
+    );
+    writeFileSync(
+      join(dir, "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          acme: { url: "https://a.test/mcp", auth: "bearer", bearerToken: "tok" },
+          linear: { url: "https://mcp.linear.app/mcp", auth: "oauth" },
+        },
+        settings: { toolPrefix: "server" },
+      }),
+    );
+    assert.equal(migrateMcpProjection(() => dir), true);
+    const proj = readProj(dir);
+    assert.equal(proj.settings, undefined);
+    assert.deepEqual(proj.mcpServers.acme.headers, { Authorization: "Bearer tok" });
+    assert.equal(proj.mcpServers.linear.auth, undefined);
+    assert.equal(proj.mcpServers.off.enabled, false, "a disabled server stays listed, switched off");
+    assertPiAccepts(dir);
+
+    // Already migrated (or hand-written for Pi): untouched, ${VAR} references included.
+    const handWritten = { mcpServers: { docs: { url: "https://d.test/mcp", headers: { Authorization: "Bearer ${DOCS}" } } } };
+    writeFileSync(join(dir, "mcp.json"), JSON.stringify(handWritten));
+    assert.equal(migrateMcpProjection(() => dir), false);
+    assert.deepEqual(readProj(dir), handWritten);
   });
 });

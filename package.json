@@ -83,7 +83,6 @@
     "@zed-industries/agent-client-protocol": "0.4.5",
     "patch-package": "8.0.1",
     "pi-background-tasks": "2.6.10",
-    "pi-mcp-adapter": "2.34.0",
     "pi-privacy": "0.14.1",
     "pi-subagents": "0.78.0",
     "picomatch": "4.0.5",

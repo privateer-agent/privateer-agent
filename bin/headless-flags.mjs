@@ -180,7 +180,7 @@ export function privateProblem(args) {
 // Pi's own subcommands. Pi recognizes each only as args[0], so the launcher must hand
 // them over with NOTHING in front — the normal launch prepends --model, -e and --skill,
 // which is exactly how `privateer auth check` used to become a chat message.
-export const PI_SUBCOMMANDS = ["auth", "install", "remove", "uninstall", "list", "config"];
+export const PI_SUBCOMMANDS = ["auth", "install", "remove", "uninstall", "list", "config", "mcp"];
 
 const AUTH_SUBCOMMANDS = ["check", "print-api-key", "print-bearer-token"];
 

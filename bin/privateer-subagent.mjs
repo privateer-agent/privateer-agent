@@ -67,9 +67,22 @@ export function piCliPath(repoRoot = REPO) {
 // Given the args pi-subagents built for the child, return the args to run the bundled
 // cli.js with: `--no-extensions` + one `-e <path>` per moat extension, THEN the
 // original args (so the injected flags precede the positional `Task:` prompt).
+// Pi's built-in extensions the parent wants its children to keep (MCP, tool_search),
+// by bare name. `--no-extensions` turns built-ins off too, so each is loaded back with
+// `-e builtin:<name>`. A separate, comma-separated variable rather than entries in
+// PRIVATEER_CHILD_EXTENSIONS: that one splits on path.delimiter, which is ":" on
+// macOS and Linux — the very character in "builtin:mcp".
+export function childBuiltins(env = process.env) {
+  return (env.PRIVATEER_CHILD_BUILTINS ?? "")
+    .split(",")
+    .map((n) => n.trim())
+    .filter((n) => /^[a-z0-9.-]+$/i.test(n));
+}
+
 export function buildChildArgs(originalArgs, repoRoot = REPO, env = process.env) {
   const inject = ["--no-extensions"];
   for (const p of moatExtensionPaths(repoRoot, env)) inject.push("-e", p);
+  for (const name of childBuiltins(env)) inject.push("-e", `builtin:${name}`);
   return [...inject, ...originalArgs];
 }
 

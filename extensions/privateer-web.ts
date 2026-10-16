@@ -33,7 +33,7 @@
 //
 // The specifiers are built rather than written as literals on purpose: it keeps tsc from
 // pulling that package's own .ts sources into our typecheck, the same trick config/moat.ts
-// uses for pi-mcp-adapter.
+// used for pi-mcp-adapter.
 import { guardedWebToolDefinitions } from "../src/tools/web.ts";
 import { guardedCryptoToolDefinitions } from "../src/tools/crypto.ts";
 import { readWebToolsConfig, resolveWebMode, type ProviderMetaLike } from "../src/tools/webMode.ts";

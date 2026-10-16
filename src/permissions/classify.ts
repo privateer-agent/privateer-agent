@@ -235,16 +235,65 @@ const MEDIA_TITLES: Record<string, string> = {
 const RESUME_VIDEO_TITLE = "Save a video already generated (nothing further is billed)";
 const RESUME_SPRITE_TITLE = "Save a sprite animation already generated (nothing further is billed)";
 
+// What a tool declares about itself — MCP tool annotations, as Pi reports them through
+// getAllTools(). Self-reported by whoever wrote the server, so a hint may only ever
+// LOWER friction for a call that is no worse than a network read; nothing here can
+// waive a prompt for a tool that says nothing.
+export interface ToolHints {
+  readOnly?: boolean;
+}
+
+// Pi's MCP resource tools (core/mcp-servers.js). They list and read resources from
+// every connected server — network reads from connectors the user configured.
+const MCP_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
 export function classifyToolCall(
   toolName: string,
   input: unknown,
   scope: ScopeOptions,
+  hints: ToolHints = {},
 ): PermissionRequest | null {
   const name = toolName.toLowerCase();
   const obj: Record<string, unknown> =
     input && typeof input === "object" ? (input as Record<string, unknown>) : {};
 
   if (NON_GATED.has(name)) return null;
+
+  // codemode runs a model-written script in a QuickJS sandbox with no file system, no
+  // network and no timers: everything it does to the world is a tool call, and Pi
+  // sends each one through tool_call like a direct call (parentToolCallId set). Those
+  // nested calls ARE the actions, and each is classified on its own merits right here.
+  // Gating the script as well would put two prompts in front of every action, the
+  // outer one showing only source code. (Its `models` global is turned off where we
+  // create it — config/moat.ts and extensions/privateer-codemode.ts.)
+  //
+  // tool_search only changes which tools are declared to the model; it calls nothing.
+  if (name === "codemode" || name === "tool_search") return null;
+
+  if (MCP_RESOURCE_TOOLS.has(name)) {
+    return {
+      tool: toolName,
+      kind: "fetch",
+      title: name === "read_mcp_resource" ? `Read a resource from ${str(obj.server) || "a connector"}` : "List connector resources",
+      detail: str(obj.uri) || str(obj.server) || "all connectors",
+    };
+  }
+
+  // An MCP server tool, "mcp__<server>__<tool>". Matched before the name heuristics
+  // below, which would otherwise read a tool called fetch_url or web_search on some
+  // server as a plain network fetch. A tool that declares itself read-only is a read
+  // from that connector (a prompt everywhere but bypass, and allowed to ASK in plan
+  // mode); anything else could change something on the far side, so it is bash-kind,
+  // exactly as every MCP call was before.
+  if (name.startsWith("mcp__")) {
+    const rest = toolName.slice("mcp__".length);
+    const sep = rest.indexOf("__");
+    const server = sep > 0 ? rest.slice(0, sep) : "a connector";
+    const tool = sep > 0 ? rest.slice(sep + 2) : rest;
+    return hints.readOnly
+      ? { tool: toolName, kind: "fetch", title: `Read from ${server}: ${tool}`, detail: safeJson(obj) }
+      : { tool: toolName, kind: "bash", title: `Run ${tool} on ${server}`, detail: safeJson(obj) };
+  }
 
   // Creating a routine is a persistent mutation; surface the trigger + delivery, and
   // force a human decision (alwaysAsk) when it grants off-machine egress.
@@ -688,10 +737,9 @@ export function classifyToolCall(
     };
   }
 
-  // Unknown / custom / MCP tool: we can't prove it's side-effect-free, so
-  // safe-by-default is to prompt. Classified as a bash-kind action (asks in
-  // default/acceptEdits, denies in plan, allows only under bypass). Phase 5 refines
-  // this with MCP destructiveHint → alwaysAsk and a per-tool policy map.
+  // Unknown / custom tool: we can't prove it's side-effect-free, so safe-by-default
+  // is to prompt. Classified as a bash-kind action (asks in default/acceptEdits,
+  // denies in plan, allows only under bypass). MCP tools are handled above.
   return {
     tool: toolName,
     kind: "bash",

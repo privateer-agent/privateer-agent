@@ -1,5 +1,5 @@
 import type { Server } from "node:net";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -55,7 +55,8 @@ import {
 import type { Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigger.ts";
 import { splitRoutineTools } from "../routines/toolSelect.ts";
-import { resolveMcpSelection, readMcpInventory, type ResolvedMcpTools } from "../mcp/toolNames.ts";
+import { resolveMcpTools, isToolOfServer } from "../mcp/toolNames.ts";
+import { createUIContext } from "../ext/headlessUi.ts";
 import { deliver, type RelayPusher, type CloudPusher } from "../routines/delivery.ts";
 import { ResultMedia, type StagedMedia } from "../routines/resultMedia.ts";
 import { withBrief } from "../routines/resultBrief.ts";
@@ -63,7 +64,6 @@ import { ATTACH_RESULT_TOOL } from "../tools/attachResult.ts";
 import { postOutbox as sealToOutbox, type OutboxSource } from "../outbox/cloudOutbox.ts";
 import { redactText, collectSecrets } from "../util/redact.ts";
 import { startIpcServer, sendToHarbor, describeRelay, formatDuration, HarborAlreadyRunningError, type IpcRequest, type IpcResponse, type RelayStatus } from "./ipc.ts";
-import { serializeBuild } from "./buildLock.ts";
 import { createAccountLease } from "./accountLease.ts";
 import { closeSession } from "./closeSession.ts";
 import { rotateLogIfLarge } from "./logRotate.ts";
@@ -133,11 +133,9 @@ const HOSTED_SUSPEND_MIN_LEAD_MS = Number(process.env.HARBOR_SUSPEND_MIN_LEAD_MS
 // answer before it fail-closes to "no response" (the runner then defers the run). Bounds
 // a stuck graph from pinning a `running` slot forever when the controller wanders off.
 const GATE_TIMEOUT_MS = 5 * 60_000;
-// How long a run waits for a newly-selected connector to hand over its tool list
-// before giving up and saying so in the result (see warmMcpCache). Bounds a dead
-// endpoint or an expired OAuth token from stalling a scheduled run.
-const WARM_TIMEOUT_MS = Number(process.env.PRIVATEER_MCP_WARM_MS) || 30_000;
-const WARM_POLL_MS = 250;
+// Every tool Pi's MCP support registers: server tools, and the resource tools that
+// reach every server at once.
+const MCP_TOOL_PATTERNS = ["mcp__*", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
 // Hard ceiling on one unattended run (a routine, a submitted task, a workflow agent
 // step). Nothing else bounds a provider stream that stops sending without closing, and a
 // run stuck there holds its routine's `running` slot until the harbor restarts — the
@@ -207,9 +205,6 @@ function formatResult(routine: Routine, body: string, status: "ok" | "error", er
   if (status === "error") return `${head}**Run failed:** ${error ?? "unknown error"}\n\n${body}${formatNotes(notes)}`.trimEnd() + "\n";
   return `${head}${body.trim() || "(no output)"}\n${formatNotes(notes)}`;
 }
-
-// Session construction is serialized process-wide — see harbor/buildLock.ts for why.
-// Imported rather than defined here so the channels runtime can share the same lock.
 
 // A short human title for an ad-hoc task: the app's explicit title, else the first
 // non-empty line of the prompt, clipped. Exported for the signed-args round-trip test.
@@ -281,8 +276,6 @@ export class Harbor {
   // + no live work rather than on controllerAttached, which never resets while the
   // socket stays open).
   private lastActivityAt = Date.now();
-  // In-flight MCP tool-inventory rebuild, shared by every run that needs one.
-  private warmInFlight?: Promise<void>;
   // Live, app-drivable sessions spawned on demand (task_spawn). Each has its OWN relay
   // terminal (task-<uuid>); the harbor just keeps handles so it can reap them on shutdown.
   private readonly liveTasks = new Map<string, LiveTaskHandle>();
@@ -878,22 +871,15 @@ export class Harbor {
   }
 
   // Build the Pi services for one unattended run: the auto-approve gate, the account
-  // provider, web tools when the agent has them, and the MCP adapter.
-  //
-  // `directTools` is the ONLY way to make per-tool MCP names exist at all. Without it
-  // pi-mcp-adapter exposes every connector through a single proxy tool named "mcp" —
-  // one grant, all servers, all tools — which is exactly what a per-routine allow-list
-  // is supposed to prevent. The adapter reads it from process.env at extension
-  // activation, so the build is serialized (serializeBuild) and the previous value is
-  // restored. "__none__" is its sentinel for "register none": an unattended run with
-  // no connector selectors gets no direct tools, whatever a shared mcp.json says.
-  private buildSessionServices(
+  // provider, web tools when the agent has them, and Pi's MCP support. Which MCP tools
+  // the run may reach is decided by the session's `tools` allow-list (resolveRunTools),
+  // not here, so concurrent builds share nothing.
+  private async buildSessionServices(
     cwd: string,
-    directTools: string[],
     media?: ResultMedia,
     spendGrant: readonly string[] = [],
   ): Promise<any> {
-    return serializeBuild(async () => {
+    {
       const granted = new Set(spendGrant);
       const gate: GateController = {
         getMode: () => "bypass",
@@ -919,122 +905,39 @@ export class Harbor {
         // grant cover a call that leaves cwd or reads a protected file.
         isSpendPreauthorized: (req) => granted.has(req.tool),
       };
-      // Every extension this session gets, in the one canonical order — including the MCP
-      // adapter (Phase 5), the web/media capability shaping, and the filter that ignores
+      // Every extension this session gets, in the one canonical order — including MCP
+      // and codemode, the web/media capability shaping, and the filter that ignores
       // any moat shim an older release left in the shared agent dir (releases up to 0.11
       // installed one per extension; the launcher sweeps them, but a daemon can outlive
       // the launch that would have). See config/moat.ts.
       const moat = await moatResourceOptions({ kind: "harbor-session", gate, resultMedia: media });
-      // MCP_DIRECT_TOOLS is read by the adapter when its factory RUNS, inside
-      // createAgentSessionServices — so it has to wrap the session creation, not the
-      // moatResourceOptions() call that imported it.
-      const prevDirect = process.env.MCP_DIRECT_TOOLS;
-      process.env.MCP_DIRECT_TOOLS = directTools.length > 0 ? directTools.join(",") : "__none__";
-      try {
-        return await createAgentSessionServices({
-          cwd,
-          agentDir: agentDir(),
-          resourceLoaderOptions: moat as any,
-        });
-      } finally {
-        if (prevDirect === undefined) delete process.env.MCP_DIRECT_TOOLS;
-        else process.env.MCP_DIRECT_TOOLS = prevDirect;
-      }
-    });
+      return await createAgentSessionServices({
+        cwd,
+        agentDir: agentDir(),
+        resourceLoaderOptions: moat as any,
+      });
+    }
   }
 
   // Turn a routine's stored tool list into what Pi will actually accept.
   //
   // Builtins pass through builtinToolsFor (explicit list, or the safe read/web set).
-  // MCP entries are SELECTORS — "<server>__<tool>" / "<server>__*" — and have to be
-  // translated into the adapter's registered names before Pi's exact-match `tools:`
-  // Set can grant anything at all. A "<server>__*" needs the adapter's metadata cache
-  // to enumerate; when that is cold we warm it (below) and re-resolve once.
-  private async resolveRunTools(
-    raw: string[],
-    cwd: string,
-    modelSpec: string,
-  ): Promise<{ tools: string[]; directToolsEnv: string[]; notes: string[] }> {
+  // MCP entries are SELECTORS — "<server>__<tool>" / "<server>__*" — translated into
+  // Pi's "mcp__<server>__<tool>" names and patterns. Once any `tools` entry starts with
+  // "mcp__", Pi registers ONLY the MCP tools that match, so the run can reach exactly
+  // the connectors it named. codemode rides along because it is how MCP tools are
+  // called by default; it can only call tools the session registered.
+  //
+  // With no selectors, `excludeTools` keeps every MCP tool unregistered. A builtin-only
+  // list would leave them registered (Pi only filters MCP tools once an entry names
+  // one) and merely unreachable — a run nobody watches gets the stronger guarantee.
+  private resolveRunTools(raw: string[]): { tools: string[]; excludeTools: string[]; servers: string[] } {
     const split = splitRoutineTools(raw);
     const builtin = builtinToolsFor(split.builtin);
-    if (split.mcp.length === 0) return { tools: builtin, directToolsEnv: [], notes: [] };
-
-    let resolved: ResolvedMcpTools = resolveMcpSelection(split.mcp);
-    if (resolved.coldServers.length > 0) {
-      await this.warmMcpCache(cwd, modelSpec, resolved.coldServers);
-      resolved = resolveMcpSelection(split.mcp);
-    }
-
-    const notes: string[] = [];
-    for (const server of resolved.coldServers) {
-      notes.push(
-        `Connector "${server}" didn't provide a tool list, so none of its tools were available to this run. ` +
-          `Check it is configured and, if it uses OAuth, that it is still authorized.`,
-      );
-    }
-    for (const selector of resolved.unknownTools) {
-      notes.push(`Connector tool "${selector}" doesn't exist on that connector, so it was not available to this run.`);
-    }
-    if (resolved.names.length > 0) {
-      log(`  connectors: ${resolved.servers.join(", ")} → ${resolved.names.length} tools`);
-    }
-    for (const note of notes) log(`  ${note}`);
-    return { tools: [...builtin, ...resolved.names], directToolsEnv: resolved.directToolsEnv, notes };
-  }
-
-  // Make pi-mcp-adapter build a fresh tool inventory for every configured connector.
-  //
-  // The adapter only connects to ALL of them when agent/mcp-cache.json is absent
-  // (init.ts → bootstrapAll); with the file present it connects lazily, so a connector
-  // added since the last session never gets an inventory and a "<server>__*" selector
-  // over it expands to nothing, for ever. Dropping the cache is safe — it is a cache —
-  // and makes this one throwaway session rebuild it. The session is never prompted
-  // (empty allow-list) and its MCP connections close on the adapter's idle timeout.
-  //
-  // The adapter does NOT await its own initialization from session_start — it stashes
-  // the promise and returns — so session creation resolving means nothing here. We
-  // watch the cache file instead, and give up after WARM_TIMEOUT_MS: a connector that
-  // never answers (dead endpoint, expired OAuth) must not hold a scheduled run open.
-  //
-  // A warm rebuilds the inventory for EVERY configured connector, so two runs that
-  // both hit a cold selector share one pass rather than racing to wipe the file out
-  // from under each other.
-  private warmMcpCache(cwd: string, modelSpec: string, servers: string[]): Promise<void> {
-    if (this.warmInFlight) return this.warmInFlight;
-    const p = this.doWarmMcpCache(cwd, modelSpec, servers).finally(() => {
-      if (this.warmInFlight === p) this.warmInFlight = undefined;
-    });
-    this.warmInFlight = p;
-    return p;
-  }
-
-  private async doWarmMcpCache(cwd: string, modelSpec: string, servers: string[]): Promise<void> {
-    log(`  warming connector tool lists: ${servers.join(", ")}`);
-    try {
-      rmSync(join(agentDir(), "mcp-cache.json"), { force: true });
-      const services = await this.buildSessionServices(cwd, []);
-      const { provider, modelId } = parseSpec(modelSpec);
-      const model = (modelRegistryOf(services) as any).find(provider, modelId);
-      if (!model) return;
-      const { session } = await createAgentSessionFromServices({
-        services,
-        sessionManager: SessionManager.inMemory(cwd),
-        model,
-        tools: [],
-      } as any);
-      try {
-        const deadline = Date.now() + WARM_TIMEOUT_MS;
-        while (Date.now() < deadline) {
-          const inventory = readMcpInventory(agentDir());
-          if (servers.every((s) => (inventory[s]?.length ?? 0) > 0)) break;
-          await new Promise((r) => setTimeout(r, WARM_POLL_MS));
-        }
-      } finally {
-        await closeSession(session);
-      }
-    } catch (e) {
-      log(`  connector warm-up failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    if (split.mcp.length === 0) return { tools: builtin, excludeTools: [...MCP_TOOL_PATTERNS], servers: [] };
+    const { patterns, servers } = resolveMcpTools(split.mcp);
+    log(`  connectors: ${servers.join(", ")}`);
+    return { tools: [...builtin, "codemode", ...patterns], excludeTools: [], servers };
   }
 
   // Drive one headless Pi turn to completion and return its collected text + status.
@@ -1055,14 +958,14 @@ export class Harbor {
     let error: string | undefined;
     let leasedAccount = false;
     let session: any;
-    const resolved = await this.resolveRunTools(spec.tools, spec.cwd, spec.model);
+    const resolved = this.resolveRunTools(spec.tools);
     // attach_to_result rides with the staging area rather than the allow-list: it is
     // how the answer is DELIVERED, not a capability the run gains. A routine that
     // named an explicit tool list still gets it, because the alternative is a run
     // that can generate a still and then has no way to hand it over — and the file
     // is going to the user's own mailbox, which `delivery: cloud` already chose.
     const allowedTools = spec.media ? [...resolved.tools, ATTACH_RESULT_TOOL] : resolved.tools;
-    const { directToolsEnv, notes } = resolved;
+    const notes: string[] = [];
     // The billing tools this run may use: the ones its own allow-list names, and no
     // others. Authorizes the run's own calls (the gate, below) and its subagents' —
     // children are a separate process and read the grant from the environment, released
@@ -1070,7 +973,7 @@ export class Harbor {
     const spendGrant = allowedTools.filter((t) => BILLED_MEDIA_TOOLS.has(t));
     const releaseChildSpend = grantChildSpend(`run:${++runSeq}`, spendGrant);
     try {
-      const services = await this.buildSessionServices(spec.cwd, directToolsEnv, spec.media, spendGrant);
+      const services = await this.buildSessionServices(spec.cwd, spec.media, spendGrant);
 
       const { provider, modelId } = parseSpec(spec.model);
       if (provider === "privateer") {
@@ -1090,7 +993,13 @@ export class Harbor {
           sessionManager: SessionManager.inMemory(spec.cwd),
           model,
           tools: allowedTools,
+          excludeTools: resolved.excludeTools,
         } as any));
+        // session_start is what connects the MCP servers (Pi's MCP support) and arms
+        // the other extensions. Nobody is watching an unattended run, so the UI is the
+        // headless no-op one: hasUI stays honest for extensions that check it, and the
+        // gate's own localAsk (deny) answers anything that would have prompted.
+        await session.bindExtensions({ uiContext: createUIContext({}) });
         const adapter = createEngineEventAdapter();
         session.subscribe((ev: any) => {
           for (const ee of adapter.toEngineEvents(ev)) {
@@ -1114,6 +1023,17 @@ export class Harbor {
         if (timedOut) {
           status = "error";
           error = `run stopped after ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes (PRIVATEER_RUN_TIMEOUT_MS)`;
+        }
+        // A connector that never connected registers no tools, and the run quietly comes
+        // back thinner than asked for. Say which, so the result explains itself.
+        const registered: string[] = (session.getAllTools?.() ?? []).map((t: { name: string }) => t.name);
+        for (const server of resolved.servers) {
+          if (registered.some((name) => isToolOfServer(name, server))) continue;
+          const note =
+            `Connector "${server}" didn't provide any tools, so none were available to this run. ` +
+            `Check it is configured and, if it uses OAuth, that it is still signed in (/mcp login ${server}).`;
+          notes.push(note);
+          log(`  ${note}`);
         }
       }
     } catch (err) {

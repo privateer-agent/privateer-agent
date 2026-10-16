@@ -1303,7 +1303,7 @@ export class RelayClient {
   // `builtIn` + `managed` describe the MOAT, which is deliberately absent from
   // `installed` (it never enters settings "packages"). Without them the app's Browse
   // tab — an unfiltered npm `keywords:pi-package` search — offers Add on packages we
-  // already ship: pi-mcp-adapter, pi-subagents and the rpiv packs are on its first
+  // already ship (or retired): pi-mcp-adapter, pi-subagents and the rpiv packs are on its first
   // page. Every one of those round-trips to extensionsControl.add() only to come back
   // refused ("managed by Privateer"), and until it does the row reads as *not*
   // installed, which is the opposite of the truth. So:

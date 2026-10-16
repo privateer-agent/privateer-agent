@@ -690,6 +690,18 @@ else if (PI_SUBCOMMANDS.includes(sub)) {
   configureCompileCache(PRIVATEER_HOME); // same Pi module graph as a launch — reuse its compiled code
   ensurePatches(); // project `.privateer/` config dirs are a patch; -l scope needs them
   process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
+  // `mcp list` / `mcp login` read agent/mcp.json. A file an older release wrote for
+  // pi-mcp-adapter is rejected entry by entry, so upgrade it first — the same one-time
+  // step every session runs (src/remote/mcpControl.ts). Best-effort: a failure leaves
+  // Pi to report the file as it stands.
+  if (sub === "mcp") {
+    const mcpControl = pathToFileURL(path.join(REPO, "src", "remote", "mcpControl.ts")).href;
+    spawnSync(NODE_BIN, ["--import", "tsx", "--input-type=module", "-e", `(await import(${JSON.stringify(mcpControl)})).migrateMcpProjection()`], {
+      cwd: REPO,
+      stdio: "ignore",
+      env: process.env,
+    });
+  }
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
   runToCompletion(NODE_BIN, [...nodeArgs, CLI, ...args]);
 }
@@ -754,6 +766,11 @@ else {
     process.env.PI_SUBAGENT_PI_BINARY = path.join(REPO, "bin", "privateer-subagent.mjs");
   }
   process.env.PRIVATEER_CHILD_EXTENSIONS = MOAT_PATHS.join(path.delimiter);
+  // A child also gets Pi's MCP support and tool_search, which it loads as built-ins:
+  // children run --no-extensions (bin/privateer-subagent.mjs), which turns built-ins off
+  // too, so a subagent of this terminal would otherwise lose the connectors its parent
+  // has. codemode reaches it as our own moat extension (privateer-codemode).
+  process.env.PRIVATEER_CHILD_BUILTINS = "mcp,tool-search";
   // Suppress Pi's upstream update banner (our banner is the startup surface). Disables
   // ONLY the version fetch — fd/rg can still download on first run.
   if (!process.env.PI_SKIP_VERSION_CHECK) process.env.PI_SKIP_VERSION_CHECK = "1";
@@ -775,12 +792,13 @@ else {
     // Pi 1.3's `/share` defaults to "auto", which uploads to Earendil's Radius when the
     // user is signed in there. A share leaves the machine only to the user's own gist.
     if (s.sessionShareDestination === undefined) { s.sessionShareDestination = "gist"; m = true; }
-    // Pi 0.99 auto-loads built-in extensions. builtin:mcp reads the same agent/mcp.json as
-    // pi-mcp-adapter, so leaving both on connects every server twice; codemode,
-    // tool-search and llama.cpp stay off until we adopt them deliberately. Each is added
-    // once — a user's own +/- entry for that built-in is left alone.
+    // Pi 0.99 auto-loads built-in extensions. builtin:mcp and builtin:tool-search are
+    // ours to keep — Pi's MCP support IS our MCP support. builtin:codemode is replaced by
+    // extensions/privateer-codemode.ts (the same tool without the `models` global), and
+    // builtin:llama.cpp, a local-model integration, stays off until adopted on purpose.
+    // Each is added once — a user's own +/- entry for that built-in is left alone.
     const ext = Array.isArray(s.extensions) ? s.extensions : [];
-    for (const name of ["builtin:mcp", "builtin:codemode", "builtin:tool-search", "builtin:llama.cpp"]) {
+    for (const name of ["builtin:codemode", "builtin:llama.cpp"]) {
       if (!ext.some((e) => typeof e === "string" && e.replace(/^[+\-!]/, "") === name)) { ext.push(`-${name}`); m = true; }
     }
     if (ext.length) s.extensions = ext;

@@ -4,10 +4,10 @@
 // or a per-server wildcard "<server>__*" — everything else is a builtin allow-list
 // entry.
 //
-// NOTE the selector is NOT the name Pi registers. pi-mcp-adapter names a tool
-// "<serverPrefix>_<tool>" (one underscore), and Pi's `tools:` option is an exact-match
-// Set — so a selector must be TRANSLATED before it can grant anything. That
-// translation lives in ../mcp/toolNames.ts; this module only splits and matches.
+// NOTE the selector is NOT the name Pi registers. Pi names an MCP tool
+// "mcp__<server>__<tool>", so a selector must be TRANSLATED before it can grant
+// anything. That translation lives in ../mcp/toolNames.ts; this module only splits and
+// matches.
 
 export interface RoutineToolSplit {
   // Builtin tool names (read, glob, ...). Empty → caller falls back to the safe set.

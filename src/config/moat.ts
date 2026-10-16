@@ -39,8 +39,10 @@
  * loads everything Pi-touching after ../boot.ts, and this must not break that).
  */
 
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { managedNames } from "./moatManifest.ts";
+import { migrateMcpProjection } from "../remote/mcpControl.ts";
 import type { GateController } from "../ext/permissionGate.ts";
 import type { SendFileBridge } from "../tools/sendFile.ts";
 import type { CargoSaveBridge } from "../tools/cargo.ts";
@@ -94,7 +96,7 @@ export interface MoatOptions {
    */
   webHint?: string;
   /**
-   * How to import a THIRD-PARTY dependency (today: pi-mcp-adapter). Defaults to a plain
+   * How to import a shared dependency (today: pi-coding-agent, for its MCP extensions). Defaults to a plain
    * dynamic import, which is right for every process that runs from a normal Node
    * resolution root.
    *
@@ -107,6 +109,13 @@ export interface MoatOptions {
    * teaching this module about Electron.
    */
   hostImport?: (spec: string) => Promise<any>;
+  /**
+   * A window-scoped mcp.json (the desktop: each window activates its own subset of the
+   * catalog, projected by its connector manager). Set → this session's MCP support
+   * reads ONLY that file, so concurrent windows run different connector sets in one
+   * process. Unset → the shared agent/mcp.json plus a trusted project's, as the CLI.
+   */
+  mcpConfigPath?: string;
 }
 
 /**
@@ -260,6 +269,25 @@ export async function moatResourceOptions(
   return { extensionFactories: await buildMoat(opts), extensionsOverride: excludeDiscoveredMoat() };
 }
 
+// A window's mcp.json, in the shape Pi's MCP extension takes from `loadConfig`. The
+// file is our own projection (mcpService / mcpControl.toPiServerEntry), already in
+// Pi's format; an unreadable one is an empty config with the reason, not a crash.
+// `/mcp` changes save back to this same file (the entries' `source`).
+export function loadWindowMcpConfig(path: string): { servers: unknown[]; errors: string[] } {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    const servers = Object.entries<Record<string, unknown>>(raw?.mcpServers ?? {}).map(([name, config]) => ({
+      name,
+      config,
+      source: path,
+      scope: "global",
+    }));
+    return { servers, errors: [] };
+  } catch (e) {
+    return { servers: [], errors: [`${path}: ${e instanceof Error ? e.message : String(e)}`] };
+  }
+}
+
 /** Build the ordered extension factory list for one session. */
 export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> {
   const caps = CAPABILITIES[opts.kind];
@@ -282,7 +310,8 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
     const { privacyExtension } = await import("./privacyPolicy.ts");
     factories.push(privacyExtension());
   }
-  factories.push(makeAccountProvider()); // must follow pi-privacy — see header
+  // must follow pi-privacy — see header. The harbor holds its own account lease.
+  factories.push(makeAccountProvider({ armOnStart: opts.kind !== "harbor-session" }));
 
   // Every kind: a text-only model gets image descriptions from a vision model on the
   // same key instead of silently losing the image. See providers/visionDelegate.ts.
@@ -375,18 +404,28 @@ export async function buildMoat(opts: MoatOptions): Promise<ExtensionFactory[]> 
   }
 
   if (caps.mcp) {
-    // Registers the tools from the shared agent/mcp.json — the same projection the app's
-    // MCP manager writes over the relay. No servers configured → a no-op. The specifier is
-    // a variable so tsc treats it as Promise<any> and doesn't pull the third-party
-    // adapter's own .ts into our typecheck.
+    // Pi's built-in MCP support: servers from the shared agent/mcp.json — the same
+    // projection the app's MCP manager writes over the relay — plus codemode, the
+    // default way MCP tools are reached, and tool_search for servers set to `deferred`.
+    // The CLI loads these as built-ins; SDK sessions don't, so they're added here. No
+    // servers configured → no tools. Imported through hostImport so the desktop gets the
+    // ONE Pi instance it already runs (see hostImport above).
     //
-    // The caller still owns MCP_DIRECT_TOOLS: the adapter reads it when the factory RUNS
-    // (inside createAgentSessionServices), not when it is imported here, so the env has to
-    // be set around session creation rather than around this call.
-    const mcpAdapterSpec = "pi-mcp-adapter";
+    // codemode is created with `models: false`. Its `models` global runs classifier and
+    // image models with the session's credentials, straight from a script — calls our
+    // permission gate never sees and that need not go to the provider this session was
+    // chosen for. Scripts keep tool calls, each of which is gated like a direct one.
+    //
+    // A file an older release wrote in pi-mcp-adapter's format is rewritten first, or
+    // every HTTP connector in it would be rejected as invalid.
+    migrateMcpProjection();
     const hostImport = opts.hostImport ?? ((spec: string) => import(spec));
-    const { default: mcpAdapter } = await hostImport(mcpAdapterSpec);
-    factories.push(mcpAdapter);
+    const pi = await hostImport("@earendil-works/pi-coding-agent");
+    factories.push(
+      pi.createMcpExtension(opts.mcpConfigPath ? { loadConfig: () => loadWindowMcpConfig(opts.mcpConfigPath!) } : {}),
+      pi.createCodemodeExtension({ models: false }),
+      pi.createToolSearchExtension(),
+    );
   }
 
   return factories;

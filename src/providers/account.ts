@@ -872,7 +872,12 @@ export function registerAccountModels(pi: {
 // after the picker built its list, and privateer models would be missing until reopen.
 // registerProvider replaces the provider's models on the second call, and the picker's
 // refresh() re-applies registered providers, so the full list appears once fetched.
-export function makeAccountProvider() {
+// `armOnStart: false` is for a host that owns the credential itself. The harbor leases
+// ONE account credential across its concurrent runs (harbor/accountLease.ts) and now
+// binds every run's extensions — Pi's MCP support connects servers on session_start —
+// so the launch seed below would mint a second credential per daemon for runs that
+// never use the account channel, a device nothing revokes.
+export function makeAccountProvider(opts: { armOnStart?: boolean } = {}) {
   return (pi: {
     registerProvider?: (name: string, config: unknown) => void;
     on?: (event: string, handler: (e: unknown, ctx: unknown) => unknown) => void;
@@ -918,7 +923,7 @@ export function makeAccountProvider() {
     // all, and the first prompt dead-ends on "No API key found for privateer." — even
     // though the banner says "connected". The REPL (cli/chat.ts) and the harbor
     // already spawn one at startup; this gives the TUI the same seed.
-    pi.on?.("session_start", (_e, ctx) => void armAccountCredential(ctx));
+    if (opts.armOnStart !== false) pi.on?.("session_start", (_e, ctx) => void armAccountCredential(ctx));
 
     // Two safety nets around the account channel, both OUTSIDE the request path —
     // they read Pi's in-memory auth map and its finished messages, and never touch the

@@ -197,14 +197,14 @@ test("connect: a pasted token keeps its trailing newline out of the value", asyn
   assert.equal(readProj().mcpServers.notion.env.NOTION_TOKEN, "ntn_trailing");
 });
 
-test("connect: space toggles enabled, which drops it from the projection", async () => {
+test("connect: space toggles enabled, which switches it off in the projection", async () => {
   freshHome({ github: GITHUB }); // the only connector, so row 0 is unambiguous
   const d = openPanel();
   d.send(" ");
   d.send(ESC);
   await d.done;
 
-  assert.equal(readProj().mcpServers.github, undefined, "disabled server left the projection");
+  assert.equal(readProj().mcpServers.github.enabled, false, "disabled server is switched off in the projection");
   // …but it is still MANAGED, so it can be toggled back on.
   const src = readSource();
   assert.equal(src.servers.github.enabled, false);
@@ -249,7 +249,7 @@ test("connect: a custom entry infers transport from what you type", async () => 
   // Catalog → last row is "Custom…". Filter to it, then walk the three steps.
   d.send("a", "c", "u", "s", "t", "o", "m", ENTER);
   d.send("mine", ENTER); // name
-  d.send("https://mcp.example.com/sse", ENTER); // target → inferred http
+  d.send("https://mcp.example.com/mcp", ENTER); // target → inferred http
   d.send(ENTER); // env is optional
   d.send(ENTER); // bearer token is optional → OAuth
   d.send(ENTER); // headers are optional
@@ -258,10 +258,12 @@ test("connect: a custom entry infers transport from what you type", async () => 
 
   const proj = readProj().mcpServers.mine;
   assert.ok(proj, "custom connector not projected");
-  assert.equal(proj.url, "https://mcp.example.com/sse");
-  // The adapter's own vocabulary: `auth: "oauth"`, NOT a boolean in its `oauth` slot
-  // (which is an OAuthConfig object). See mcpControl.toStandard.
-  assert.equal(proj.auth, "oauth");
+  assert.equal(proj.url, "https://mcp.example.com/mcp");
+  // OAuth is recorded in OUR file; Pi's needs no field for it (it offers sign-in on a
+  // 401), and our "oauth" string there would make Pi reject the entry. See
+  // mcpControl.toStandard.
+  assert.equal(readSource().servers.mine.auth, "oauth");
+  assert.equal(proj.auth, undefined);
   assert.equal(proj.oauth, undefined, "the legacy boolean must never reach the file");
   assert.equal(proj.command, undefined, "an http entry must not carry a command");
 });
@@ -280,11 +282,10 @@ test("connect: a bearer token makes an http connector auth:bearer, not oauth", a
 
   const proj = readProj().mcpServers.tokened;
   assert.ok(proj, "custom connector not projected");
-  // Load-bearing: server-manager.ts only attaches the Authorization header when auth
-  // is exactly "bearer". A stored token with auth unset is a token that never sends.
-  assert.equal(proj.auth, "bearer");
-  assert.equal(proj.bearerToken, "sk_live_abc123");
-  assert.deepEqual(proj.headers, { "X-Api-Version": "2" });
+  // Load-bearing: the token is only projected into an Authorization header when auth
+  // is "bearer". A stored token with auth unset is a token that never sends.
+  assert.equal(readSource().servers.tokened.auth, "bearer");
+  assert.deepEqual(proj.headers, { "X-Api-Version": "2", Authorization: "Bearer sk_live_abc123" });
 });
 
 test("connect: the auth steps are skipped entirely for a local command", async () => {
@@ -337,7 +338,8 @@ test(
 
     const proj = readProj().mcpServers.linear;
     assert.ok(proj, `linear not projected — got ${JSON.stringify(readProj())}`);
-    assert.equal(proj.auth, "oauth");
+    assert.equal(readSource().servers.linear.auth, "oauth");
+    assert.equal(proj.auth, undefined);
   }),
 );
 
@@ -389,14 +391,14 @@ test(
     d.send("remoteish", ENTER); // name
     // The URL is the LAST hosted step — env/bearer/headers are all skipped, so this
     // one enter saves. If any of them were still asked, nothing would be written yet.
-    d.send("https://mcp.example.com/sse", ENTER);
+    d.send("https://mcp.example.com/mcp", ENTER);
     d.send(ESC);
     await d.done;
 
     const proj = readProj().mcpServers.remoteish;
     assert.ok(proj, "the URL step did not complete the form — a secret step is still being asked");
-    assert.equal(proj.url, "https://mcp.example.com/sse");
-    assert.equal(proj.auth, "oauth");
+    assert.equal(proj.url, "https://mcp.example.com/mcp");
+    assert.equal(readSource().servers.remoteish.auth, "oauth");
     assert.equal(proj.bearerToken, undefined, "a hosted agent must not store a token");
     assert.equal(proj.env, undefined);
     assert.equal(proj.headers, undefined);

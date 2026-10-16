@@ -1190,6 +1190,22 @@ index 5562460..12516b9 100644
      }
      while (true) {
          const agentsSkillsDir = join(currentDir, ".agents", "skills");
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/cli.js b/node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/cli.js
+index 8f0d990..8c7931f 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/cli.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/cli.js
+@@ -8,7 +8,10 @@ import { existsSync } from "node:fs";
+ import { join } from "node:path";
+ import { createInterface } from "node:readline/promises";
+ import chalk from "chalk";
+-import { APP_NAME, CONFIG_DIR_NAME } from "../../config.js";
++import { APP_NAME as PI_APP_NAME, CONFIG_DIR_NAME } from "../../config.js";
++// Privateer patch: the commands this prints are ones the user types, so they name the
++// command the user actually ran (`privateer`, set by the launcher), not Pi's.
++const APP_NAME = process.env.PRIVATEER_CMD || PI_APP_NAME;
+ import { validateMcpServerConfig } from "../../core/mcp-servers.js";
+ import { ProjectTrustStore } from "../../core/trust-manager.js";
+ import { openBrowser } from "../../utils/open-browser.js";
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts b/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts
 index 3821d9f..b58133c 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts

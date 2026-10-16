@@ -26,8 +26,15 @@ function looksSensitive(name: string): boolean {
   return /^\.env(\..+)?$/.test(name) || /secret|credential/i.test(name);
 }
 
+// A project's own MCP config: Pi reads `.pi/mcp.json` once the project is trusted and
+// launches every stdio `command` in it, and expands `!command` values in env and
+// headers — so a write there is code that runs at the next session start, not a
+// settings tweak.
+const PROJECT_CONFIG_DIRS = new Set([".pi", ".privateer"]);
+
 export function isProtectedPath(p: string): boolean {
   const name = basename(p);
+  if (name === "mcp.json" && PROJECT_CONFIG_DIRS.has(basename(dirname(p)))) return true;
   return PROTECTED_BASENAMES.has(name) || looksSensitive(name);
 }
 
