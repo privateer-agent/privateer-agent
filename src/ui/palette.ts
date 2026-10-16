@@ -39,6 +39,8 @@ export type Palette = {
   GREEN: string; // success (connected, verified, context loaded)
   YELLOW: string; // warning (not-signed-in, unconfirmed, update available)
   RED: string; // alarm (the moat lowered — no-quarter)
+  SKY: string; // light blue (the wordmark's ✻ and P)
+  WHITE: string; // bright white (the context-file ⚓)
 };
 
 // Last-resort palette for when no theme is reachable (headless surfaces have no banner,
@@ -54,6 +56,8 @@ export const FALLBACK: Palette = {
   GREEN: `${ESC}32m`,
   YELLOW: `${ESC}33m`,
   RED: `${ESC}31m`,
+  SKY: c(117),
+  WHITE: c(231),
 };
 
 // Build a Palette from a Pi Theme. getFgAnsi(name) returns the raw SGR foreground escape
@@ -79,7 +83,20 @@ export function paletteFor(theme: any): Palette {
     GREEN: g("success", FALLBACK.GREEN),
     YELLOW: g("warning", FALLBACK.YELLOW),
     RED: g("error", FALLBACK.RED),
+    // Fixed colours, not theme tokens — but a pale blue or white vanishes on a light
+    // background, so a light theme gets a deeper blue and plain ink instead.
+    ...(lightAppearance(theme)
+      ? { SKY: c(32), WHITE: g("text", FALLBACK.INK) }
+      : { SKY: FALLBACK.SKY, WHITE: FALLBACK.WHITE }),
   };
+}
+
+function lightAppearance(theme: any): boolean {
+  try {
+    return theme.appearance === "light";
+  } catch {
+    return false;
+  }
 }
 
 // ── standalone REPL palette (no Pi Theme) ────────────────────────────────────

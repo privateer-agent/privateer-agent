@@ -277,7 +277,7 @@ function contextLine(p: Palette): string {
   const cost = truncated
     ? `${p.YELLOW} · too big, ${fmtBytes(loadedBytes)} loaded · ${p.INK}/context${p.RESET}`
     : `${p.DIM} · ~${tok} tok/turn${p.RESET}`;
-  return `${p.GREEN}⚓${p.DIM} ${p.RESET}${p.INK}${nearest}${p.RESET}${more}${cost}`;
+  return `${p.WHITE}⚓${p.DIM} ${p.RESET}${p.INK}${nearest}${p.RESET}${more}${cost}`;
 }
 
 // ── "What's New" — a tiny in-banner changelog ────────────────────────────────
@@ -314,7 +314,7 @@ function renderBanner(width: number, p: Palette, mark: string[], modelProvider?:
   // sits beside the lock body (not the shackle); the rest follows in reading order.
   const text: string[] = [
     "",
-    `${p.BOLD}${p.ACCENT}✻ ${p.ACCENT}P${p.INK}RIVATEER${p.RESET}${p.DIM}   privateer-agent ${p.INK}v${VERSION}${p.RESET}`,
+    `${p.BOLD}${p.SKY}✻ ${p.SKY}P${p.INK}RIVATEER${p.RESET}${p.DIM}   privateer-agent ${p.INK}v${VERSION}${p.RESET}`,
     `${p.DIM}Chart your own course privately.${p.RESET}`,
     "",
     accountLine(p, modelProvider),
