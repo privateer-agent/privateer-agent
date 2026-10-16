@@ -138,7 +138,8 @@ export interface McpDraft {
 export interface McpControl {
   // Re-write mcp.json from mcp-desktop.json. Run once at launch by
   // migrateMcpProjection, for a file an older release wrote in pi-mcp-adapter's format.
-  reproject(): void;
+  // `adopt`: projection entries to take into mcp-desktop.json first when it lacks them.
+  reproject(adopt?: Record<string, unknown>): void;
   // Every managed server, non-secret projection. Enabled or not — the app shows
   // disabled connectors so they can be toggled back on.
   list(): RemoteMcpServer[];
@@ -182,19 +183,55 @@ function isSseUrl(url: string): boolean {
 }
 
 /**
- * Make a literal survive Pi's config-value expansion (core/resolve-config-value.js):
- * "$$" is a literal "$", and a leading "!" — which would otherwise run the value as a
- * shell command — is written "$!". The value Pi resolves is then exactly the input.
+ * Carry a value written for pi-mcp-adapter into Pi's config-value syntax, meaning
+ * exactly what it meant before.
+ *
+ * Every value here — env, headers, a bearer token — was typed for the adapter, and
+ * the app, /connect and the desktop all still write that vocabulary:
+ *   • `${VAR}`, `$env:VAR` and `{env:VAR}` read the environment; any other `$` is a
+ *     literal `$`.
+ *   • A leading `!` runs the rest as a shell command; `!!` is a literal `!`.
+ * Pi (core/resolve-config-value.js) reads `${VAR}` and also bare `$VAR`, runs a
+ * leading `!`, and escapes with `$$` and `$!`. So the references become `${VAR}`,
+ * every other `$` is doubled (a token like `pa$word` would otherwise lose `$word`),
+ * and `!!x` becomes `$!x`. A `!command` stays a command, as it was.
+ *
+ * One difference stays: an unset variable was "" for the adapter, and makes Pi report
+ * the server as misconfigured — a louder failure for the same broken config.
  */
-export function escapeConfigValue(value: string): string {
-  const doubled = value.replace(/\$/g, "$$$$");
-  return doubled.startsWith("!") ? `$${doubled}` : doubled;
+export function toPiConfigValue(value: string): string {
+  // "!!x" is a literal "!" then x, with x's references still read (never a command).
+  if (value.startsWith("!!")) return `$!${references(value.slice(2))}`;
+  if (value.startsWith("!")) return value;
+  return references(value);
 }
 
-function escapeValues(values: Record<string, string>): Record<string, string> {
+// The adapter's three reference forms as Pi's `${VAR}`; every other `$` literal.
+function references(value: string): string {
+  const literal = (text: string) => text.replace(/\$/g, "$$$$");
+  let out = "";
+  let last = 0;
+  for (const m of value.matchAll(/\$\{(\w+)\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
+    out += literal(value.slice(last, m.index)) + "${" + (m[1] ?? m[2] ?? m[3]) + "}";
+    last = m.index! + m[0].length;
+  }
+  return out + literal(value.slice(last));
+}
+
+function piConfigValues(values: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(values)) out[k] = escapeConfigValue(String(v ?? ""));
+  for (const [k, v] of Object.entries(values)) out[k] = toPiConfigValue(String(v ?? ""));
   return out;
+}
+
+/**
+ * A bearer token as a whole Authorization header value. A command token (`!cmd`)
+ * printed only the token for the adapter, which added "Bearer "; Pi runs a command
+ * only as the WHOLE value, so the prefix moves inside it.
+ */
+function bearerHeader(token: string): string {
+  if (token.startsWith("!") && !token.startsWith("!!")) return `!printf 'Bearer %s' "$(${token.slice(1)})"`;
+  return `Bearer ${toPiConfigValue(token)}`;
 }
 
 /**
@@ -205,14 +242,30 @@ function escapeValues(values: Record<string, string>): Record<string, string> {
  * without the marker — Pi's own, or hand-written — is left alone.
  */
 export function migrateMcpProjection(dir: () => string = agentDir): boolean {
+  let raw: any;
   try {
-    const raw = JSON.parse(readFileSync(join(dir(), "mcp.json"), "utf8"));
+    raw = JSON.parse(readFileSync(join(dir(), "mcp.json"), "utf8"));
     if (raw?.settings?.toolPrefix === undefined) return false;
   } catch {
     return false;
   }
-  makeMcpControl({ dir }).reproject();
+  // A server someone added to mcp.json by hand never reached mcp-desktop.json, and
+  // re-projecting from that file alone would drop it. Adopt those first.
+  makeMcpControl({ dir }).reproject(raw?.mcpServers ?? {});
   return true;
+}
+
+// Legacy SSE endpoints of servers that also serve streamable HTTP, which is all Pi
+// speaks. A connector saved with one of these (the catalog shipped them) is moved to
+// the streamable URL wherever it is projected, so it keeps working without a re-save.
+const LEGACY_SSE_URLS: Record<string, string> = {
+  "https://mcp.atlassian.com/v1/sse": "https://mcp.atlassian.com/v1/mcp",
+  "https://mcp.asana.com/sse": "https://mcp.asana.com/mcp",
+  "https://mcp.linear.app/sse": "https://mcp.linear.app/mcp",
+};
+
+export function upgradeLegacyUrl(url: string): string {
+  return LEGACY_SSE_URLS[url.replace(/\/$/, "")] ?? url;
 }
 
 // One managed entry as a Pi `mcpServers` entry. Exported for the desktop's connector
@@ -227,24 +280,22 @@ export function migrateMcpProjection(dir: () => string = agentDir): boolean {
 //     "oauth" | "bearer" | "none". Any other value makes Pi reject the whole entry, so
 //     ours never reaches the file. OAuth needs no field at all: Pi offers sign-in when
 //     a server without an Authorization header answers 401.
-//   • Pi EXPANDS env and header values: "$VAR" / "${VAR}" read the environment and a
-//     value starting with "!" is run as a shell command. Every value here is a literal
-//     someone typed — a token, a key — so each is escaped (escapeConfigValue). An
-//     unescaped token containing "$" would be mangled; one starting with "!" would be
-//     executed on this machine.
+//   • Pi and the adapter both expand env and header values, with different syntax:
+//     each value is carried over so it means what it meant (toPiConfigValue). Copied
+//     verbatim, a token containing "$" would be mangled by Pi's bare-$VAR rule.
 export function toPiServerEntry(e: SourceEntry): Record<string, unknown> {
   const transport: McpTransport = e.transport ?? (e.url ? "http" : "stdio");
   const std: Record<string, unknown> = {};
   if (transport === "stdio") {
     if (e.command) std.command = e.command;
     if (e.args?.length) std.args = e.args;
-    if (e.env && Object.keys(e.env).length > 0) std.env = escapeValues(e.env);
+    if (e.env && Object.keys(e.env).length > 0) std.env = piConfigValues(e.env);
   } else {
-    if (e.url) std.url = e.url;
-    const headers: Record<string, string> = escapeValues(e.headers ?? {});
+    if (e.url) std.url = upgradeLegacyUrl(e.url);
+    const headers: Record<string, string> = piConfigValues(e.headers ?? {});
     if (authOf(e, transport) === "bearer") {
       // A stored token wins over the env var name.
-      if (e.bearerToken) headers.Authorization = `Bearer ${escapeConfigValue(e.bearerToken)}`;
+      if (e.bearerToken) headers.Authorization = bearerHeader(e.bearerToken);
       else if (e.bearerTokenEnv && ENV_NAME.test(e.bearerTokenEnv)) headers.Authorization = `Bearer \${${e.bearerTokenEnv}}`;
     }
     if (Object.keys(headers).length > 0) std.headers = headers;
@@ -351,8 +402,16 @@ export function makeMcpControl(opts?: {
   }
 
   return {
-    reproject(): void {
-      project(readSource());
+    reproject(adopt?: Record<string, unknown>): void {
+      const src = readSource();
+      let added = false;
+      for (const [name, entry] of Object.entries(adopt ?? {})) {
+        if (src.servers[name] || !entry || typeof entry !== "object") continue;
+        src.servers[name] = { ...(entry as SourceEntry), enabled: true };
+        added = true;
+      }
+      if (added) writeSource(src);
+      else project(src);
     },
 
     list(): RemoteMcpServer[] {
@@ -394,6 +453,9 @@ export function makeMcpControl(opts?: {
         if (!entry.command) return { ok: false, message: "A local (stdio) connector needs a command." };
       } else {
         if (draft.url !== undefined) entry.url = String(draft.url).trim();
+        // A connector saved with a legacy SSE endpoint before Pi: move it on, rather
+        // than refuse every later edit of it below.
+        if (entry.url) entry.url = upgradeLegacyUrl(entry.url);
         // `auth` is authoritative; the legacy boolean is honoured only when it isn't
         // sent, so an old app build keeps working without being able to override.
         if (draft.auth !== undefined) entry.auth = draft.auth;

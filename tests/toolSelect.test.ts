@@ -55,6 +55,8 @@ test("mcpToolName matches Pi's own createMcpToolName", () => {
     ["google-calendar", "list_events"],
     ["dev.radius", "search-code"],
     ["srv", "odd__tool"],
+    // Over Pi's 64-character cap: shortened with a hash, by the same rule.
+    ["google-workspace-enterprise", "list_calendar_events_for_all_shared_resources"],
   ]) {
     assert.equal(mcpToolName(server, tool), createMcpToolName(server, tool), `${server}/${tool}`);
   }

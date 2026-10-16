@@ -81,10 +81,11 @@ test("an MCP tool is classified by its server and name, before the name heuristi
   assert.equal(r?.title, "Run fetch_url on github");
 });
 
-test("an MCP tool that declares itself read-only is a read from that connector", () => {
-  const r = classifyToolCall("mcp__github__get_file", { path: "a" }, scope, { readOnly: true });
-  assert.equal(r?.kind, "fetch"); // still asks — but may ASK in plan mode instead of denying
-  assert.equal(r?.title, "Read from github: get_file");
+test("an MCP tool is bash-kind even when it calls itself read-only", () => {
+  // The hint is the server's own claim, and "always" on a fetch-kind request would
+  // relax the whole session to acceptEdits. The classifier doesn't even take it.
+  const r = classifyToolCall("mcp__github__get_file", { path: "a" }, scope);
+  assert.equal(r?.kind, "bash");
 });
 
 test("codemode and tool_search are not gated — the calls a script makes are", () => {

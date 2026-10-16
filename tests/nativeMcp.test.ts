@@ -59,7 +59,7 @@ test("the gate's tool_result redacts structuredContent, which scripts get instea
   );
 });
 
-test("the gate reads an MCP tool's read-only hint from Pi", async () => {
+test("in plan mode every MCP call is refused without asking, whatever it claims", async () => {
   const handlers: Record<string, (e: any, ctx?: any) => any> = {};
   const asked: string[] = [];
   makePermissionGate({
@@ -80,12 +80,11 @@ test("the gate reads an MCP tool's read-only hint from Pi", async () => {
     ],
   } as any);
   const ctx = { hasUI: true, ui: {} };
-  // Plan mode: a declared read is put to the human; anything else is refused outright.
-  await handlers.tool_call({ toolName: "mcp__docs__search", toolCallId: "1", input: {} }, ctx);
-  assert.deepEqual(asked, ["Read from docs: search"]);
-  const blocked = await handlers.tool_call({ toolName: "mcp__docs__delete_page", toolCallId: "2", input: {} }, ctx);
-  assert.equal(blocked?.block, true);
-  assert.equal(asked.length, 1, "a non-read MCP call is denied in plan mode without asking");
+  for (const toolName of ["mcp__docs__search", "mcp__docs__delete_page"]) {
+    const blocked = await handlers.tool_call({ toolName, toolCallId: "1", input: {} }, ctx);
+    assert.equal(blocked?.block, true, toolName);
+  }
+  assert.deepEqual(asked, [], "plan mode never puts an MCP call to the human");
 });
 
 // ── what an agent may write ──────────────────────────────────────────────────

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeMcpControl, escapeConfigValue, migrateMcpProjection } from "../src/remote/mcpControl.ts";
+import { makeMcpControl, toPiConfigValue, migrateMcpProjection } from "../src/remote/mcpControl.ts";
 // Not in the package exports — Pi's own config validation and value expansion, so the
 // projection is checked against what Pi will actually accept and resolve.
 import { validateMcpServerConfig } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/mcp-servers.js";
@@ -345,26 +345,59 @@ test("mcpControl: an EXPLICIT auth still wins over the headers rule", () => {
   });
 });
 
-// Pi expands env and header values: "$VAR" reads the environment and a leading "!" is
-// RUN AS A SHELL COMMAND. Every value we project is a literal someone typed.
-test("mcpControl: projected values are escaped, so Pi resolves exactly what was typed", () => {
+// Values were typed for pi-mcp-adapter, and Pi reads a different syntax. Each one must
+// resolve under Pi to exactly what the adapter resolved it to. The oracle is the
+// adapter's own rule, copied from pi-mcp-adapter 2.34.0 utils.ts
+// (interpolateEnvVars + the "!!" escape in resolveCommandSecret).
+function adapterResolve(value: string, env: Record<string, string>): string {
+  const interp = (v: string) =>
+    v
+      .replace(/\$\{(\w+)\}/g, (_, n) => env[n] ?? "")
+      .replace(/\$env:(\w+)/g, (_, n) => env[n] ?? "")
+      .replace(/\{env:(\w+)\}/g, (_, n) => env[n] ?? "");
+  return value.startsWith("!!") ? interp(value.slice(1)) : interp(value);
+}
+
+test("mcpControl: every value resolves under Pi to what the adapter made of it", () => {
+  const env = { TOKEN: "t0k", HOME: "/h", A_B: "ab" };
+  const values = [
+    "plain", "pa$word", "$HOME", "$$", "a$", "${TOKEN}", "Bearer ${TOKEN}", "$env:TOKEN", "{env:TOKEN}",
+    "x${TOKEN}y$env:A_B-{env:HOME}$z", "!!literal bang", "!!${TOKEN}", "!!!x", "a$!b", "${NOT A VAR}", "",
+  ];
+  for (const v of values) {
+    assert.equal(resolveConfigValue(toPiConfigValue(v), env), adapterResolve(v, env), JSON.stringify(v));
+  }
+  // A command stays a command — the adapter ran it too.
+  assert.equal(toPiConfigValue("!op read op://vault/token"), "!op read op://vault/token");
+});
+
+test("mcpControl: a bearer token keeps its meaning inside the Authorization header", () => {
   withDir((dir) => {
     const ctrl = makeMcpControl({ dir: () => dir });
-    const nasty = ["!touch /tmp/pwned", "pa$$word", "$HOME", "${PATH}", "plain", "a$!b", "!"];
-    ctrl.save({
-      name: "local",
-      transport: "stdio",
-      command: "srv",
-      env: Object.fromEntries(nasty.map((v, i) => [`K${i}`, v])),
-    });
-    ctrl.save({ name: "remote", transport: "http", url: "https://a.test/mcp", bearerToken: "!rm -rf ~ $SECRET" });
+    ctrl.save({ name: "lit", transport: "http", url: "https://a.test/mcp", bearerToken: "pa$word" });
+    ctrl.save({ name: "ref", transport: "http", url: "https://a.test/mcp", bearerToken: "${TOKEN}" });
+    ctrl.save({ name: "cmd", transport: "http", url: "https://a.test/mcp", bearerToken: "!echo from-cmd" });
     const proj = readProj(dir).mcpServers;
-    nasty.forEach((v, i) => {
-      assert.equal(resolveConfigValue(proj.local.env[`K${i}`], {}), v, `env value ${JSON.stringify(v)}`);
-    });
-    assert.equal(resolveConfigValue(proj.remote.headers.Authorization, {}), "Bearer !rm -rf ~ $SECRET");
-    for (const v of nasty) assert.equal(resolveConfigValue(escapeConfigValue(v), { HOME: "/h", PATH: "/p" }), v);
+    assert.equal(resolveConfigValue(proj.lit.headers.Authorization, {}), "Bearer pa$word");
+    assert.equal(resolveConfigValue(proj.ref.headers.Authorization, { TOKEN: "t0k" }), "Bearer t0k");
+    // The adapter ran the command and added "Bearer "; Pi runs only a whole value.
+    assert.equal(resolveConfigValue(proj.cmd.headers.Authorization, {}), "Bearer from-cmd");
     assertPiAccepts(dir);
+  });
+});
+
+test("mcpControl: a connector saved on a legacy SSE endpoint keeps working and stays editable", () => {
+  withDir((dir) => {
+    writeFileSync(
+      join(dir, "mcp-desktop.json"),
+      JSON.stringify({ servers: { asana: { transport: "http", url: "https://mcp.asana.com/sse", auth: "oauth", enabled: true } } }),
+    );
+    const ctrl = makeMcpControl({ dir: () => dir });
+    ctrl.reproject();
+    assert.equal(readProj(dir).mcpServers.asana.url, "https://mcp.asana.com/mcp", "projected on the streamable URL");
+    // An edit that doesn't touch the URL is not refused for the URL it was saved with.
+    assert.equal(ctrl.save({ name: "asana", headers: { "X-Team": "a" } }).ok, true);
+    assert.equal(readSrc(dir).servers.asana.url, "https://mcp.asana.com/mcp");
   });
 });
 
@@ -402,6 +435,7 @@ test("mcpControl: an adapter-era mcp.json is re-projected once, and a Pi-format 
         mcpServers: {
           acme: { url: "https://a.test/mcp", auth: "bearer", bearerToken: "tok" },
           linear: { url: "https://mcp.linear.app/mcp", auth: "oauth" },
+          handadded: { url: "https://mcp.atlassian.com/v1/sse", auth: "oauth" },
         },
         settings: { toolPrefix: "server" },
       }),
@@ -413,6 +447,10 @@ test("mcpControl: an adapter-era mcp.json is re-projected once, and a Pi-format 
     assert.equal(proj.mcpServers.linear.auth, undefined);
     assert.equal(proj.mcpServers.off.enabled, false, "a disabled server stays listed, switched off");
     assertPiAccepts(dir);
+    // Only in the old mcp.json (a hand edit): adopted into mcp-desktop.json, not lost —
+    // and moved off the legacy SSE endpoint Pi can't speak.
+    assert.equal(proj.mcpServers.handadded.url, "https://mcp.atlassian.com/v1/mcp");
+    assert.equal(readSrc(dir).servers.handadded.enabled, true);
 
     // Already migrated (or hand-written for Pi): untouched, ${VAR} references included.
     const handWritten = { mcpServers: { docs: { url: "https://d.test/mcp", headers: { Authorization: "Bearer ${DOCS}" } } } };

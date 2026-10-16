@@ -56,7 +56,6 @@ import type { Routine } from "../routines/schema.ts";
 import { triggerError, computeNextRun, advanceAfterRun } from "../routines/trigger.ts";
 import { splitRoutineTools } from "../routines/toolSelect.ts";
 import { resolveMcpTools, isToolOfServer } from "../mcp/toolNames.ts";
-import { createUIContext } from "../ext/headlessUi.ts";
 import { deliver, type RelayPusher, type CloudPusher } from "../routines/delivery.ts";
 import { ResultMedia, type StagedMedia } from "../routines/resultMedia.ts";
 import { withBrief } from "../routines/resultBrief.ts";
@@ -995,11 +994,14 @@ export class Harbor {
           tools: allowedTools,
           excludeTools: resolved.excludeTools,
         } as any));
-        // session_start is what connects the MCP servers (Pi's MCP support) and arms
-        // the other extensions. Nobody is watching an unattended run, so the UI is the
-        // headless no-op one: hasUI stays honest for extensions that check it, and the
-        // gate's own localAsk (deny) answers anything that would have prompted.
-        await session.bindExtensions({ uiContext: createUIContext({}) });
+        // session_start is what connects the MCP servers (Pi's MCP support). Bound with
+        // NO uiContext on purpose: Pi then keeps its own no-op UI and reports hasUI
+        // false, which is the truth for a run nobody watches. Any context object we
+        // passed — even an empty one — reads as a UI to extensions, and pi-privacy
+        // would then "ask" about personal data in a tool call, get no answer, and
+        // block it, where with no UI it allows the call with a notice. The gate's own
+        // localAsk (deny) answers anything that would have prompted.
+        await session.bindExtensions({});
         const adapter = createEngineEventAdapter();
         session.subscribe((ev: any) => {
           for (const ee of adapter.toEngineEvents(ev)) {

@@ -235,14 +235,6 @@ const MEDIA_TITLES: Record<string, string> = {
 const RESUME_VIDEO_TITLE = "Save a video already generated (nothing further is billed)";
 const RESUME_SPRITE_TITLE = "Save a sprite animation already generated (nothing further is billed)";
 
-// What a tool declares about itself — MCP tool annotations, as Pi reports them through
-// getAllTools(). Self-reported by whoever wrote the server, so a hint may only ever
-// LOWER friction for a call that is no worse than a network read; nothing here can
-// waive a prompt for a tool that says nothing.
-export interface ToolHints {
-  readOnly?: boolean;
-}
-
 // Pi's MCP resource tools (core/mcp-servers.js). They list and read resources from
 // every connected server — network reads from connectors the user configured.
 const MCP_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
@@ -251,7 +243,6 @@ export function classifyToolCall(
   toolName: string,
   input: unknown,
   scope: ScopeOptions,
-  hints: ToolHints = {},
 ): PermissionRequest | null {
   const name = toolName.toLowerCase();
   const obj: Record<string, unknown> =
@@ -281,18 +272,17 @@ export function classifyToolCall(
 
   // An MCP server tool, "mcp__<server>__<tool>". Matched before the name heuristics
   // below, which would otherwise read a tool called fetch_url or web_search on some
-  // server as a plain network fetch. A tool that declares itself read-only is a read
-  // from that connector (a prompt everywhere but bypass, and allowed to ASK in plan
-  // mode); anything else could change something on the far side, so it is bash-kind,
-  // exactly as every MCP call was before.
+  // server as a plain network fetch. Bash-kind, exactly as every MCP call was before
+  // (asks in default, denies in plan, allows under bypass). Not reclassified from the
+  // server's own readOnlyHint: that hint is self-reported, and a fetch-kind "always"
+  // relaxes the whole session to acceptEdits (ModeGate) rather than remembering the
+  // one call.
   if (name.startsWith("mcp__")) {
     const rest = toolName.slice("mcp__".length);
     const sep = rest.indexOf("__");
     const server = sep > 0 ? rest.slice(0, sep) : "a connector";
     const tool = sep > 0 ? rest.slice(sep + 2) : rest;
-    return hints.readOnly
-      ? { tool: toolName, kind: "fetch", title: `Read from ${server}: ${tool}`, detail: safeJson(obj) }
-      : { tool: toolName, kind: "bash", title: `Run ${tool} on ${server}`, detail: safeJson(obj) };
+    return { tool: toolName, kind: "bash", title: `Run ${tool} on ${server}`, detail: safeJson(obj) };
   }
 
   // Creating a routine is a persistent mutation; surface the trigger + delivery, and

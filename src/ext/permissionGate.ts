@@ -14,7 +14,7 @@
 import type { PermissionMode } from "../config/permissionMode.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import { ModeGate, type AskOutcome } from "../permissions/modeGate.ts";
-import { classifyToolCall, type ToolHints } from "../permissions/classify.ts";
+import { classifyToolCall } from "../permissions/classify.ts";
 import { redactText } from "../util/redact.ts";
 import { coauthorGitCommits } from "../util/coauthor.ts";
 import { DEFAULT_DENYLIST } from "../permissions/danger.ts";
@@ -136,7 +136,6 @@ export async function decideToolCall(
   toolName: string,
   input: unknown,
   ctx: ToolCallCtx,
-  hints: ToolHints = {},
 ): Promise<GateBlock | undefined> {
   // Remote-driven turn: a few tools can't be driven from the app because their own
   // interactive prompts render on the host terminal, not the relay (pi-subagents
@@ -163,7 +162,7 @@ export async function decideToolCall(
     confineToCwd: ctrl.confineToCwd,
     allowedOutsideRoots: ctrl.allowedOutsideRoots,
     guardSecretReads: ctrl.hardConfine,
-  }, hints);
+  });
   if (!req) return undefined; // no gate needed — read-only/in-scope/meta
 
   // Attach the picture a GUI action is actually about. Done HERE rather than in
@@ -292,7 +291,6 @@ export function makePermissionGate(ctrl: GateController) {
         ctx: unknown,
       ) => { content?: unknown[]; structuredContent?: unknown } | undefined,
     ): void;
-    getAllTools?(): Array<{ name: string; annotations?: { readOnlyHint?: boolean } }>;
   }
 
   return function permissionGate(pi: PiExtensionApi): void {
@@ -300,21 +298,8 @@ export function makePermissionGate(ctrl: GateController) {
     // the command that will actually run (util/coauthor.ts).
     pi.on("tool_call", (event, ctx) => {
       coauthorGitCommits(event.toolName, event.input);
-      return decideToolCall(ctrl, event.toolName, event.input, ctx, hintsFor(event.toolName));
+      return decideToolCall(ctrl, event.toolName, event.input, ctx);
     });
-
-    // What an MCP tool declares about itself (Pi reports server annotations through
-    // getAllTools). Looked up per call rather than cached: servers connect, reconnect
-    // and change their tool lists during a session.
-    function hintsFor(toolName: string): ToolHints {
-      if (!toolName.startsWith("mcp__")) return {};
-      try {
-        const info = pi.getAllTools?.().find((t) => t.name === toolName);
-        return { readOnly: info?.annotations?.readOnlyHint === true };
-      } catch {
-        return {};
-      }
-    }
 
     // Redact secrets from tool output before it reaches the model / relay.
     // tool_result delivers content PARTS (per the Pi extension contract), not a

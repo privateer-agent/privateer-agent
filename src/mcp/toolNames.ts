@@ -20,11 +20,23 @@
  * pinned by tests/toolSelect.test.ts.
  */
 
-const NON_IDENT = /[^A-Za-z0-9_]/g;
+import { createHash } from "node:crypto";
 
-/** Pi's registered name for one MCP tool. */
+const NON_IDENT = /[^A-Za-z0-9_]/g;
+// Pi's cap (extensions/mcp/tools.js MAX_TOOL_NAME_LENGTH); longer names get a hash.
+const MAX_TOOL_NAME_LENGTH = 64;
+
+/**
+ * Pi's registered name for one MCP tool — createMcpToolName, including its shortening
+ * of a name over 64 characters to a prefix plus a hash of server and tool. (Pi also
+ * hashes two tools whose sanitized names collide; that depends on the live tool list
+ * and can't be predicted from a selector.)
+ */
 export function mcpToolName(server: string, tool: string): string {
-  return `mcp__${server.replace(NON_IDENT, "_")}__${tool.replace(NON_IDENT, "_")}`;
+  const name = `mcp__${server}__${tool}`.replace(NON_IDENT, "_");
+  if (name.length <= MAX_TOOL_NAME_LENGTH) return name;
+  const hash = createHash("sha256").update(`${server}\0${tool}`).digest("hex").slice(0, 8);
+  return `${name.slice(0, MAX_TOOL_NAME_LENGTH - hash.length - 1)}_${hash}`;
 }
 
 export interface ResolvedMcpTools {
@@ -48,12 +60,17 @@ export function resolveMcpTools(selectors: string[]): ResolvedMcpTools {
     const tool = selector.slice(sep + 2);
     if (!tool) continue;
     push(servers, server);
-    push(patterns, tool === "*" ? `${mcpToolName(server, "")}*` : mcpToolName(server, tool));
+    push(patterns, tool === "*" ? `${serverPrefix(server)}*` : mcpToolName(server, tool));
   }
   return { patterns, servers };
 }
 
+/** "mcp__<server>__", the start of every tool name of `server`. */
+function serverPrefix(server: string): string {
+  return `mcp__${server.replace(NON_IDENT, "_")}__`;
+}
+
 /** Does a registered tool name belong to `server`? */
 export function isToolOfServer(registered: string, server: string): boolean {
-  return registered.startsWith(mcpToolName(server, ""));
+  return registered.startsWith(serverPrefix(server));
 }
