@@ -165,14 +165,70 @@ test("selectRemote fails to null with no connected controller", async () => {
   assert.equal(await bridge.selectRemote({ title: "M", options: [] }), null);
 });
 
-test("a disconnect resolves pending selects to null", async () => {
+// A question outlives the app going away: a backgrounded phone or a socket blip used to
+// turn ask_user_question into "the user declined" while they were still reading it.
+test("a disconnect holds a pending select, and a reattach re-sends it under the same id", async () => {
   const bridge = new RemoteBridge({ onPrompt: () => {} });
   const relay = makeFakeRelay();
   bridge.attachRelay(relay);
+  let settled = false;
   const p = bridge.selectRemote({ title: "M", options: [{ value: "x", label: "x" }] });
+  void p.then(() => (settled = true));
   await tick();
   bridge.callbacks.onDisconnected();
+  bridge.callbacks.onControllerDetached();
+  await tick();
+  assert.equal(settled, false);
+  bridge.callbacks.onControllerAttached();
+  assert.equal(relay.selects.length, 2);
+  assert.equal(relay.selects[1].id, relay.selects[0].id);
+  assert.equal(relay.selects[1].req.title, "M");
+  bridge.callbacks.onSelectResponse(relay.selects[0].id, "x");
+  assert.equal(await p, "x");
+  bridge.dispose();
+});
+
+test("a held question gives up after the grace period with nobody back", async () => {
+  process.env.PRIVATEER_QUESTION_GRACE_MS = "20";
+  // The grace timer is unref'd (it must not hold a terminal open), so hold the loop here.
+  const keepAlive = setTimeout(() => {}, 1000);
+  try {
+    const bridge = new RemoteBridge({ onPrompt: () => {} });
+    bridge.attachRelay(makeFakeRelay());
+    const p = bridge.selectRemote({ title: "M", options: [{ value: "x", label: "x" }] });
+    const q = bridge.inputRemote({ title: "Name" });
+    await tick();
+    bridge.callbacks.onControllerDetached();
+    assert.equal(await p, null);
+    assert.equal(await q, null);
+    bridge.dispose();
+  } finally {
+    clearTimeout(keepAlive);
+    delete process.env.PRIVATEER_QUESTION_GRACE_MS;
+  }
+});
+
+test("an abort still cancels a pending select", async () => {
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  bridge.attachRelay(makeFakeRelay());
+  const ac = new AbortController();
+  const p = bridge.selectRemote({ title: "M", options: [{ value: "x", label: "x" }] }, ac.signal);
+  await tick();
+  ac.abort();
   assert.equal(await p, null);
+});
+
+test("a prompt typed while a question is open answers it instead of starting a turn", async () => {
+  const prompts: string[] = [];
+  const bridge = new RemoteBridge({ onPrompt: (t) => prompts.push(t) });
+  bridge.attachRelay(makeFakeRelay());
+  const p = bridge.selectRemote({ title: "Print?", options: [{ value: "1. A — a", label: "1. A — a" }] });
+  await tick();
+  bridge.callbacks.onPrompt("Blender rebuild, with the site QR");
+  assert.equal(await p, "Blender rebuild, with the site QR");
+  assert.deepEqual(prompts, []);
+  bridge.callbacks.onPrompt("next");
+  assert.deepEqual(prompts, ["next"]);
 });
 
 test("inputRemote relays the prompt and resolves on the app's submission", async () => {
@@ -194,14 +250,19 @@ test("inputRemote fails to null with no connected controller", async () => {
   assert.equal(await bridge.inputRemote({ title: "Name" }), null);
 });
 
-test("a disconnect resolves pending inputs to null", async () => {
+test("a disconnect holds a pending input and a reattach re-sends it", async () => {
   const bridge = new RemoteBridge({ onPrompt: () => {} });
   const relay = makeFakeRelay();
   bridge.attachRelay(relay);
   const p = bridge.inputRemote({ title: "Name" });
   await tick();
   bridge.callbacks.onDisconnected();
-  assert.equal(await p, null);
+  bridge.callbacks.onControllerAttached();
+  assert.equal(relay.inputs.length, 2);
+  assert.equal(relay.inputs[1].id, relay.inputs[0].id);
+  bridge.callbacks.onInputResponse(relay.inputs[1].id, "release");
+  assert.equal(await p, "release");
+  bridge.dispose();
 });
 
 test("sendNotice / sendCommands pass through to the relay", () => {

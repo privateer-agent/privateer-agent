@@ -336,16 +336,22 @@ async function main() {
 
   async function runTurn(text: string, remote: boolean, echo = true): Promise<void> {
     if (turnActive) {
-      console.log(`\n${DIM}(busy — a turn is already running)${RESET}`);
-      // Say it to the DRIVER too, not just to this terminal's own console. An
-      // app-driven prompt refused here used to vanish: the app had already echoed
-      // the message into its feed and lit the thinking pill (submit() in
-      // RemoteDriveContext does both before transmitting), and the only trace of
-      // the refusal was a dim line on a terminal nobody was looking at. The driver
-      // saw their own message sit under a spinner forever. A notice does not close
-      // their turn, and must not — a turn IS running, and it is the one they are
-      // watching — but it tells them this message was not added to it.
-      if (remote) relay?.sendNotice("Not sent — this terminal is already running a turn. Wait for it to finish, or press Stop.");
+      // A message sent while a turn runs STEERS it, the way typing into a running
+      // session does in any agent: Pi delivers it after the tool calls in flight and
+      // before the next model call. Refusing it ("busy") left the driver no way to
+      // correct course short of Stop, which throws the turn's work away.
+      if (remote) console.log(`\n${DIM}⟿ [app] ${text.slice(0, 80)}${RESET}`);
+      try {
+        const mentions = await resolveMentions(text, cwd);
+        await session.steer(mentions.text, mentions.images.length ? mentions.images : undefined);
+        console.log(`${DIM}(steering the running turn)${RESET}`);
+      } catch (e) {
+        // An extension command can't be queued (Pi refuses it mid-stream). Say so to
+        // whoever sent it — the app has already echoed the message into its feed.
+        const m = `Not sent — ${(e as Error).message || "this can't be added to a running turn"}. Wait for the turn to finish, or press Stop.`;
+        console.log(`\n${DIM}${m}${RESET}`);
+        if (remote) relay?.sendNotice(m);
+      }
       return;
     }
     turnActive = true;
@@ -375,6 +381,12 @@ async function main() {
         if (remote) relay?.sendNotice(m);
       }
       await session.prompt(mentions.text, mentions.images.length ? { images: mentions.images } : undefined);
+      // A steer that landed after the agent's last check (while its final reply was
+      // streaming) sits in Pi's queue with nothing left to pick it up. Run it now
+      // rather than leave the driver's message unanswered until some later prompt.
+      for (let q = session.clearQueue?.(); q && q.steering.length + q.followUp.length > 0; q = session.clearQueue?.()) {
+        await session.prompt([...q.steering, ...q.followUp].join("\n\n"));
+      }
     } catch (e) {
       failure = (e as Error).message || "The turn failed.";
       console.log(`\n${RED}${failure}${RESET}`);

@@ -50,6 +50,14 @@ const chartOpTimeoutMs = (): number => Number(process.env.PRIVATEER_CHART_TIMEOU
 // outcome — the model tells the user it failed while the file is in their library.
 const librarySaveTimeoutMs = (): number => Number(process.env.PRIVATEER_LIBRARY_TIMEOUT_MS) || 180_000;
 
+// How long a question put to the app (a select or a text prompt) outlives the app going
+// away. A phone that backgrounds, a tab switch, a socket blip — each detaches the
+// controller for a moment, and failing the question there turned an ask_user_question
+// into "the user declined" while the user was still reading it. The question is held
+// and re-sent on reattach instead; this is only the bound on waiting for someone who
+// isn't coming back, so a turn can't sit on a question forever.
+const questionGraceMs = (): number => Number(process.env.PRIVATEER_QUESTION_GRACE_MS) || 10 * 60_000;
+
 // The outbound surface the bridge needs; RelayClient implements all of it.
 export interface RelayLike {
   requestApproval(id: string, req: PermissionRequest): void;
@@ -180,8 +188,11 @@ export class RemoteBridge {
   private remote = false;
   private noQuarter = noQuarterActive();
   private readonly pending = new Map<string, (d: AskOutcome) => void>();
-  private readonly pendingSelects = new Map<string, (v: string | null) => void>();
-  private readonly pendingInputs = new Map<string, (v: string | null) => void>();
+  // Open questions keep their request so a reattaching app can be sent them again.
+  private readonly pendingSelects = new Map<string, { resolve: (v: string | null) => void; req: SelectRequest }>();
+  private readonly pendingInputs = new Map<string, { resolve: (v: string | null) => void; req: InputRequest }>();
+  // Armed while the open questions have no app to answer them (see questionGraceMs).
+  private questionGrace?: ReturnType<typeof setTimeout>;
   private readonly pendingCargo = new Map<string, (r: CargoSaveResult) => void>();
   private readonly pendingCharts = new Map<string, (r: ChartOpResult) => void>();
   private readonly pendingLibrary = new Map<string, (r: LibrarySaveResult) => void>();
@@ -223,6 +234,8 @@ export class RemoteBridge {
   /** Release what outlives a socket. Safe to call twice. */
   dispose(): void {
     this.unwatchPrivacy();
+    if (this.questionGrace) clearTimeout(this.questionGrace);
+    this.questionGrace = undefined;
     this.relay = undefined;
   }
 
@@ -238,10 +251,20 @@ export class RemoteBridge {
   readonly callbacks: Required<RelayCallbacks> = {
     onPrompt: (text) => {
       this.remote = true; // a remote turn is now in flight → gate relays each action
-      this.turnDriven = true;
-      this.turnPrompt = text;
-      this.turnText = "";
-      this.turnTerminalSent = false;
+      // A message typed while a question is open IS the answer to it. The app shows the
+      // question as a sheet over the composer, and people answer by typing anyway — the
+      // turn is blocked on the question, so the text has nowhere else useful to go.
+      // Free text is a valid answer to both: ask_user_question's dialog walker reads a
+      // reply that matches no option as the user's own answer.
+      if (text.trim() && this.answerOpenQuestion(text)) return;
+      // A message sent into a turn already in flight steers it (the owner decides how);
+      // it must not restart the capture of the reply that turn is still writing.
+      if (!this.turnDriven) {
+        this.turnDriven = true;
+        this.turnPrompt = text;
+        this.turnText = "";
+        this.turnTerminalSent = false;
+      }
       const attachments = this.pendingAttachments;
       this.pendingAttachments = [];
       this.cfg.onPrompt(text, attachments);
@@ -296,12 +319,10 @@ export class RemoteBridge {
       if (resolve) resolve(decision);
     },
     onSelectResponse: (id, value) => {
-      const resolve = this.pendingSelects.get(id);
-      if (resolve) resolve(value);
+      this.pendingSelects.get(id)?.resolve(value);
     },
     onInputResponse: (id, value) => {
-      const resolve = this.pendingInputs.get(id);
-      if (resolve) resolve(value);
+      this.pendingInputs.get(id)?.resolve(value);
     },
     onCargoSaved: (id, result) => {
       const resolve = this.pendingCargo.get(id);
@@ -344,6 +365,10 @@ export class RemoteBridge {
       // earlier session of this app — an attaching controller must not paint a shield
       // over a terminal that has none. Sent only when OFF, so silence means protected.
       if (privacyDisabled()) this.relay?.sendPrivacy?.(true);
+      // The app drops its open question sheets on every reconnect and expects the
+      // terminal to say what is still being asked. Re-send under the SAME ids, so an
+      // answer to the earlier frame (one that was in flight across the blip) still lands.
+      this.resendOpenQuestions();
       this.cfg.onControllerAttached?.();
     },
     // The app left while we're still running. Same posture as a dropped socket: stop
@@ -354,6 +379,7 @@ export class RemoteBridge {
     onControllerDetached: () => {
       this.remote = false;
       this.rejectAllPending();
+      this.holdOpenQuestions();
       this.cfg.onControllerDetached?.();
     },
     onAttachment: (file) => {
@@ -365,6 +391,7 @@ export class RemoteBridge {
       this.remote = false;
       // Any approval waiting on a now-gone controller fails closed.
       this.rejectAllPending();
+      this.holdOpenQuestions();
     },
   };
 
@@ -424,8 +451,10 @@ export class RemoteBridge {
   }
 
   // A CLI-initiated selection prompt: relay the options to the app and await its
-  // choice. Fail closed (null) if no controller, on abort, or on disconnect — the
-  // same posture as remoteAsk. Callers get the chosen `value` or null.
+  // choice. Null if no controller when asked, or on abort. Unlike an approval, a
+  // question is NOT failed by the app going away: it is held, re-sent on reattach,
+  // and only gives up after questionGraceMs with nobody back (see holdOpenQuestions).
+  // Callers get the chosen `value` or null.
   selectRemote = (req: SelectRequest, signal?: AbortSignal): Promise<string | null> => {
     if (!this.relay || !this.relay.isConnected()) return Promise.resolve(null);
     const id = randomUUID();
@@ -434,9 +463,10 @@ export class RemoteBridge {
       const settle = (v: string | null) => {
         this.pendingSelects.delete(id);
         signal?.removeEventListener("abort", onAbort);
+        this.releaseQuestionGrace();
         resolve(v);
       };
-      this.pendingSelects.set(id, settle);
+      this.pendingSelects.set(id, { resolve: settle, req });
       if (signal) {
         if (signal.aborted) return onAbort();
         signal.addEventListener("abort", onAbort, { once: true });
@@ -446,8 +476,8 @@ export class RemoteBridge {
   };
 
   // A CLI-initiated free-form text prompt: relay it to the app and await the typed
-  // line. Same fail-closed posture as selectRemote — null if no controller, on
-  // abort, or on disconnect. Callers get the submitted string or null.
+  // line. Same posture as selectRemote — null if no controller when asked or on
+  // abort, held across a detach. Callers get the submitted string or null.
   inputRemote = (req: InputRequest, signal?: AbortSignal): Promise<string | null> => {
     if (!this.relay || !this.relay.isConnected()) return Promise.resolve(null);
     const id = randomUUID();
@@ -456,9 +486,10 @@ export class RemoteBridge {
       const settle = (v: string | null) => {
         this.pendingInputs.delete(id);
         signal?.removeEventListener("abort", onAbort);
+        this.releaseQuestionGrace();
         resolve(v);
       };
-      this.pendingInputs.set(id, settle);
+      this.pendingInputs.set(id, { resolve: settle, req });
       if (signal) {
         if (signal.aborted) return onAbort();
         signal.addEventListener("abort", onAbort, { once: true });
@@ -667,15 +698,45 @@ export class RemoteBridge {
     });
   };
 
+  /** Is a question (select or text prompt) waiting on the app? */
+  hasOpenQuestion(): boolean {
+    return this.pendingSelects.size > 0 || this.pendingInputs.size > 0;
+  }
+
+  // Answer the oldest open question with typed text. False when none is open.
+  private answerOpenQuestion(text: string): boolean {
+    const first = this.pendingSelects.values().next().value ?? this.pendingInputs.values().next().value;
+    if (!first) return false;
+    first.resolve(text);
+    return true;
+  }
+
+  private resendOpenQuestions(): void {
+    this.releaseQuestionGrace();
+    for (const [id, q] of this.pendingSelects) this.relay?.requestSelect(id, q.req);
+    for (const [id, q] of this.pendingInputs) this.relay?.requestInput(id, q.req);
+  }
+
+  // The app went away with questions open: keep them, but not forever.
+  private holdOpenQuestions(): void {
+    if (!this.hasOpenQuestion() || this.questionGrace) return;
+    this.questionGrace = setTimeout(() => {
+      this.questionGrace = undefined;
+      for (const q of [...this.pendingSelects.values(), ...this.pendingInputs.values()]) q.resolve(null);
+    }, questionGraceMs());
+    this.questionGrace.unref?.();
+  }
+
+  private releaseQuestionGrace(): void {
+    if (this.hasOpenQuestion() && this.questionGrace) return; // still waiting on the rest
+    if (this.questionGrace) clearTimeout(this.questionGrace);
+    this.questionGrace = undefined;
+  }
+
   private rejectAllPending(): void {
     for (const resolve of this.pending.values()) resolve("deny");
     this.pending.clear();
-    // A relayed selection prompt whose controller vanished resolves to "no choice".
-    for (const resolve of this.pendingSelects.values()) resolve(null);
-    this.pendingSelects.clear();
-    // Same for a relayed text prompt: a gone controller resolves to "no input".
-    for (const resolve of this.pendingInputs.values()) resolve(null);
-    this.pendingInputs.clear();
+    // Selects and text prompts are deliberately NOT failed here — see holdOpenQuestions.
     // A save whose controller vanished mid-flight is NOT reported as failed-and-done:
     // the app may have encrypted and stored the artifact before its socket dropped, and
     // the frame carrying the id is what we lost. Saying "it didn't save" would send the

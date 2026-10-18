@@ -138,7 +138,14 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
   };
 
   const runTurn = async (text: string): Promise<void> => {
-    if (turnActive || stopped) return;
+    if (stopped) return;
+    // A message sent while a turn runs steers it (delivered before the next model call)
+    // rather than being dropped — the driver must be able to correct course mid-turn.
+    if (turnActive) {
+      try { await session.steer(text); }
+      catch (e) { bridge.sendNotice(`Not sent — ${(e as Error).message || "this can't be added to a running turn"}.`); }
+      return;
+    }
     turnActive = true;
     let failure: string | undefined;
     lastAnswer = "";   // keep the CLOSING answer, not the whole session
@@ -160,6 +167,10 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
           `Use the save_attachment tool with the ref number to write one to disk.]`
         : "";
       await session.prompt(text + note);
+      // A steer that arrived after the agent's last check would otherwise sit unread.
+      for (let q = session.clearQueue?.(); q && q.steering.length + q.followUp.length > 0; q = session.clearQueue?.()) {
+        await session.prompt([...q.steering, ...q.followUp].join("\n\n"));
+      }
     } catch (e) {
       turnErrored = true;
       failure = (e as Error).message || "The turn failed.";
