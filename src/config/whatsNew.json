@@ -1,6 +1,6 @@
 {
   "$comment": "The banner's What's New list, newest first: the two to four things a returning user should notice, not a changelog. `reviewedFor` is the release this list was last looked at for. A release can't ship until it equals package.json's version (scripts/check-whats-new.mjs, run by `npm test` and by release.yml before anything builds), so every release, patches included, is a deliberate look at this list. If nothing new is worth a line, bumping `reviewedFor` alone is the answer. `since` is the release an entry arrived in. `cmd` is shown in the accent colour.",
-  "reviewedFor": "0.15.1",
+  "reviewedFor": "0.15.2",
   "items": [
     { "text": "Driving from the app: a message sent mid-turn steers it, and questions survive a dropped link", "since": "0.15.1" },
     { "text": "MCP on Pi's built-in support — sign OAuth connectors back in with", "cmd": "/mcp", "since": "0.15.0" },
