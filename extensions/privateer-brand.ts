@@ -64,9 +64,9 @@ const VERSION: string = (() => {
 // The Privateer mark: our symbol — a padlock (with a keyhole) fused into an anchor,
 // "bring your own model" meets lock-and-key privacy — drawn from the app's logo. It's
 // rendered with terminal HALF-BLOCKS, so each text row packs TWO pixel rows. The mark is
-// a SINGLE colour (every set pixel is the accent), so a cell never needs two different
+// a SINGLE colour (every set pixel is WHITE), so a cell never needs two different
 // colours: both pixels set → a full block "█", top only → "▀", bottom only → "▄", none →
-// a space — all painted with the accent as FOREGROUND, no background cells at all. That
+// a space — all painted with WHITE as FOREGROUND, no background cells at all. That
 // makes the mark inherit the theme's ink (dark on light, light on dark) with one colour,
 // and sidesteps the old bg-bleed hazard entirely. Every built line is MARK_W visible
 // cells wide (SGR escapes don't count), so the text column beside it stays aligned. To
@@ -91,9 +91,9 @@ const PIXELS = [
   ".OO..OO..OO.", "..OO.OO.OO..",
   "..OOOOOOOO..", "...OOOOOO...", "....OOOO....", ".....OO.....",
 ];
-// Build the mark for a given palette (the accent is the ink). Cheap — called once per
+// Build the mark for a given palette (WHITE is the ink). Cheap — called once per
 // header factory invocation, i.e. once per theme, not per frame. Each cell resets SGR so
-// the accent can never bleed into the row padding the framer adds after it.
+// the colour can never bleed into the row padding the framer adds after it.
 function buildMark(p: Palette): string[] {
   const rows: string[] = [];
   for (let r = 0; r < PIXELS.length; r += 2) {
@@ -103,9 +103,9 @@ function buildMark(p: Palette): string[] {
     for (let x = 0; x < MARK_W; x++) {
       const t = top[x] === "O";
       const b = bot[x] === "O";
-      if (t && b) line += `${p.ACCENT}█${p.RESET}`;
-      else if (t) line += `${p.ACCENT}▀${p.RESET}`;
-      else if (b) line += `${p.ACCENT}▄${p.RESET}`;
+      if (t && b) line += `${p.WHITE}█${p.RESET}`;
+      else if (t) line += `${p.WHITE}▀${p.RESET}`;
+      else if (b) line += `${p.WHITE}▄${p.RESET}`;
       else line += " ";
     }
     rows.push(line);
