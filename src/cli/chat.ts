@@ -261,6 +261,8 @@ async function main() {
       message: res.ok ? `${verb} — restart the terminal to update the model's skill list.` : res.message,
       needsRestart: res.ok,
     });
+    // The command list carries the skills too (see availableCommands).
+    if (res.ok) relay?.sendCommands(availableCommands());
   }
 
   // Run an extensions add/remove for the app and relay progress → result. Progress
@@ -735,7 +737,7 @@ async function main() {
       : `${DIM}Not signed in. /login to enable remote access & the account provider.${RESET}`,
   );
 
-  const HELP = "Commands: /remote-access <on|off>  /login  /model <provider/id>  /models [filter]  /verify  /mode <…>  /no-quarter [on|off]  /quit";
+  const HELP = "Commands: /new  /remote-access <on|off>  /login  /model <provider/id>  /models [filter]  /verify  /mode <…>  /no-quarter [on|off]  /quit";
   console.log(`${DIM}Ready. Type a prompt — reference a file with @path (Tab completes). ${HELP}${RESET}`);
   console.log(`${DIM}shift+tab toggles no quarter — unattended mode, no approval prompts.${RESET}`);
   await showPosture();
@@ -805,7 +807,21 @@ async function main() {
   // the REPL knows not to fall through and treat it as a prompt. `remote` commands
   // are driven from the app: they never touch local stdin and mirror feedback back
   // over the relay.
+  // `/new`: a fresh conversation on the same session — same model, folder,
+  // extensions and account channel — by abandoning the in-memory history, the
+  // same thing Pi's own /new does to its SessionManager. The app clears its feed
+  // and renames the tab when it sends this (RemoteDriveContext.beginNewSession).
+  async function newConversation(remote: boolean): Promise<void> {
+    await session.abort();
+    session.sessionManager.newSession();
+    session.refreshContext();
+    const m = "New session — conversation history cleared.";
+    console.log(`${DIM}${m}${RESET}`);
+    if (remote) relay?.sendNotice(m);
+  }
+
   async function runCommand(line: string, remote: boolean): Promise<boolean> {
+    if (line === "/new") { await newConversation(remote); return true; }
     if (line === "/help" || line === "?") { console.log(`${DIM}${HELP}${RESET}`); if (remote) relay?.sendNotice(HELP); return true; }
     if (line === "/verify") { await showPosture(); return true; }
     // Enabling remote access is a physical-terminal action; ignore it if the app
@@ -886,6 +902,7 @@ async function main() {
   // extension-dependent command set — not a hardcoded list). Pushed on attach.
   function availableCommands(): { name: string; description?: string }[] {
     const builtins = [
+      { name: "/new", description: "Start a new session (clears the conversation)" },
       { name: "/model", description: "Switch the model" },
       { name: "/mode", description: "Change the approval mode (default/acceptEdits/plan/bypass)" },
       // /no-quarter is deliberately absent — terminal-only, see runCommand.
@@ -900,8 +917,13 @@ async function main() {
       const reg = (session?.extensionRunner as any)?.getRegisteredCommands?.() ?? [];
       ext = reg.map((c: any) => ({ name: `/${c.invocationName ?? c.name}`, description: c.description }));
     } catch { /* no session/extensions yet */ }
+    // Every skill on this terminal, as the `/skill:name` command Pi expands — so
+    // the app's command list shows them all, not just the built-ins. A skill whose
+    // model invocation is switched off is still listed: that flag stops the model
+    // reaching for it, not the user running it.
+    const sk = (skills?.listSkills() ?? []).map((s) => ({ name: `/skill:${s.name}`, description: s.description }));
     const seen = new Set(builtins.map((c) => c.name));
-    return [...builtins, ...ext.filter((c) => !seen.has(c.name))];
+    return [...builtins, ...[...ext, ...sk].filter((c) => !seen.has(c.name) && (seen.add(c.name), true))];
   }
 
   for (;;) {
