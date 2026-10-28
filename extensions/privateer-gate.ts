@@ -54,14 +54,14 @@ let mode: PermissionMode = MODES.includes(process.env.PRIVATEER_MODE as Permissi
 const allowlist: string[] = [];
 const allowedOutsideRoots: string[] = [];
 
-// A turn driven from the app is in flight. Guards the remote onPrompt path against a
-// SECOND prompt arriving while Pi is still processing — which throws "Agent is already
-// processing" and wedges the session. This happens in normal use when the app drops
-// (backgrounded → socket suspended) and re-sends its prompt on reconnect. Mirrors the
-// REPL's `turnActive` guard. Claimed as soon as a prompt is accepted — ahead of the
-// mention expansion, which reads files and so opens a window a second prompt could
-// slip through — released again if the send fails, cleared on agent_end.
-let remoteTurnActive = false;
+// The app's prompts, in arrival order (see onPrompt).
+let remoteSend: Promise<void> = Promise.resolve();
+// The latest extension context, for asking Pi whether a run is in flight. A context
+// from a replaced session throws on access; treat that as idle.
+let ctxRef: any = null;
+function piBusy(): boolean {
+  try { return ctxRef?.isIdle?.() === false; } catch { return false; }
+}
 
 let piRef: any = null;
 let relay: any = null;
@@ -358,19 +358,6 @@ let sinceLastPrompt: StoredAttachment[] = [];
 
 const bridge = new RemoteBridge({
   onPrompt: (text) => {
-    // Drop a prompt that arrives while a driven turn is already running (e.g. the app
-    // re-sending after a reconnect) — sendUserMessage would otherwise throw "Agent is
-    // already processing" and wedge the session. Tell the app why, don't crash.
-    if (remoteTurnActive) {
-      relay?.sendNotice("busy — a turn is already running; wait for it to finish.");
-      return;
-    }
-    // Claim the turn BEFORE the awaits below, not after the send. Expanding mentions
-    // reads files, so the send is no longer synchronous with this callback — a second
-    // prompt arriving in that window would pass the guard above and land Pi with two
-    // turns. Released again on any failure path, so a refused send can't wedge the
-    // bridge; the success path leaves it set until agent_end.
-    remoteTurnActive = true;
     // Fold any files the app sent since the last prompt into a reference note so the
     // model knows they exist and can save_attachment them.
     const atts = sinceLastPrompt;
@@ -379,7 +366,9 @@ const bridge = new RemoteBridge({
       ? `\n\n[Files attached from the app: ${atts.map((a) => `#${a.n} ${a.name} (${a.mediaType})`).join(", ")}. ` +
         `Use the save_attachment tool with the ref number to write one to disk.]`
       : "";
-    void (async () => {
+    // Chained, not guarded: expanding mentions reads files, so two prompts sent close
+    // together would otherwise reach Pi out of order or both find it idle.
+    remoteSend = remoteSend.then(async () => {
       try {
         // Expand any `@path` mentions into appended <file> blocks + image attachments,
         // resolved against this terminal's cwd (constrained to the cwd subtree). The
@@ -392,19 +381,26 @@ const bridge = new RemoteBridge({
           relay?.sendNotice(`Couldn't attach: ${mentions.skipped.join(", ")} (must be a file inside ${cwd})`);
         }
         const body = mentions.text + note;
+        if (piBusy()) relay?.sendNotice("Added to the running turn — the agent reads it before its next step.");
+        // A message sent mid-turn STEERS it, as in the REPL and the desktop session.
+        // This used to be refused with "busy — a turn is already running" behind a flag
+        // that only agent_end cleared — but the extension API's sendUserMessage is
+        // fire-and-forget (Pi swallows its rejection into emitError), so any send that
+        // never started a run (compaction in progress, a local turn already streaming,
+        // an auth precheck) left the flag set for the rest of the session and every
+        // later prompt from the app bounced. `deliverAs` only applies while Pi is
+        // streaming, so an idle session still starts a fresh turn.
         // Images ride as content parts — pi's sendUserMessage takes the same
         // {type:"image",data,mimeType} shape resolveMentions already emits, so a
         // mentioned screenshot reaches the model as a real attachment, not a path.
         piRef?.sendUserMessage?.(
           mentions.images.length ? [{ type: "text", text: body }, ...mentions.images] : body,
+          { deliverAs: "steer" },
         ); // drive a turn in Pi's TUI
       } catch (e) {
-        // An "already processing" (or any send/expansion failure) must not wedge the
-        // bridge — surface it and stay idle so the next prompt still works.
-        remoteTurnActive = false;
         relay?.sendNotice(`couldn't start turn: ${(e as Error).message}`);
       }
-    })();
+    });
   },
   onInterrupt: () => {}, // Pi owns interrupt; best-effort no-op
   // The app asked to end remote access from its side — stop the relay locally too so
@@ -670,6 +666,7 @@ export default function privateerControl(pi: any): void {
     // the footer indicator (they fire outside any command's ctx). Re-render in case
     // remote access was already on when the session (re)started.
     if (ctx?.ui) uiRef = ctx.ui;
+    ctxRef = ctx;
     // Capture the model registry + launch model so the app's /model picker has this
     // machine's real catalog and the banner shows the current spec from the start.
     if (ctx?.modelRegistry) modelReg = ctx.modelRegistry;
@@ -839,12 +836,10 @@ export default function privateerControl(pi: any): void {
   pi.on("tool_execution_start", (ev: any) => fwd(ev));
   pi.on("tool_execution_end", (ev: any) => fwd(ev));
   pi.on("turn_end", (ev: any) => fwd(ev));
-  // A remote-initiated agent run ends here → clear the remote flag so a later
-  // locally-typed turn isn't treated as remote.
+  // An agent run ends here → close the app's turn.
   pi.on("agent_end", (ev: any) => {
     fwd(ev);
     bridge.settleTurn();
-    remoteTurnActive = false; // turn finished → the next app prompt may start one
   });
 
   pi.registerCommand?.("mode", {
