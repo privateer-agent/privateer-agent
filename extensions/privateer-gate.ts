@@ -63,6 +63,41 @@ function piBusy(): boolean {
   try { return ctxRef?.isIdle?.() === false; } catch { return false; }
 }
 
+// Messages the app sent mid-turn that Pi has queued as steers but the model has not
+// read yet. Pi only reads a steer between steps, and a turn that ends on an error or
+// a Stop leaves it in the queue — the app showed "Added to the running turn" and then
+// nothing, so a driver had no way to tell a read message from a lost one. Each entry
+// is cleared (and the app told) when Pi puts it in the transcript.
+let unreadSteers: string[] = [];
+let stopRequested = false;
+const userText = (m: any): string =>
+  typeof m?.content === "string"
+    ? m.content
+    : Array.isArray(m?.content) ? m.content.filter((p: any) => p?.type === "text").map((p: any) => p.text).join("\n") : "";
+
+// After a run ends, wait for Pi to settle (it may start another run to drain the
+// queue itself), then say so if an app message is still sitting unread.
+function reportStrandedSteers(): void {
+  const stopped = stopRequested;
+  stopRequested = false;
+  if (!unreadSteers.length) return;
+  const startedAt = Date.now();
+  const check = () => {
+    if (!unreadSteers.length) return;
+    if (piBusy()) {
+      if (Date.now() - startedAt < 10_000) setTimeout(check, 250).unref?.();
+      return; // still running: the next step or agent_end reads/reports it
+    }
+    const n = unreadSteers.length;
+    const what = n === 1 ? "Your last message" : `Your last ${n} messages`;
+    relay?.sendNotice(
+      `${what} arrived after the agent's final step${stopped ? " (you stopped the turn)" : ""}, so it wasn't read. ` +
+        "It will go to the agent with your next prompt.",
+    );
+  };
+  setTimeout(check, 250).unref?.();
+}
+
 let piRef: any = null;
 let relay: any = null;
 // Pi-extension manager for the app's extensions screen. Built lazily on first use
@@ -381,7 +416,10 @@ const bridge = new RemoteBridge({
           relay?.sendNotice(`Couldn't attach: ${mentions.skipped.join(", ")} (must be a file inside ${cwd})`);
         }
         const body = mentions.text + note;
-        if (piBusy()) relay?.sendNotice("Added to the running turn — the agent reads it before its next step.");
+        if (piBusy()) {
+          unreadSteers.push(body);
+          relay?.sendNotice("Added to the running turn — the agent reads it before its next step.");
+        }
         // A message sent mid-turn STEERS it, as in the REPL and the desktop session.
         // This used to be refused with "busy — a turn is already running" behind a flag
         // that only agent_end cleared — but the extension API's sendUserMessage is
@@ -402,7 +440,17 @@ const bridge = new RemoteBridge({
       }
     });
   },
-  onInterrupt: () => {}, // Pi owns interrupt; best-effort no-op
+  // The app's Stop. This was a no-op, so Stop only closed the turn in the app while the
+  // agent kept working — and the next message from the app landed as a steer on a turn
+  // the driver believed was over.
+  onInterrupt: () => {
+    try {
+      if (ctxRef?.isIdle?.() === false) {
+        stopRequested = true;
+        ctxRef.abort();
+      }
+    } catch { /* a replaced session's context throws — nothing to stop */ }
+  },
   // The app asked to end remote access from its side — stop the relay locally too so
   // the terminal doesn't keep reconnecting, and clear the green indicator.
   onTerminate: () => disableRemote(),
@@ -667,6 +715,8 @@ export default function privateerControl(pi: any): void {
     // remote access was already on when the session (re)started.
     if (ctx?.ui) uiRef = ctx.ui;
     ctxRef = ctx;
+    unreadSteers = []; // a new session has a new queue
+    stopRequested = false;
     // Capture the model registry + launch model so the app's /model picker has this
     // machine's real catalog and the banner shows the current spec from the start.
     if (ctx?.modelRegistry) modelReg = ctx.modelRegistry;
@@ -796,6 +846,14 @@ export default function privateerControl(pi: any): void {
   });
   pi.on("message_start", (ev: any) => {
     if (headlessRun && ev?.message?.role === "assistant") watchdog.arm();
+    // A queued app message entering the transcript — the model reads it this step.
+    // Match by text; an input handler (the privacy filter) may have rewritten it, in
+    // which case the oldest unread one is the one Pi just delivered (FIFO).
+    if (ev?.message?.role === "user" && unreadSteers.length) {
+      const i = unreadSteers.indexOf(userText(ev.message));
+      unreadSteers.splice(i >= 0 ? i : 0, 1);
+      relay?.sendNotice("The agent read your message.");
+    }
   });
   pi.on("message_update", () => {
     if (headlessRun) watchdog.arm();
@@ -840,6 +898,7 @@ export default function privateerControl(pi: any): void {
   pi.on("agent_end", (ev: any) => {
     fwd(ev);
     bridge.settleTurn();
+    reportStrandedSteers();
   });
 
   pi.registerCommand?.("mode", {
