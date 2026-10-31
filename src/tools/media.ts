@@ -38,11 +38,14 @@
 // stitch → score → send.
 
 import { Type } from "typebox";
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from "node:fs";
+import { createDecipheriv, randomBytes } from "node:crypto";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
+import { Agent } from "undici";
 import { apiRequest } from "../auth/privateer.ts";
 import { effectiveMediaModel } from "../config/mediaModels.ts";
+import { globalDir } from "../config/paths.ts";
 
 /** Tool names these definitions register, for allow-list construction. */
 export const MEDIA_TOOL_NAMES = [
@@ -167,6 +170,51 @@ interface AccountFailure {
   status?: number;
 }
 
+// Pi installs a process-wide undici dispatcher whose headersTimeout/bodyTimeout is
+// its HTTP idle timeout — 5 minutes by default. That is right for a model stream and
+// wrong here: an image, speech or music POST answers only once the provider has
+// finished, and a slow model (gpt-image with input images, a long track) can take
+// longer than that to send its first byte. undici then aborts with a HeadersTimeout
+// that fetch flattens to the bare "fetch failed", and an agent driving Privateer
+// (Claude Code, Hermes, OpenClaw…) saw a 5-6 minute hang followed by a message that
+// gave it nothing to act on — while the generation it had paid for finished anyway.
+// Media calls get their own dispatcher with a ceiling sized to the slowest
+// synchronous generation; the tool's AbortSignal still cancels it sooner.
+export const MEDIA_HTTP_TIMEOUT_MS = 20 * 60_000;
+let _mediaDispatcher: Agent | null = null;
+function mediaDispatcher(): Agent {
+  return (_mediaDispatcher ??= new Agent({
+    headersTimeout: MEDIA_HTTP_TIMEOUT_MS,
+    bodyTimeout: MEDIA_HTTP_TIMEOUT_MS,
+    connect: { autoSelectFamilyAttemptTimeout: 2_000 },
+  }));
+}
+
+/**
+ * Say WHY a request got no HTTP response. fetch reports every transport failure as
+ * "fetch failed" and keeps the real reason on `cause` (an undici error with a `code`,
+ * or a Node errno); printing only the message threw that away, so a caller could not
+ * tell a timeout from a dead network from DNS. The timeout case also warns about
+ * billing: the server keeps working after we stop listening, so blindly re-sending
+ * the same prompt can pay for the same generation twice.
+ */
+export function describeTransportFailure(e: unknown): string {
+  if (e instanceof Error && e.name === "AbortError") return "the request was cancelled";
+  const top = e instanceof Error ? e.message : String(e);
+  const cause = (e as { cause?: unknown })?.cause;
+  const code = String((cause as { code?: unknown })?.code ?? (e as { code?: unknown })?.code ?? "");
+  const causeMsg = cause instanceof Error ? cause.message : "";
+  if (/^UND_ERR_(HEADERS|BODY)_TIMEOUT$/.test(code)) {
+    return (
+      `Privateer did not answer within ${Math.round(MEDIA_HTTP_TIMEOUT_MS / 60_000)} minutes (${code}). ` +
+      "The generation may still have finished and been billed on the server, so check the output path " +
+      "before retrying, and retry once rather than in a loop"
+    );
+  }
+  const detail = [code, causeMsg].filter(Boolean).join(": ");
+  return `could not reach Privateer: ${top}${detail && !top.includes(detail) ? ` (${detail})` : ""}`;
+}
+
 /**
  * Call the account API and return the parsed payload, or a message written for the
  * model to read. Errors are surfaced rather than swallowed — an agent that quietly
@@ -175,11 +223,14 @@ interface AccountFailure {
  */
 async function callAccount<T>(
   path: string,
-  init: { method: "GET" | "POST"; body?: unknown; signal?: AbortSignal },
+  init: { method: "GET" | "POST" | "DELETE"; body?: unknown; signal?: AbortSignal },
 ): Promise<({ ok: true } & { data: T }) | AccountFailure> {
   let res: Response;
   try {
     res = await apiRequest(path, {
+      // npm undici's Agent vs the undici-types Dispatcher in RequestInit: same runtime
+      // contract (verified against both Node's bundled fetch and Pi's undici 8).
+      ...({ dispatcher: mediaDispatcher() } as object),
       method: init.method,
       ...(init.body === undefined
         ? {}
@@ -187,9 +238,18 @@ async function callAccount<T>(
       ...(init.signal ? { signal: init.signal } : {}),
     });
   } catch (e) {
-    return { ok: false, message: `could not reach Privateer: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, message: describeTransportFailure(e) };
   }
+  return interpretAccountResponse<T>(res);
+}
 
+/**
+ * Turn an account-API response into the payload or a message for the model. Split
+ * out of callAccount because a deferred job's result arrives SEALED inside a poll,
+ * and once opened it must be judged exactly as the same response would have been
+ * had it come back directly — same ZDR wording, same 402, same 503 advice.
+ */
+async function interpretAccountResponse<T>(res: Response): Promise<({ ok: true } & { data: T }) | AccountFailure> {
   if (res.ok || res.status === 202) {
     try {
       return { ok: true, data: (await res.json()) as T };
@@ -261,6 +321,191 @@ async function callAccount<T>(
   return { ok: false, status: res.status, message: serverMessage || `media generation failed (HTTP ${res.status}${code ? ` ${code}` : ""})` };
 }
 
+// ── Deferred jobs (image, speech, music, sfx) ────────────────────────────────
+//
+// These four used to be ONE blocking POST that answered only when the provider had
+// finished. A slow generation outlived the idle timeouts between us and the server,
+// the connection died, and the result — already billed — was gone. Now each is
+// submit → job id → poll, like video: POST /api/agent/media/jobs runs the original
+// route server-side and parks the response SEALED under a key only this machine
+// holds (`sealKey`, sent with the submit and dropped by the server). The key is
+// kept on disk beside the job id, so a later process — the same agent after a
+// timeout, or another session entirely — can collect it with `resumeJobId`.
+//
+// A server older than the jobs route answers 404, and the call falls back to the
+// old blocking request, so an agent released before the server deploys still works.
+
+export type DeferredKind = "image" | "speech" | "music" | "sfx";
+const DEFERRED_SYNC_PATH: Record<DeferredKind, string> = {
+  image: "/api/agent/media/images",
+  speech: "/api/audio/speech",
+  music: "/api/audio/music",
+  sfx: "/api/audio/sfx",
+};
+const DEFERRED_TOOL: Record<DeferredKind, string> = {
+  image: "generate_image",
+  speech: "generate_speech",
+  music: "generate_music",
+  sfx: "generate_sfx",
+};
+const DEFERRED_POLL_MS = 3_000;
+// The server holds a result for an hour; a key older than that opens nothing.
+const DEFERRED_KEY_TTL_MS = 2 * 60 * 60_000;
+
+function deferredKeyDir(): string {
+  return join(globalDir(), "media-jobs");
+}
+
+function saveDeferredKey(jobId: string, kind: DeferredKind, key: Buffer): void {
+  const dir = deferredKeyDir();
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Prune expired keys while we are here — nothing else ever reads them.
+  try {
+    for (const f of readdirSync(dir)) {
+      const p = join(dir, f);
+      try {
+        const { createdAt } = JSON.parse(readFileSync(p, "utf8")) as { createdAt?: number };
+        if (!createdAt || Date.now() - createdAt > DEFERRED_KEY_TTL_MS) unlinkSync(p);
+      } catch { /* unreadable — leave it */ }
+    }
+  } catch { /* best effort */ }
+  writeFileSync(join(dir, `${jobId}.json`), JSON.stringify({ kind, key: key.toString("base64"), createdAt: Date.now() }), { mode: 0o600 });
+}
+
+function loadDeferredKey(jobId: string): { kind: DeferredKind; key: Buffer } | null {
+  if (!/^amj_[0-9a-f]+$/.test(jobId)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(join(deferredKeyDir(), `${jobId}.json`), "utf8")) as { kind: DeferredKind; key: string };
+    return { kind: raw.kind, key: Buffer.from(raw.key, "base64") };
+  } catch {
+    return null;
+  }
+}
+
+function forgetDeferredKey(jobId: string): void {
+  try { unlinkSync(join(deferredKeyDir(), `${jobId}.json`)); } catch { /* already gone */ }
+}
+
+/** Open the server's iv(12) | tag(16) | ciphertext. Throws on a wrong key or tampering. */
+export function openSealedResult(key: Buffer, sealedB64: string): { status: number; body: string } {
+  const buf = Buffer.from(sealedB64, "base64");
+  const d = createDecipheriv("aes-256-gcm", key, buf.subarray(0, 12));
+  d.setAuthTag(buf.subarray(12, 28));
+  return JSON.parse(Buffer.concat([d.update(buf.subarray(28)), d.final()]).toString("utf8"));
+}
+
+export function deferredResumeHint(kind: DeferredKind, jobId: string): string {
+  return `Collect it with ${DEFERRED_TOOL[kind]} { resumeJobId: "${jobId}", path: <same path> } — that waits on this same job and bills nothing further.`;
+}
+
+interface DeferredStatus {
+  status?: string;
+  kind?: string;
+  httpStatus?: number;
+  sealed?: string;
+  message?: string;
+}
+
+type DeferredResult<T> = ({ ok: true; data: T }) | AccountFailure | { ok: "started"; jobId: string };
+
+/**
+ * Run a generation as a deferred job and return what the blocking call would have.
+ * `resumeJobId` skips the submit and only waits; `wait: false` returns as soon as
+ * the job is accepted, so a caller can start several and collect them later.
+ */
+async function callDeferred<T>(
+  kind: DeferredKind,
+  body: unknown,
+  opts: { signal?: AbortSignal; resumeJobId?: string; wait?: boolean },
+): Promise<DeferredResult<T>> {
+  let jobId = String(opts.resumeJobId ?? "").trim();
+  let key: Buffer;
+  if (jobId) {
+    const held = loadDeferredKey(jobId);
+    if (!held) {
+      return { ok: false, message: `no key for job ${jobId} on this machine — it was started elsewhere, already collected, or is over two hours old. Its result cannot be opened here.` };
+    }
+    if (held.kind !== kind) {
+      return { ok: false, message: `job ${jobId} is a ${held.kind} job; collect it with ${DEFERRED_TOOL[held.kind]}.` };
+    }
+    key = held.key;
+  } else {
+    key = randomBytes(32);
+    const submitted = await callAccount<{ jobId?: string }>("/api/agent/media/jobs", {
+      method: "POST",
+      signal: opts.signal,
+      body: { kind, sealKey: key.toString("base64"), request: body },
+    });
+    if (!submitted.ok) {
+      // A server from before the jobs route: do it the old, blocking way.
+      if (submitted.status === 404 || submitted.status === 405) {
+        return callAccount<T>(DEFERRED_SYNC_PATH[kind], { method: "POST", body, signal: opts.signal });
+      }
+      return submitted;
+    }
+    jobId = String(submitted.data.jobId ?? "");
+    if (!jobId) return { ok: false, message: "Privateer accepted the job but returned no job id" };
+    saveDeferredKey(jobId, kind, key);
+    if (opts.wait === false) return { ok: "started", jobId };
+  }
+
+  const hint = deferredResumeHint(kind, jobId);
+  const deadline = Date.now() + MEDIA_HTTP_TIMEOUT_MS;
+  let failures = 0;
+  while (Date.now() < deadline) {
+    if (opts.signal?.aborted) {
+      return { ok: false, message: `stopped waiting — job ${jobId} keeps running on the server. ${hint}` };
+    }
+    const poll = await callAccount<DeferredStatus>(`/api/agent/media/jobs/${encodeURIComponent(jobId)}`, { method: "GET", signal: opts.signal });
+    if (!poll.ok) {
+      if (spritePollWorthRetrying(poll.status) && ++failures < SPRITE_POLL_FAILURE_BUDGET) {
+        await sleep(DEFERRED_POLL_MS * 2, opts.signal);
+        continue;
+      }
+      if (poll.status === 404) forgetDeferredKey(jobId);
+      return { ok: false, status: poll.status, message: `job ${jobId} could not be collected: ${poll.message}${poll.status === 404 ? "" : `. ${hint}`}` };
+    }
+    failures = 0;
+    const status = String(poll.data.status ?? "");
+    if (status === "failed") {
+      forgetDeferredKey(jobId);
+      return { ok: false, message: poll.data.message ?? `job ${jobId} failed on the server` };
+    }
+    if (status === "done" && poll.data.sealed) {
+      let opened: { status: number; body: string };
+      try {
+        opened = openSealedResult(key, poll.data.sealed);
+      } catch {
+        return { ok: false, message: `job ${jobId}'s result could not be opened with this machine's key` };
+      }
+      forgetDeferredKey(jobId);
+      // Ack so the server drops the ciphertext now rather than at the TTL.
+      void callAccount(`/api/agent/media/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" }).catch(() => {});
+      return interpretAccountResponse<T>(new Response(opened.body, { status: opened.status, headers: { "Content-Type": "application/json" } }));
+    }
+    await sleep(DEFERRED_POLL_MS, opts.signal);
+  }
+  return { ok: false, message: `job ${jobId} is still running after ${Math.round(MEDIA_HTTP_TIMEOUT_MS / 60_000)} minutes. ${hint}` };
+}
+
+/** Shared parameters every deferred tool takes. */
+const deferredParams = {
+  resumeJobId: Type.Optional(Type.String({
+    description:
+      "Collect a job started earlier (with wait:false, or one that timed out) instead of starting a new one. " +
+      "Nothing is generated and nothing is billed: it only waits and saves. Other generation fields are ignored; `path` still says where to save.",
+  })),
+  wait: Type.Optional(Type.Boolean({
+    description:
+      "Default true. Set false to start the generation and return its job id immediately, so you can start " +
+      "several at once and collect each later with resumeJobId. The job runs on Privateer's servers either way.",
+  })),
+};
+
+function startedText(kind: DeferredKind, jobId: string): string {
+  return `Started ${kind} job ${jobId}; it is generating on Privateer's servers (results are held for up to an hour, sealed to this machine). ${deferredResumeHint(kind, jobId)}`;
+}
+
 // ── Images ───────────────────────────────────────────────────────────────────
 
 interface ImageResponse {
@@ -276,7 +521,7 @@ export const generateImageToolDefinition = {
     "images already on disk — to EDIT or COMPOSE instead: one input means 'change this picture per the " +
     "prompt', several means 'combine these into one'. Billed to the user's Privateer account and " +
     "subject to its privacy settings; the prompt and any input images pass through Privateer's servers " +
-    "in plaintext, but nothing is stored there — the only copy is the file you name. Use the resulting " +
+    "in plaintext. The finished result is held on the server for up to an hour, encrypted to a key only this machine holds, until it is collected — the only readable copy is the file you name. Use the resulting " +
     "path as the first frame of generate_video, or as slideshow material for video_compose.",
   parameters: Type.Object({
     prompt: Type.String({ description: "What the image should show. Be specific about subject, style, lighting and framing." }),
@@ -292,40 +537,39 @@ export const generateImageToolDefinition = {
     aspectRatio: Type.Optional(Type.String({ description: "Aspect ratio, e.g. '16:9', '9:16', '1:1'. Defaults to the model's own." })),
     size: Type.Optional(Type.String({ description: "Explicit pixel size if the model supports one, e.g. '1024x1024'." })),
     model: Type.Optional(Type.String({ description: "Override the image model (e.g. 'google/gemini-3.1-flash-image'). Leave unset to use the one the user chose with /image-model, or the account default." })),
+    ...deferredParams,
   }),
   async execute(
     _toolCallId: string,
-    params: { prompt: string; path: string; images?: string[]; count?: number; aspectRatio?: string; size?: string; model?: string },
+    params: { prompt: string; path: string; images?: string[]; count?: number; aspectRatio?: string; size?: string; model?: string; resumeJobId?: string; wait?: boolean },
     signal?: AbortSignal,
     _onUpdate?: unknown,
     ctx?: { cwd?: string },
   ) {
     const cwd = ctx?.cwd ?? process.cwd();
     const prompt = String(params.prompt ?? "").trim();
-    if (!prompt) return text("Error: prompt is required.");
+    const resuming = Boolean(String(params.resumeJobId ?? "").trim());
+    if (!prompt && !resuming) return text("Error: prompt is required.");
     if (!params.path) return text("Error: path is required — say where to save the image.");
 
     let inputs: { data: string; mimeType: string }[];
     try {
-      inputs = (params.images ?? []).map((p) => readInputImage(cwd, p));
+      inputs = resuming ? [] : (params.images ?? []).map((p) => readInputImage(cwd, p));
     } catch (e) {
       return text(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
 
     const count = Math.min(Math.max(1, Math.round(params.count ?? 1)), 4);
     const model = effectiveMediaModel("image", params.model);
-    const r = await callAccount<ImageResponse>("/api/agent/media/images", {
-      method: "POST",
-      signal,
-      body: {
-        prompt,
-        n: count,
-        ...(inputs.length ? { images: inputs } : {}),
-        ...(params.aspectRatio ? { aspectRatio: params.aspectRatio } : {}),
-        ...(params.size ? { imageSize: params.size } : {}),
-        ...(model ? { model } : {}),
-      },
-    });
+    const r = await callDeferred<ImageResponse>("image", {
+      prompt,
+      n: count,
+      ...(inputs.length ? { images: inputs } : {}),
+      ...(params.aspectRatio ? { aspectRatio: params.aspectRatio } : {}),
+      ...(params.size ? { imageSize: params.size } : {}),
+      ...(model ? { model } : {}),
+    }, { signal, resumeJobId: params.resumeJobId, wait: params.wait });
+    if (r.ok === "started") return text(startedText("image", r.jobId));
     if (!r.ok) return text(`Image generation failed: ${r.message}`);
 
     const images = r.data.images ?? [];
@@ -344,7 +588,7 @@ export const generateImageToolDefinition = {
     }
     if (written.length === 0) return text("Image generation returned no usable image data.");
 
-    const verb = inputs.length ? (inputs.length === 1 ? "Edited" : "Composed") : "Generated";
+    const verb = resuming ? "Collected" : inputs.length ? (inputs.length === 1 ? "Edited" : "Composed") : "Generated";
     return text(`${verb} ${written.length} image${written.length === 1 ? "" : "s"} with ${r.data.model ?? "the account image model"}:\n${written.map((w) => `  ${w}`).join("\n")}`);
   },
 };
@@ -782,28 +1026,26 @@ export const generateSpeechToolDefinition = {
         "refused with VOICE_UNSUPPORTED rather than silently served on a different voice.",
     })),
     model: Type.Optional(Type.String({ description: "Override the account's text-to-speech model." })),
+    ...deferredParams,
   }),
   async execute(
     _toolCallId: string,
-    params: { text: string; path: string; voice?: string; model?: string },
+    params: { text: string; path: string; voice?: string; model?: string; resumeJobId?: string; wait?: boolean },
     signal?: AbortSignal,
     _onUpdate?: unknown,
     ctx?: { cwd?: string },
   ) {
     const cwd = ctx?.cwd ?? process.cwd();
     const body = String(params.text ?? "").trim();
-    if (!body) return text("Error: text is required.");
+    if (!body && !String(params.resumeJobId ?? "").trim()) return text("Error: text is required.");
     if (!params.path) return text("Error: path is required — say where to save the audio.");
 
-    const r = await callAccount<AudioResponse>("/api/audio/speech", {
-      method: "POST",
-      signal,
-      body: {
-        text: body,
-        ...(params.voice ? { voice: params.voice } : {}),
-        ...(params.model ? { ttsModelId: params.model } : {}),
-      },
-    });
+    const r = await callDeferred<AudioResponse>("speech", {
+      text: body,
+      ...(params.voice ? { voice: params.voice } : {}),
+      ...(params.model ? { ttsModelId: params.model } : {}),
+    }, { signal, resumeJobId: params.resumeJobId, wait: params.wait });
+    if (r.ok === "started") return text(startedText("speech", r.jobId));
     if (!r.ok) return text(`Speech generation failed: ${r.message}`);
     if (!r.data.audioBase64) return text("Speech generation returned no audio.");
 
@@ -834,24 +1076,26 @@ export const generateMusicToolDefinition = {
     prompt: Type.String({ description: "The music to generate: genre, mood, instrumentation, tempo. Keep it about the music, not about the user." }),
     path: Type.String({ description: "Where to write the audio, relative to cwd or absolute (e.g. 'audio/score.mp3')." }),
     model: Type.Optional(Type.String({ description: "Override the account's music model." })),
+    ...deferredParams,
   }),
   async execute(
     _toolCallId: string,
-    params: { prompt: string; path: string; model?: string },
+    params: { prompt: string; path: string; model?: string; resumeJobId?: string; wait?: boolean },
     signal?: AbortSignal,
     _onUpdate?: unknown,
     ctx?: { cwd?: string },
   ) {
     const cwd = ctx?.cwd ?? process.cwd();
     const prompt = String(params.prompt ?? "").trim();
-    if (!prompt) return text("Error: prompt is required.");
+    if (!prompt && !String(params.resumeJobId ?? "").trim()) return text("Error: prompt is required.");
     if (!params.path) return text("Error: path is required — say where to save the audio.");
 
-    const r = await callAccount<AudioResponse>("/api/audio/music", {
-      method: "POST",
-      signal,
-      body: { prompt, ...(params.model ? { musicModelId: params.model } : {}) },
-    });
+    const r = await callDeferred<AudioResponse>(
+      "music",
+      { prompt, ...(params.model ? { musicModelId: params.model } : {}) },
+      { signal, resumeJobId: params.resumeJobId, wait: params.wait },
+    );
+    if (r.ok === "started") return text(startedText("music", r.jobId));
     if (!r.ok) return text(`Music generation failed: ${r.message}`);
     if (!r.data.audioBase64) return text("Music generation returned no audio.");
 
@@ -907,17 +1151,18 @@ export const generateSfxToolDefinition = {
           "foley in the catalog; the default is a cheaper model tuned for single sounds.",
       }),
     ),
+    ...deferredParams,
   }),
   async execute(
     _toolCallId: string,
-    params: { prompt: string; path: string; seconds?: number; model?: string },
+    params: { prompt: string; path: string; seconds?: number; model?: string; resumeJobId?: string; wait?: boolean },
     signal?: AbortSignal,
     _onUpdate?: unknown,
     ctx?: { cwd?: string },
   ) {
     const cwd = ctx?.cwd ?? process.cwd();
     const prompt = String(params.prompt ?? "").trim();
-    if (!prompt) return text("Error: prompt is required.");
+    if (!prompt && !String(params.resumeJobId ?? "").trim()) return text("Error: prompt is required.");
     if (!params.path) return text("Error: path is required — say where to save the audio.");
 
     let seconds: number | undefined;
@@ -935,15 +1180,12 @@ export const generateSfxToolDefinition = {
       seconds = Math.round(seconds);
     }
 
-    const r = await callAccount<AudioResponse>("/api/audio/sfx", {
-      method: "POST",
-      signal,
-      body: {
-        prompt,
-        ...(seconds != null ? { duration: seconds } : {}),
-        ...(params.model ? { sfxModelId: params.model } : {}),
-      },
-    });
+    const r = await callDeferred<AudioResponse>("sfx", {
+      prompt,
+      ...(seconds != null ? { duration: seconds } : {}),
+      ...(params.model ? { sfxModelId: params.model } : {}),
+    }, { signal, resumeJobId: params.resumeJobId, wait: params.wait });
+    if (r.ok === "started") return text(startedText("sfx", r.jobId));
     if (!r.ok) return text(`Sound-effect generation failed: ${r.message}`);
     if (!r.data.audioBase64) return text("Sound-effect generation returned no audio.");
 

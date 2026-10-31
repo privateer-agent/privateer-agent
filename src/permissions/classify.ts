@@ -234,6 +234,14 @@ const MEDIA_TITLES: Record<string, string> = {
 // rather than their names (see `resuming` below).
 const RESUME_VIDEO_TITLE = "Save a video already generated (nothing further is billed)";
 const RESUME_SPRITE_TITLE = "Save a sprite animation already generated (nothing further is billed)";
+const RESUME_TITLES: Record<string, string> = {
+  generate_video: RESUME_VIDEO_TITLE,
+  generate_sprite: RESUME_SPRITE_TITLE,
+  generate_image: "Save an image already generated (nothing further is billed)",
+  generate_speech: "Save speech already generated (nothing further is billed)",
+  generate_music: "Save music already generated (nothing further is billed)",
+  generate_sfx: "Save a sound effect already generated (nothing further is billed)",
+};
 
 // Pi's MCP resource tools (core/mcp-servers.js). They list and read resources from
 // every connected server — network reads from connectors the user configured.
@@ -533,11 +541,10 @@ export function classifyToolCall(
     // cheaper path than re-generating. Getting that backwards is what teaches a model
     // to pay twice — and it costs the most on a sprite, where the alternative to a
     // resume is a whole second fan-out of up to five video generations.
-    const resumable = name === "generate_video" || name === "generate_sprite";
+    // Image, speech, music and sfx became deferred jobs too, so the same holds for them.
+    const resumable = RESUME_TITLES[name] !== undefined;
     const resuming = resumable && typeof obj.resumeJobId === "string" && !!obj.resumeJobId.trim();
-    const mediaTitle = resuming
-      ? (name === "generate_sprite" ? RESUME_SPRITE_TITLE : RESUME_VIDEO_TITLE)
-      : MEDIA_TITLES[name];
+    const mediaTitle = resuming ? RESUME_TITLES[name] : MEDIA_TITLES[name];
     const inputs = [
       ...(Array.isArray(obj.inputs) ? (obj.inputs as unknown[]).map(str) : []),
       str(obj.input),

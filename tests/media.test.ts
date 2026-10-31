@@ -20,6 +20,7 @@ import {
   guessResPath,
   pathInside,
   spritePollWorthRetrying,
+  describeTransportFailure,
 } from "../src/tools/media.ts";
 import {
   COMPOSE_TOOL_NAMES,
@@ -1352,3 +1353,39 @@ test("generate_sprite outside the working directory is flagged as such", () => {
     assert.equal(quoteMediaCallUsd("generate_video", {}, { video: {} }), null, "an older server can't be quoted");
   });
 }
+
+// The incident: an agent driving Privateer saw a 5-6 minute hang and then a bare
+// "fetch failed". That was undici's headers timeout with the cause discarded. Feed
+// the REAL error undici throws through the describer, not a hand-built lookalike.
+test("describeTransportFailure: a headers timeout is named, with the billing warning", async () => {
+  const { createServer } = await import("node:http");
+  const { Agent } = await import("undici");
+  const srv = createServer((_q, r) => { setTimeout(() => r.end("ok"), 1000); }).listen(0);
+  await new Promise((r) => srv.once("listening", r));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    let err: unknown;
+    try {
+      await fetch(`http://127.0.0.1:${port}/`, { dispatcher: new Agent({ headersTimeout: 100 }) } as unknown as RequestInit);
+    } catch (e) { err = e; }
+    assert.ok(err, "the strict dispatcher should have timed out");
+    const msg = describeTransportFailure(err);
+    assert.match(msg, /UND_ERR_HEADERS_TIMEOUT/);
+    assert.match(msg, /billed/);
+    assert.doesNotMatch(msg, /^could not reach Privateer: fetch failed$/);
+  } finally {
+    srv.closeAllConnections(); srv.close();
+  }
+});
+
+test("describeTransportFailure: a refused connection keeps its errno", async () => {
+  const { createServer } = await import("node:net");
+  const probe = createServer().listen(0);
+  await new Promise((r) => probe.once("listening", r));
+  const port = (probe.address() as { port: number }).port;
+  await new Promise((r) => probe.close(r)); // nothing listens there now
+  let err: unknown;
+  try { await fetch(`http://127.0.0.1:${port}/`); } catch (e) { err = e; }
+  const msg = describeTransportFailure(err);
+  assert.match(msg, /^could not reach Privateer: fetch failed \(ECONNREFUSED/);
+});
