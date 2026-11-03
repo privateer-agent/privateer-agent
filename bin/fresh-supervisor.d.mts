@@ -32,4 +32,8 @@ export function runDir(home: string): string;
 export function listTerminals(home: string): TerminalEntry[];
 export function requestFresh(socket: string, token: string, timeoutMs?: number): Promise<{ ok: true; pid: number }>;
 /** Run the TUI under supervision; `buildArgs(true)` for the first launch, false after. */
-export function runSupervised(cmd: string, buildArgs: (first: boolean) => string[], opts: { home: string }): void;
+export function runSupervised(
+  cmd: string,
+  buildArgs: (first: boolean, extra?: string[]) => string[],
+  opts: { home: string; interactive?: boolean },
+): void;

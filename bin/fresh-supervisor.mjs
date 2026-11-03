@@ -44,6 +44,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { RECOVERY_ENV, encodeRecovery, readMarker, removeMarker, shouldAutoResume } from "./session-recovery.mjs";
 
 const isWin = process.platform === "win32";
 
@@ -254,9 +255,15 @@ export function requestFresh(socket, token, timeoutMs = 3000) {
 // ── supervisor ──────────────────────────────────────────────────────────────
 
 /** Put a terminal a killed TUI left in raw mode / hidden cursor / paste mode back. */
-function resetTerminal() {
+function resetTerminal({ clear = true } = {}) {
   if (!process.stdout.isTTY) return;
   if (!isWin) spawnSync("stty", ["sane"], { stdio: ["inherit", "ignore", "ignore"] });
+  // After a CRASH the screen is kept: the error the old agent printed is the only
+  // record of why it died, and the resumed agent redraws the conversation anyway.
+  if (!clear) {
+    process.stdout.write("\x1b[?25h\x1b[?1049l\x1b[?2004l\x1b[<u\x1b[0m\n");
+    return;
+  }
   // Show cursor, leave the alternate screen, bracketed paste off, pop the kitty keyboard
   // protocol, reset attributes, then clear screen + scrollback so the new agent starts on
   // a blank page rather than under the old conversation.
@@ -305,12 +312,20 @@ async function reap(child) {
 }
 
 /**
- * Run the TUI under supervision. `buildArgs(first)` returns the node argv for each
- * launch — the first uses the user's args as typed, later ones go through
- * filterRespawnArgs — and is called fresh each time so a model the user picked in the old
- * session (saved to settings.json) is what the new one boots on.
+ * Run the TUI under supervision. `buildArgs(first, extra)` returns the node argv for
+ * each launch — the first uses the user's args as typed, later ones go through
+ * filterRespawnArgs, with `extra` appended (a crash resume adds --session <file>) — and
+ * is called fresh each time so a model the user picked in the old session (saved to
+ * settings.json) is what the new one boots on.
+ *
+ * Crash resume (bin/session-recovery.mjs): when the agent dies like a crash — a
+ * non-requested exit code or a crash signal — while its live marker says it was in a
+ * session, the supervisor relaunches straight back into that session and hands the
+ * marker over in $PRIVATEER_RECOVERY so the new agent can tell the model what was
+ * interrupted. Bounded: RESUME_BUDGET per RESUME_WINDOW_MS, and an agent that dies
+ * before its session loaded has no marker, so a session that kills it on load can't loop.
  */
-export function runSupervised(cmd, buildArgs, { home }) {
+export function runSupervised(cmd, buildArgs, { home, interactive } = {}) {
   const token = crypto.randomBytes(24).toString("hex");
   const dir = runDir(home);
   const regFile = path.join(dir, `${process.pid}.json`);
@@ -318,6 +333,7 @@ export function runSupervised(cmd, buildArgs, { home }) {
   let child = null;
   let replacing = false;
   let registered = false;
+  const restarts = [];
 
   const register = () => {
     try {
@@ -334,13 +350,32 @@ export function runSupervised(cmd, buildArgs, { home }) {
     if (!isWin) fs.rmSync(sock, { force: true });
   };
 
-  const launch = (first) => {
-    child = spawn(cmd, buildArgs(first), {
+  const launch = (first, extra = [], extraEnv = {}) => {
+    const me = spawn(cmd, buildArgs(first, extra), {
       stdio: "inherit",
-      env: { ...process.env, [FRESH_SOCKET_ENV]: sock, [FRESH_TOKEN_ENV]: token },
+      env: { ...process.env, [FRESH_SOCKET_ENV]: sock, [FRESH_TOKEN_ENV]: token, ...extraEnv },
     });
-    child.on("exit", (code, signal) => {
+    child = me;
+    me.on("exit", (code, signal) => {
       if (replacing) return;
+      const marker = readMarker(home, me.pid);
+      const now = Date.now();
+      if (shouldAutoResume({
+        code, signal, marker, restarts, now,
+        sessionExists: !!marker && fs.existsSync(marker.sessionFile),
+        interactive: interactive ?? !!process.stdin.isTTY,
+      })) {
+        restarts.push(now);
+        resetTerminal({ clear: false });
+        const why = signal ? `signal ${signal}` : `exit code ${code}`;
+        process.stdout.write(`\x1b[2m⚓ The agent stopped unexpectedly (${why}). Resuming your session…\x1b[0m\n`);
+        // The marker stays on disk until the new agent consumes it, so a resume that
+        // itself fails still leaves the next launch something to point at.
+        launch(false, ["--session", marker.sessionFile], { [RECOVERY_ENV]: encodeRecovery(marker) });
+        return;
+      }
+      // Asked to stop with nothing in flight: no reason to keep it.
+      if (marker && !marker.turnOpen && (code === 0 || signal === "SIGINT" || signal === "SIGTERM")) removeMarker(home, me.pid);
       server.close();
       unregister();
       if (signal) process.kill(process.pid, signal);
@@ -361,6 +396,8 @@ export function runSupervised(cmd, buildArgs, { home }) {
     const exited = new Promise((r) => (old.exitCode !== null || old.signalCode !== null ? r() : old.once("exit", r)));
     const count = await reap(old);
     await exited;
+    // /fresh is a requested stop, even mid-turn: never offer that turn back later.
+    if (old.pid) removeMarker(home, old.pid);
     resetTerminal();
     const extra = count > 1 ? ` and ${count - 1} process${count - 1 === 1 ? "" : "es"} it started` : "";
     process.stdout.write(`\x1b[2m⚓ Fresh agent — the previous one${extra} stopped.\x1b[0m\n`);
