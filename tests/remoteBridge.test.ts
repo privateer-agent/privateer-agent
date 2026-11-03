@@ -5,6 +5,10 @@ import { decideToolCall, type GateController } from "../src/ext/permissionGate.t
 import { noQuarterActive, setNoQuarter } from "../src/permissions/noQuarter.ts";
 import type { PermissionRequest } from "../src/permissions/gate.ts";
 import type { EngineEvent } from "../src/engine/events.ts";
+import { setAttentionPushSink } from "../src/remote/attentionPush.ts";
+
+let attentionPushes = 0;
+setAttentionPushSink(() => { attentionPushes++; });
 
 // The RelayClient is KEEP (verbatim 0.2); the RemoteBridge is the new wiring, so
 // that's what we exercise — against a fake relay standing in for the app/WS. The
@@ -639,4 +643,50 @@ test("a local turn gets no synthesized terminal event, and the flag resets per t
   bridge.callbacks.onPrompt("two"); // a fresh turn must not inherit "already sent"
   bridge.settleTurn();
   assert.deepEqual(relay.events.map((e) => e.type), ["aborted", "finish"]);
+});
+
+// A question put to an app that isn't there used to wait in silence: the relay only
+// reaches a live socket, so a backgrounded phone never knew to come back.
+test("a question opened with no app attached asks for an attention push", async () => {
+  setAttentionPushSink(() => { attentionPushes++; });
+  attentionPushes = 0;
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  relay.setController(false);
+  bridge.attachRelay(relay);
+  const p = bridge.selectRemote({ title: "Which?", options: [{ value: "x", label: "x" }] });
+  assert.equal(relay.selects.length, 1, "still sent, so a reattach can re-send it");
+  assert.equal(attentionPushes, 1);
+  bridge.callbacks.onSelectResponse(relay.selects[0].id, "x");
+  assert.equal(await p, "x");
+  bridge.dispose();
+});
+
+test("the app leaving with a question open asks for an attention push; a watched one does not", async () => {
+  setAttentionPushSink(() => { attentionPushes++; });
+  attentionPushes = 0;
+  const bridge = new RemoteBridge({ onPrompt: () => {} });
+  const relay = makeFakeRelay();
+  bridge.attachRelay(relay);
+  const q = bridge.inputRemote({ title: "Name" });
+  assert.equal(attentionPushes, 0, "an attached app sees the sheet itself");
+  bridge.callbacks.onControllerDetached();
+  assert.equal(attentionPushes, 1);
+  bridge.callbacks.onInputResponse(relay.inputs[0].id, "Ada");
+  assert.equal(await q, "Ada");
+  bridge.dispose();
+});
+
+test("an owner's onQuestionUnwatched replaces the default push", async () => {
+  setAttentionPushSink(() => { attentionPushes++; });
+  attentionPushes = 0;
+  let told = 0;
+  const bridge = new RemoteBridge({ onPrompt: () => {}, onQuestionUnwatched: () => told++ });
+  const relay = makeFakeRelay();
+  relay.setController(false);
+  bridge.attachRelay(relay);
+  void bridge.selectRemote({ title: "Which?", options: [] });
+  assert.equal(told, 1);
+  assert.equal(attentionPushes, 0);
+  bridge.dispose();
 });

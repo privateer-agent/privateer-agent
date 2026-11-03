@@ -25,6 +25,7 @@ import { rememberAccountCredential, persistAccountCredential, dropPersistedAccou
 import { modelRegistryOf } from "../providers/piAuthStore.ts";
 import { RelayClient, type TaskSpec } from "./relayClient.ts";
 import { RemoteBridge } from "./remoteBridge.ts";
+import { transcriptSnapshot, type SnapshotEntry } from "./transcriptSnapshot.ts";
 import { AttachmentStore, type StoredAttachment } from "../util/attachmentStore.ts";
 import { spawnAccountCredentials, revokeAccountSession } from "../auth/privateer.ts";
 import { createUIContext } from "../ext/headlessUi.ts";
@@ -190,7 +191,12 @@ export async function createLiveTaskSession(spec: TaskSpec, deps: LiveTaskDeps):
     onControllerAttached: () => {
       attached = true;
       if (attachTimer) { clearTimeout(attachTimer); attachTimer = undefined; }
-      relay?.sendSnapshot([]);
+      // The session's transcript, so an app back from sleep catches up (transcriptSnapshot.ts).
+      {
+        let entries: SnapshotEntry[] = [];
+        try { entries = transcriptSnapshot(session?.sessionManager?.getBranch?.() ?? []); } catch { /* no session yet */ }
+        relay?.sendSnapshot(entries, { full: entries.length > 0, running: turnActive });
+      }
       // cwd rides along here (and nowhere else — see RelayClient.sendContext): this
       // session's working directory was either named by the driver in the spawn form
       // or defaulted to the harbor's own, and they have no other way to see which.

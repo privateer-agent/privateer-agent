@@ -16,6 +16,7 @@ import { privacyDisabled } from "../config/privacyDisabled.ts"; // no Pi deps �
 import type { GateController } from "../ext/permissionGate.ts"; // type-only → erased, safe pre-boot
 import { createUIContext } from "../ext/headlessUi.ts"; // no Pi deps → safe pre-boot
 import { canOpenBrowser, openInBrowser } from "../util/openBrowser.ts"; // node:child_process only → safe pre-boot
+import { transcriptSnapshot, type SnapshotEntry } from "../remote/transcriptSnapshot.ts"; // no deps → safe pre-boot
 
 // This lean REPL has no Pi TUI (and so no Theme), so it detects the terminal background
 // itself (COLORFGBG) and picks a palette — on a light terminal the standard "\x1b[33m"
@@ -181,7 +182,12 @@ async function main() {
     // the driver learns which folder they're driving without the OS username
     // crossing the relay.
     onControllerAttached: () => {
-      relay?.sendSnapshot([]);
+      // The session's transcript, so an app back from sleep catches up (transcriptSnapshot.ts).
+      {
+        let entries: SnapshotEntry[] = [];
+        try { entries = transcriptSnapshot(session?.sessionManager?.getBranch?.() ?? []); } catch { /* no session yet */ }
+        relay?.sendSnapshot(entries, { full: entries.length > 0, running: turnActive });
+      }
       relay?.sendContext({ model: currentSpec, cwd, version: agentVersion() });
       relay?.sendCommands(availableCommands());
     },

@@ -20,6 +20,7 @@ import {
   startParentApprovalRelay,
 } from "../src/remote/subagentRelay.ts";
 import { RelayClient } from "../src/remote/relayClient.ts";
+import { transcriptSnapshot } from "../src/remote/transcriptSnapshot.ts";
 import { makeSendFileTool } from "../src/tools/sendFile.ts";
 import { makeSaveCargoTool } from "../src/tools/cargo.ts";
 import { makeChartTools } from "../src/tools/charts.ts";
@@ -471,7 +472,19 @@ const bridge = new RemoteBridge({
     // snapshot, push live context (model + version) so the app banner reflects this
     // terminal, and advertise the slash commands for the composer's autocomplete.
     setRemoteState("connected");
-    relay?.sendSnapshot([{ kind: "notice", text: "Privateer terminal connected." }]);
+    // The session's transcript, not a "connected" notice: an app coming back from
+    // sleep holds a feed frozen where its socket died, and this is how it learns what
+    // happened since — including that the turn it last saw is over (`running`).
+    let entries: ReturnType<typeof transcriptSnapshot> = [];
+    let running = false;
+    try {
+      entries = transcriptSnapshot(ctxRef?.sessionManager?.getBranch?.() ?? []);
+      running = ctxRef?.isIdle?.() === false;
+    } catch { /* a replaced session's context throws — fall back to the notice */ }
+    relay?.sendSnapshot(
+      entries.length ? entries : [{ kind: "notice", text: "Privateer terminal connected." }],
+      { full: entries.length > 0, running },
+    );
     // cwd rides along here (home-collapsed on the way out, see RelayClient.sendContext).
     // Without it the app's composer shows no working-directory strip at all — and that
     // strip is the only place a driver can see which folder the prompts they type are

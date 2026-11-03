@@ -24,6 +24,7 @@ import type { EngineEvent } from "../engine/events.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import { noQuarterActive } from "../permissions/noQuarter.ts";
 import { authorizeControl } from "./controlAuth.ts";
+import type { SnapshotTool } from "./transcriptSnapshot.ts";
 import { CARGO_CHUNK_CHARS, type CargoSaveRequest, type CargoSaveResult } from "./cargoSave.ts";
 import {
   LIBRARY_CHUNK_CHARS,
@@ -1175,10 +1176,43 @@ export class RelayClient {
 
   // Catch-up history sent to a controller on attach. Structured (not markdown) so
   // the app renders it with the same styling as the live feed. Bounded: last 80
-  // entries, each clipped.
-  sendSnapshot(entries: { kind: string; text: string }[]): void {
-    const trimmed = entries.slice(-80).map((e) => ({ kind: e.kind, text: safe(String(e.text ?? ""), 4000) }));
-    this.rawSend({ type: "snapshot", entries: trimmed });
+  // entries, each clipped, and the whole frame kept well under the relay's 256 KB
+  // frame cap by dropping the OLDEST entries first.
+  //
+  // `full` marks the entries as the terminal's whole current transcript (see
+  // transcriptSnapshot.ts), so the app may REPLACE what it holds rather than only
+  // adopting into an empty feed; `running` says whether a turn is still going, which
+  // is how a reattaching app learns that the turn it last saw "Link dropped" on is
+  // over. Both absent = the old notice-only snapshot, which the app keeps treating as
+  // such.
+  sendSnapshot(
+    entries: { kind: string; text: string; tool?: SnapshotTool }[],
+    meta?: { full?: boolean; running?: boolean },
+  ): void {
+    const out: Record<string, unknown>[] = [];
+    let budget = 160 * 1024;
+    for (const e of entries.slice(-80).reverse()) {
+      const t = e.tool;
+      const entry: Record<string, unknown> = t
+        ? {
+            kind: e.kind,
+            text: "",
+            tool: {
+              id: t.id,
+              name: t.name,
+              input: safe(t.input, 500),
+              ...(t.output !== undefined ? { output: safe(t.output, 1500) } : {}),
+              ...(t.error !== undefined ? { error: safe(t.error, 1000) } : {}),
+              ...(t.running ? { running: true } : {}),
+            },
+          }
+        : { kind: e.kind, text: safe(String(e.text ?? ""), e.kind === "reasoning" ? 1500 : 4000) };
+      budget -= JSON.stringify(entry).length;
+      if (budget < 0) break;
+      out.push(entry);
+    }
+    out.reverse();
+    this.rawSend({ type: "snapshot", entries: out, ...(meta?.full ? { full: true, running: meta.running === true } : {}) });
   }
 
   // ── agent → app file transfer (chunked) ─────────────────────────────────────

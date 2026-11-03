@@ -20,6 +20,7 @@ import { redactText } from "../util/redact.ts";
 import type { PermissionRequest } from "../permissions/gate.ts";
 import type { AskOutcome } from "../permissions/modeGate.ts";
 import type { RelayCallbacks } from "./relayClient.ts";
+import { requestAttentionPush } from "./attentionPush.ts";
 import type { CargoSaveRequest, CargoSaveResult } from "./cargoSave.ts";
 import type { LibrarySaveRequest, LibrarySaveResult } from "./librarySave.ts";
 import type { ChartOpRequest, ChartOpResult } from "./chartOps.ts";
@@ -168,6 +169,10 @@ export interface RemoteBridgeConfig {
   onFilesSearch?: (id: string, query: string) => void;
   // A controller (re)attached — the owner should push a transcript snapshot.
   onControllerAttached?: () => void;
+  // A question is open and no app is attached to see it. Defaults to a content-free
+  // push to the account's phones (attentionPush.ts); a test or an owner with its own
+  // channel may replace it.
+  onQuestionUnwatched?: () => void;
   // The last controller went away. Informational for the owner (the bridge already
   // fails pending approvals closed); a driven turn in flight keeps running.
   onControllerDetached?: () => void;
@@ -380,6 +385,7 @@ export class RemoteBridge {
       this.remote = false;
       this.rejectAllPending();
       this.holdOpenQuestions();
+      if (this.hasOpenQuestion()) this.questionUnwatched();
       this.cfg.onControllerDetached?.();
     },
     onAttachment: (file) => {
@@ -472,6 +478,9 @@ export class RemoteBridge {
         signal.addEventListener("abort", onAbort, { once: true });
       }
       this.relay!.requestSelect(id, req);
+      // Sent into a socket with no app on the other end: it is held and re-sent on
+      // reattach, but nobody knows to come back unless they are told.
+      if (this.relay!.hasController?.() === false) this.questionUnwatched();
     });
   };
 
@@ -495,6 +504,9 @@ export class RemoteBridge {
         signal.addEventListener("abort", onAbort, { once: true });
       }
       this.relay!.requestInput(id, req);
+      // Sent into a socket with no app on the other end: it is held and re-sent on
+      // reattach, but nobody knows to come back unless they are told.
+      if (this.relay!.hasController?.() === false) this.questionUnwatched();
     });
   };
 
@@ -709,6 +721,11 @@ export class RemoteBridge {
     if (!first) return false;
     first.resolve(text);
     return true;
+  }
+
+  private questionUnwatched(): void {
+    if (this.cfg.onQuestionUnwatched) return this.cfg.onQuestionUnwatched();
+    requestAttentionPush();
   }
 
   private resendOpenQuestions(): void {
