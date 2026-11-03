@@ -18,7 +18,7 @@
 // spawn only runs when this file is invoked as a binary.
 
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve, join, delimiter } from "node:path";
 import { existsSync } from "node:fs";
 
@@ -91,7 +91,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (!process.env.PI_SKIP_VERSION_CHECK) process.env.PI_SKIP_VERSION_CHECK = "1";
   if (!process.env.PI_BG_DISABLE_UPDATE_CHECK) process.env.PI_BG_DISABLE_UPDATE_CHECK = "1";
   const args = buildChildArgs(process.argv.slice(2));
-  const child = spawn(process.execPath, [piCliPath(), ...args], { stdio: "inherit", env: process.env });
+  // The session codec, as for the TUI (bin/session-seal-preload.mjs): a child writes
+  // its own session file, and it must be sealed like the parent's.
+  const preload = pathToFileURL(join(HERE, "session-seal-preload.mjs")).href;
+  const child = spawn(process.execPath, ["--import", preload, piCliPath(), ...args], { stdio: "inherit", env: process.env });
   // Propagate the child's exit faithfully so pi-subagents' parent reads the real
   // outcome (a signal re-raises; otherwise exit with the same code).
   child.on("exit", (code, signal) => {

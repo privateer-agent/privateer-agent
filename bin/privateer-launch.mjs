@@ -34,6 +34,7 @@ import { runToCompletion } from "./run-to-completion.mjs";
 import { modelArgs } from "./model-args.mjs";
 import { filterRespawnArgs, listTerminals, requestFresh, runSupervised } from "./fresh-supervisor.mjs";
 import { configureCompileCache } from "./startup-cache.mjs";
+import { sweepSessions } from "./session-seal.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
 const REPO = path.resolve(HERE, "..");
@@ -895,6 +896,9 @@ else {
 
   // Dev convenience: load provider keys from the repo's .env if present.
   const nodeArgs = fs.existsSync(ENV_FILE) ? [`--env-file=${ENV_FILE}`] : [];
+  // Session sealing (bin/session-seal.mjs): the codec has to be in place before Pi's
+  // main() opens a session, so it rides in as a preload on EVERY run that can write one.
+  nodeArgs.push("--import", pathToFileURL(path.join(HERE, "session-seal-preload.mjs")).href);
 
   // The boot splash. `--import` so it runs before Pi's entry module — most of the wait
   // it covers IS that module graph loading, so a splash started any later would miss it.
@@ -924,7 +928,15 @@ else {
   // forwardSignals: a `kill` reaches only this launcher, and a -p run left behind keeps
   // working (and spending) with nobody waiting for its answer.
   if (isNonInteractive) runToCompletion(NODE_BIN, tuiArgs(args), { forwardSignals: true });
-  else runSupervised(NODE_BIN, (first) => tuiArgs(first ? args : filterRespawnArgs(args)), { home: PRIVATEER_HOME });
+  // `extra` is how a crash resume re-enters the session (--session <file>).
+  else {
+    // Seal the sessions written before sealing existed — once, in this (the
+    // supervisor's) process, in the background, while the agent boots.
+    setTimeout(() => {
+      sweepSessions(PRIVATEER_HOME, path.join(AGENT_DIR, "sessions")).catch(() => {});
+    }, 3000).unref();
+    runSupervised(NODE_BIN, (first, extra = []) => tuiArgs([...(first ? args : filterRespawnArgs(args)), ...extra]), { home: PRIVATEER_HOME });
+  }
 }
 
 // --- helpers ---------------------------------------------------------------

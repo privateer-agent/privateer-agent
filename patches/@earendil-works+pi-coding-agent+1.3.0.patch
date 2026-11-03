@@ -826,6 +826,95 @@ index 563d7d5..4f669b6 100644
              return projectPath;
          }
          const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
+index 62b469b..7e3c2c1 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
+@@ -1,6 +1,22 @@
+ import { getCurrentSystemMessage, uuidv7, } from "@earendil-works/pi-ai";
+ import { randomUUID } from "crypto";
+ import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync, } from "fs";
++// [privateer] Session sealing (privateer-agent bin/session-seal.mjs): every entry
++// line except the header is written and read through a codec the launcher installs
++// on globalThis before Pi starts. Absent codec → plaintext, as upstream; a sealed
++// line read without the codec is skipped like any other line Pi can't parse.
++const PRIVATEER_SESSION_CODEC = Symbol.for("privateer.sessionCodec");
++function serializeSessionEntry(entry) {
++    const codec = globalThis[PRIVATEER_SESSION_CODEC];
++    return codec ? codec.encode(entry) : JSON.stringify(entry);
++}
++function decodeSessionEntry(entry) {
++    if (entry && typeof entry === "object" && entry.pvs !== undefined) {
++        const codec = globalThis[PRIVATEER_SESSION_CODEC];
++        return codec ? codec.decode(entry) : null;
++    }
++    return entry;
++}
+ import { readdir, stat } from "fs/promises";
+ import { basename, join, resolve } from "path";
+ import { createInterface } from "readline";
+@@ -95,8 +111,9 @@ export function parseSessionEntries(content) {
+         if (!line.trim())
+             continue;
+         try {
+-            const entry = JSON.parse(line);
+-            entries.push(entry);
++            const entry = decodeSessionEntry(JSON.parse(line));
++            if (entry)
++                entries.push(entry);
+         }
+         catch {
+             // Skip malformed lines
+@@ -314,7 +331,7 @@ function parseSessionEntryLine(line) {
+     if (!line.trim())
+         return null;
+     try {
+-        return JSON.parse(line);
++        return decodeSessionEntry(JSON.parse(line));
+     }
+     catch {
+         // Skip malformed lines
+@@ -757,7 +774,7 @@ export class SessionManager {
+         const fd = openSync(this.sessionFile, "w");
+         try {
+             for (const entry of this.fileEntries) {
+-                writeFileSync(fd, `${JSON.stringify(entry)}\n`);
++                writeFileSync(fd, `${serializeSessionEntry(entry)}\n`);
+             }
+         }
+         finally {
+@@ -800,7 +817,7 @@ export class SessionManager {
+             const fd = openSync(this.sessionFile, "wx");
+             try {
+                 for (const e of this.fileEntries) {
+-                    writeFileSync(fd, `${JSON.stringify(e)}\n`);
++                    writeFileSync(fd, `${serializeSessionEntry(e)}\n`);
+                 }
+             }
+             finally {
+@@ -809,7 +826,7 @@ export class SessionManager {
+             this.flushed = true;
+         }
+         else {
+-            appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
++            appendFileSync(this.sessionFile, `${serializeSessionEntry(entry)}\n`);
+         }
+     }
+     _appendEntry(entry) {
+@@ -1403,11 +1420,11 @@ export class SessionManager {
+             cwd: resolvedTargetCwd,
+             parentSession: resolvedSourcePath,
+         };
+-        writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
++        writeFileSync(newSessionFile, `${serializeSessionEntry(newHeader)}\n`, { flag: "wx" });
+         // Copy all non-header entries from source
+         for (const entry of sourceEntries) {
+             if (entry.type !== "session") {
+-                appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
++                appendFileSync(newSessionFile, `${serializeSessionEntry(entry)}\n`);
+             }
+         }
+         return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
 index d5ce9cd..a456908 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js
