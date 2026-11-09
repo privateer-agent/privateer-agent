@@ -34,6 +34,7 @@ import { runToCompletion } from "./run-to-completion.mjs";
 import { modelArgs } from "./model-args.mjs";
 import { filterRespawnArgs, listTerminals, requestFresh, runSupervised } from "./fresh-supervisor.mjs";
 import { configureCompileCache } from "./startup-cache.mjs";
+import { bootCliPath } from "./boot-bundle.mjs";
 import { sweepSessions } from "./session-seal.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // bin/
@@ -763,6 +764,8 @@ else {
     );
     process.exit(1);
   }
+  // The compiled build when it is valid for this install, else the source tree.
+  const ENTRY = bootCliPath(REPO) ?? CLI;
   process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
   // The binary pi-subagents spawns for each child, and the moat that child must load.
   //
@@ -933,7 +936,7 @@ else {
   // Supervised rather than runToCompletion: the launcher stays up so /fresh, a voice
   // command, or `privateer fresh` from another terminal can swap this agent for a new
   // process with the old tree reaped. Print/export/version runs have nothing to swap.
-  const tuiArgs = (launchArgs) => [...nodeArgs, CLI, ...modelArgsFor(launchArgs), ...extArgs, ...skillArgs, ...launchArgs];
+  const tuiArgs = (launchArgs) => [...nodeArgs, ENTRY, ...modelArgsFor(launchArgs), ...extArgs, ...skillArgs, ...launchArgs];
   // forwardSignals: a `kill` reaches only this launcher, and a -p run left behind keeps
   // working (and spending) with nobody waiting for its answer.
   if (isNonInteractive) runToCompletion(NODE_BIN, tuiArgs(args), { forwardSignals: true });

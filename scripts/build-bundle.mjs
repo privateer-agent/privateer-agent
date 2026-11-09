@@ -25,6 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyPatchesIfNeeded } from "../bin/apply-patches.mjs";
+import { buildBoot } from "./build-boot.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = path.join(REPO, "dist-bundle");
@@ -192,7 +193,7 @@ function slimTree(nm) {
 }
 
 // ---- assemble one bundle --------------------------------------------------
-function buildTarget(name) {
+async function buildTarget(name) {
   const t = TARGETS[name];
   if (!t) throw new Error(`unknown target "${name}" (valid: ${Object.keys(TARGETS).join(", ")})`);
 
@@ -237,6 +238,11 @@ function buildTarget(name) {
     const p = path.join(REPO, f);
     if (fs.existsSync(p)) fs.copyFileSync(p, path.join(stage, f));
   }
+  // Compiled entry, from the patched tree this bundle ships. JS only, so any host can
+  // build it for any target (native addons stay external).
+  log("Compiling the boot build");
+  await buildBoot({ repo: stage, quiet: true });
+
   // Stamp the bundle so the launcher/telemetry can tell it's a bundle install.
   fs.writeFileSync(
     path.join(stage, "BUNDLE_INFO.json"),
@@ -300,7 +306,7 @@ mkdirp(OUT);
 sweepStaleOutput();
 log(`Node on build machine: ${runOut("node", ["-v"])}`);
 const results = [];
-for (const name of selected) results.push(buildTarget(name));
+for (const name of selected) results.push(await buildTarget(name));
 
 console.log("");
 log("Done:");

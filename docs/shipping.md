@@ -59,7 +59,8 @@ node scripts/build-bundle.mjs --target darwin-arm64
 It downloads the pinned Node binary from nodejs.org, runs
 `npm ci --omit=dev --os=<os> --cpu=<arch>` then applies patches explicitly (the
 package has no postinstall — see "Install-time execution" below),
-prunes cross-platform natives down to the target, copies app code, and produces
+prunes cross-platform natives down to the target, copies app code, compiles the launch
+entry (`dist-boot/`, see [startup-performance.md](startup-performance.md)), and produces
 `dist-bundle/privateer-<target>.tar.gz(+.sha256)` (`.zip` for Windows).
 
 **Any host can build any target.** koffi/pi-tui bundle all platforms in one package

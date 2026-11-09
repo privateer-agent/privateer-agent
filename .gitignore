@@ -28,3 +28,6 @@ work/
 
 # Self-contained release bundles (built by scripts/build-bundle.mjs)
 dist-bundle/
+
+# Compiled launch entry (built by scripts/build-boot.mjs)
+dist-boot/

@@ -1165,6 +1165,25 @@ export async function dropPersistedAccountCredential(
   }
 }
 
+// The drop for a process that is about to exit. Pi calls process.exit as soon as the
+// session_shutdown handlers return, so a drop nobody waits for dies mid-write: the
+// revoked credential stays on disk, and the lock on auth.json is left behind. Every
+// launch in the next 30 seconds then waits for that lock to go stale before it can
+// paint, which is what a quick quit-and-relaunch looked like: a frozen terminal.
+//
+// Bounded, because another terminal can legitimately hold that lock and quitting must
+// never hang. Past the bound the server-side TTL is the fallback, as for any failed drop.
+export async function dropPersistedAccountCredentialBeforeExit(timeoutMs = 2_000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    dropPersistedAccountCredential().catch(() => false),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
 // Make sure Pi still HAS an account credential before a turn goes out. Normally
 // session_start's arm is enough and this is a free in-memory lookup. It exists for the
 // case session_start can't cover: the persisted entry disappearing mid-session, which

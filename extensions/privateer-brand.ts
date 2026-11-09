@@ -31,6 +31,7 @@ import * as priv from "../src/auth/privateer.ts";
 import {
   armAccountCredential,
   dropPersistedAccountCredential,
+  dropPersistedAccountCredentialBeforeExit,
   makeAccountProvider,
   verificationLink,
 } from "../src/providers/account.ts";
@@ -738,7 +739,8 @@ export default function privateerBrand(pi: any): void {
     // refresh on a 401). Mirrors the harbor's shutdown (harbor/index.ts).
     // Ownership-checked (no force): revokeLocalSessions killed OUR sessions only, so a
     // persisted entry belonging to another running terminal must survive our exit.
-    dropPersistedAccount(ctxRef);
+    // Awaited, unlike the drops below: this process is about to exit.
+    await dropPersistedAccountCredentialBeforeExit();
   });
 
   // The machine login was invalidated server-side (TTL lapsed or revoked in the app):

@@ -21,6 +21,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { findDepRoot } from "./apply-patches.mjs";
+import { BOOT_DIR, bootCliPath } from "./boot-bundle.mjs";
 
 const REGISTRY = process.env.npm_config_registry || "https://registry.npmjs.org";
 const NET_TIMEOUT_MS = 8000;
@@ -226,6 +227,17 @@ export async function verify({ repo, offline = false } = {}) {
     } else {
       unknown("recorded patch set does not match the shipped one", "— will re-apply next launch");
     }
+  }
+
+  // Which code a launch actually runs: the compiled build, when valid, is the patched
+  // source above in one place, so "patched" is only half the answer without this.
+  heading("Boot build");
+  const bootBuild = readJson(path.join(repo, BOOT_DIR, "manifest.json"));
+  if (bootCliPath(repo)) {
+    pass("compiled entry in use", `${bootBuild.modules} modules · pi ${bootBuild.pi}`);
+    note("built from this release's source and patches; PRIVATEER_NO_BOOT_BUNDLE=1 runs the source tree");
+  } else {
+    note(bootBuild ? "present but not used here, so launches run from source" : "none, so launches run from source");
   }
 
   // --- 5. where config and credentials live -------------------------------

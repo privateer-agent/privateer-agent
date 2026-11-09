@@ -38,8 +38,6 @@ import { guardedWebToolDefinitions } from "../src/tools/web.ts";
 import { guardedCryptoToolDefinitions } from "../src/tools/crypto.ts";
 import { readWebToolsConfig, resolveWebMode, type ProviderMetaLike } from "../src/tools/webMode.ts";
 
-const RPIV_WEB_TOOLS = "@juicesharp/rpiv-web-tools";
-
 // What a signed-out terminal hears when the model reaches for the web. Both exits are
 // named because both are real: sign in and it works on the account's allowance, or bring
 // a provider of your own and the query never touches our servers.
@@ -65,9 +63,11 @@ async function loadRpivWebTools(): Promise<RpivWebTools | null> {
     // key, which providers are self-hosted) that the precedence rules read. Taking that
     // metadata from the package rather than restating it here is what keeps our notion of
     // "configured" from drifting from theirs when it gains a provider.
+    //
+    // Literal specifiers: the boot build can only compile an import it can read.
     const [tools, providers] = await Promise.all([
-      import(`${RPIV_WEB_TOOLS}/index.ts`),
-      import(`${RPIV_WEB_TOOLS}/providers/index.ts`),
+      import("@juicesharp/rpiv-web-tools/index.ts"),
+      import("@juicesharp/rpiv-web-tools/providers/index.ts"),
     ]);
     if (typeof tools?.registerWebSearchTool !== "function") return null;
     return {
