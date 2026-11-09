@@ -1,0 +1,21 @@
+# Pilot sample from terminal-bench@2.0: the first tasks, in a shuffle of the sorted task
+# names with random.Random(20261109), whose reference solution passes on this setup.
+# Tasks are never swapped based on how an agent does on them.
+#
+# Skipped because the reference solution fails here (the agent is not at fault):
+#   mcmc-sampling-stan    rstan does not load
+#   build-pmars           pins a dpkg-dev version Debian no longer carries
+#   path-tracing-reverse  verifier uses chroot, which Rosetta cannot run
+#   qemu-startup          QEMU hits a syscall Rosetta does not implement
+# Skipped because it does not fit the VM:
+#   pytorch-model-recovery  its image alone is 14.7 GB
+git-leak-recovery
+pytorch-model-cli
+git-multibranch
+model-extraction-relu-logits
+configure-git-webserver
+multi-source-data-merger
+modernize-scientific-stack
+sanitize-git-repo
+db-wal-recovery
+train-fasttext

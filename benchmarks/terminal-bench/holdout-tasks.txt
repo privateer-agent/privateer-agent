@@ -1,0 +1,14 @@
+# Holdout sample from terminal-bench@2.0: the next tasks after pilot-tasks.txt in the same
+# shuffle (random.Random(20261109)) whose reference solution passes on this setup. Nothing
+# in the CLI was developed against these. Tasks are never swapped based on how an agent
+# does on them.
+break-filter-js-from-html
+winning-avg-corewars
+tune-mjcf
+gcode-to-text
+cancel-async-tasks
+video-processing
+log-summary-date-ranges
+make-mips-interpreter
+constraints-scheduling
+adaptive-rejection-sampler
