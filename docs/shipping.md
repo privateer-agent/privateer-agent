@@ -77,6 +77,9 @@ inline and the **Windows bundle is boot smoke-tested on a `windows-latest` job**
 `publish` attaches every archive + checksum to the GitHub Release. Installers pull from
 `releases/latest/download/`. A manual `workflow_dispatch` builds without publishing.
 
+Both smoke jobs also run `scripts/smoke-bundle.mjs`, a real turn through the compiled boot
+build against a scripted local model, because `--version` is answered before Pi loads.
+
 The `publish` job sets **`GH_REPO`** because it downloads artifacts without checking out
 the repo, so `gh` has no git remote to infer from. Without it every `gh release upload`
 died with `fatal: not a git repository` — which is exactly what happened from v0.6.2

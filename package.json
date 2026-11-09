@@ -64,7 +64,6 @@
     "channels": "node --env-file=.env --import tsx src/channels/run.ts",
     "dev": "node bin/privateer-launch.mjs",
     "build:boot": "node scripts/build-boot.mjs",
-    "prepack": "node scripts/build-boot.mjs",
     "dev:fresh": "PRIVATEER_HOME=\"$PWD/.dev-home\" node bin/privateer-launch.mjs",
     "typecheck": "tsc --noEmit",
     "check:whats-new": "node scripts/check-whats-new.mjs",

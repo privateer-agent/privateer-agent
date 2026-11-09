@@ -64,6 +64,11 @@ jobs:
       - name: Install archive tools
         run: sudo apt-get update && sudo apt-get install -y zip unzip xz-utils
 
+      # scripts/build-boot.mjs compiles the boot build with esbuild from this checkout's
+      # node_modules. --ignore-scripts matches .npmrc.
+      - name: Install build tools
+        run: npm ci --ignore-scripts
+
       - name: Build bundle (${{ matrix.target }})
         run: node scripts/build-bundle.mjs --target ${{ matrix.target }} --node "${NODE_VERSION}"
 
@@ -79,6 +84,8 @@ jobs:
                  PRIVATEER_HOME="$home/.privateer" TERM=xterm \
                  bash "$app/bin/privateer-tui" --version 2>&1)"
           echo "boot output: $out"; test -n "$out"
+          # --version is answered before Pi loads. This is what runs the compiled boot build.
+          "$app/node" scripts/smoke-bundle.mjs "$app"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -92,6 +99,8 @@ jobs:
     if: always()
     runs-on: windows-latest
     steps:
+      # Before the download: checkout cleans the workspace. Only for scripts/smoke-bundle.mjs.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: privateer-win32-x64
@@ -106,6 +115,17 @@ jobs:
           $out = & "$app\bin\privateer.cmd" --version 2>&1 | Out-String
           Write-Host "boot output: $out"
           if (-not $out.Trim()) { throw "empty output — bundle failed to boot" }
+
+      # --version is answered by the launcher before Pi loads, so the step above never
+      # touches the compiled boot build. This one runs a real turn through it, and
+      # `publish` needs this job, so a build that can't start on Windows stops the release.
+      - name: Run a real turn through the compiled boot build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = "extract\privateer-win32-x64"
+          & "$app\node.exe" scripts\smoke-bundle.mjs $app
+          if ($LASTEXITCODE -ne 0) { throw "bundle smoke test failed" }
 
       # The harbor on Windows, actually started.
       #
@@ -374,6 +394,14 @@ jobs:
           pkg="$(node -p 'require("./package.json").version')"
           tag="${GITHUB_REF_NAME#v}"
           test "$pkg" = "$tag" || { echo "tag v$tag != package.json $pkg"; exit 1; }
+
+      # An explicit step because .npmrc sets ignore-scripts, which makes npm skip prepack:
+      # without it the tarball would quietly ship no boot build.
+      - name: Compile the boot build
+        run: |
+          set -euo pipefail
+          npm run build:boot
+          test "$(node -p 'require("./dist-boot/manifest.json").version')" = "${GITHUB_REF_NAME#v}"
 
       # No NODE_AUTH_TOKEN: the OIDC exchange supplies credentials. Provenance is
       # implied by trusted publishing; --provenance is kept explicit so a misconfigured
