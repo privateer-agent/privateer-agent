@@ -262,6 +262,71 @@ test("session_start seeds Pi's auth storage with a spawned account credential", 
   }
 });
 
+// Regression: `-p` prompts as soon as extensions are bound, and Pi's auth precheck runs
+// before anything can re-arm, so a signed-in machine with no leftover auth.json entry (CI,
+// a container, anywhere the TUI has never run) was told it wasn't signed in. The headless
+// seed has to finish first. The TUI must not wait on the network to start.
+test("session_start waits for the account session only when there is no UI", async () => {
+  const prevUrl = process.env.PRIVATEER_SERVER_URL;
+  process.env.PRIVATEER_SERVER_URL = "https://stub.privateer.test";
+  const realFetch = globalThis.fetch;
+  saveCredentials({
+    accessToken: "parent-access",
+    refreshToken: "parent-refresh",
+    user: { id: "u1" },
+    serverBaseUrl: "https://stub.privateer.test",
+  } as any);
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ accessToken: "child-access", refreshToken: "child-refresh" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+
+  let finishWrite!: () => void;
+  const writeHeld = new Promise<void>((resolve) => (finishWrite = resolve));
+  setPiAuthStoreForTests({
+    read: async () => undefined,
+    modify: async (_provider: string, fn: (cur: unknown) => Promise<unknown>) => {
+      await writeHeld;
+      return fn(undefined);
+    },
+    delete: async () => {},
+  });
+
+  const handlers: Record<string, (e: unknown, ctx: unknown) => unknown> = {};
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+  try {
+    makeAccountProvider()({
+      registerProvider: () => {},
+      on: (event: string, handler: (e: unknown, ctx: unknown) => unknown) => {
+        handlers[event] = handler;
+      },
+    });
+
+    let tuiFinished = false;
+    void Promise.resolve(handlers.session_start!(undefined, { hasUI: true })).then(() => (tuiFinished = true));
+    await settle();
+    assert.equal(tuiFinished, true, "the TUI must not wait for the network to start");
+
+    let headlessFinished = false;
+    const headless = Promise.resolve(handlers.session_start!(undefined, { hasUI: false })).then(
+      () => (headlessFinished = true),
+    );
+    await settle();
+    assert.equal(headlessFinished, false, "a headless launch must not prompt before it is armed");
+
+    finishWrite();
+    await headless;
+    assert.equal(headlessFinished, true);
+  } finally {
+    finishWrite();
+    globalThis.fetch = realFetch;
+    clearCredentials();
+    if (prevUrl === undefined) delete process.env.PRIVATEER_SERVER_URL;
+    else process.env.PRIVATEER_SERVER_URL = prevUrl;
+  }
+});
+
 // Regression: auth.json holds ONE `privateer` entry and is shared by every Privateer
 // terminal on the machine, so the entry on disk belongs to whichever terminal armed
 // last. The exit teardown used to remove it unconditionally — quitting one terminal

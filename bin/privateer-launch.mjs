@@ -133,7 +133,16 @@ const BUNDLED = fs.existsSync(bundledNode) && fs.existsSync(path.join(REPO, "BUN
 // very node already running this script (a suitable >=22, since we booted under it).
 const NODE_BIN = BUNDLED ? bundledNode : process.execPath;
 // Make sure the chosen node's directory is on PATH for shebang-spawned grandchildren.
-process.env.PATH = path.dirname(NODE_BIN) + path.delimiter + (process.env.PATH || "");
+// The agent's own shells get that entry filtered back out (getShellEnv and the background
+// task registry, both patched): seeing a `node` the machine does not really have, it wrote
+// `#!/usr/bin/env node` tools that die the moment Privateer exits. PRIVATEER_NODE is how a
+// shell reaches this runtime on purpose. A directory the user already had on PATH stays.
+const runtimeDir = path.dirname(NODE_BIN);
+if (!(process.env.PATH || "").split(path.delimiter).includes(runtimeDir)) {
+  process.env.PRIVATEER_PRIVATE_RUNTIME_DIR = runtimeDir;
+}
+process.env.PRIVATEER_NODE = NODE_BIN;
+process.env.PATH = runtimeDir + path.delimiter + (process.env.PATH || "");
 
 const args = process.argv.slice(2);
 

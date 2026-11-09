@@ -22,7 +22,7 @@ index 2a4d905..3a689f5 100644
  type HostForwardingStream = AssistantMessageEventStreamLike & HostAssistantMessageEventStream;
  
 diff --git a/node_modules/pi-background-tasks/src/core/registry.ts b/node_modules/pi-background-tasks/src/core/registry.ts
-index df6e6f4..cbab9f2 100644
+index df6e6f4..8cbbec2 100644
 --- a/node_modules/pi-background-tasks/src/core/registry.ts
 +++ b/node_modules/pi-background-tasks/src/core/registry.ts
 @@ -1,11 +1,11 @@
@@ -32,7 +32,7 @@ index df6e6f4..cbab9f2 100644
  import { createWriteStream, existsSync } from 'node:fs';
  import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 -import { join } from 'node:path';
-+import { join, resolve } from 'node:path';
++import { delimiter, join, resolve } from 'node:path';
  import type { Api, Model } from '@earendil-works/pi-ai';
  import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 -import { formatSize } from '@earendil-works/pi-coding-agent';
@@ -40,7 +40,23 @@ index df6e6f4..cbab9f2 100644
  import {
    boundedRead,
    deriveTaskNameFromCommand,
-@@ -1263,9 +1263,29 @@ export class BackgroundTaskRegistry {
+@@ -791,6 +791,15 @@ function writeDelegateStdin(
+   });
+ }
+ 
++// Privateer: a background shell must see the machine's PATH, not Privateer's private Node.
++function withoutPrivateRuntime(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
++  const hidden = env['PRIVATEER_PRIVATE_RUNTIME_DIR'];
++  if (!hidden) return env;
++  const key = Object.keys(env).find((name) => name.toLowerCase() === 'path') ?? 'PATH';
++  const visible = (env[key] ?? '').split(delimiter).filter((entry) => entry !== hidden);
++  return { ...env, [key]: visible.join(delimiter) };
++}
++
+ export class BackgroundTaskRegistry {
+   private readonly tasks = new Map<string, BgTask>();
+   private runtimeDir: RuntimeDir | undefined;
+@@ -1263,9 +1272,29 @@ export class BackgroundTaskRegistry {
      if (this.runtimeDir) return this.runtimeDir;
      const sessionId = sanitizePathSegment(ctx.sessionId ?? `session-${String(process.pid)}`);
      const runId = `${sessionId}-${String(process.pid)}`;
@@ -73,11 +89,50 @@ index df6e6f4..cbab9f2 100644
      this.runtimeDir = { abs: runtimeDirAbs, display: runtimeDirDisplay };
      return this.runtimeDir;
    }
+@@ -1514,7 +1543,7 @@ export class BackgroundTaskRegistry {
+         killProcess: this.killProcess,
+         killTree: this.killTree,
+         platform: this.platform,
+-        env: this.env,
++        env: withoutPrivateRuntime(this.env),
+         maxOutputBytes: this.maxOutputBytes,
+         killGraceMs: this.killGraceMs,
+         stopWaitMs: this.stopWaitMs,
+@@ -1739,7 +1768,7 @@ export class BackgroundTaskRegistry {
+         cwd: ctx.cwd,
+         detached: this.platform !== 'win32',
+         stdio: ['ignore', 'pipe', 'pipe'],
+-        env: this.env,
++        env: withoutPrivateRuntime(this.env),
+         windowsHide: true,
+         windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+       });
 diff --git a/node_modules/pi-background-tasks/src/extension.ts b/node_modules/pi-background-tasks/src/extension.ts
-index c966df5..b073a15 100644
+index c966df5..10b38c4 100644
 --- a/node_modules/pi-background-tasks/src/extension.ts
 +++ b/node_modules/pi-background-tasks/src/extension.ts
-@@ -710,8 +710,8 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
+@@ -223,6 +223,20 @@ function renderPlainResult(result: TextToolResult, options: ToolRenderResultOpti
+   return new Text(text, 0, 0);
+ }
+ 
++const MAX_ONE_SHOT_EXIT_NOTICES = 3;
++
++function oneShotExitNotice(tasks: string[]): string {
++  return [
++    'You ended your turn, but this is a one-shot run. The process exits when you stop, and these background tasks will be killed with it:',
++    ...tasks.map((task) => `- ${task}`),
++    '',
++    'Handle each one before you finish:',
++    '- If the work depends on its result, wait for it. Check with bg_status and bg_logs, using `sleep` in bash between checks, then finish and verify the work.',
++    '- If it has to keep running after this run, such as a server or daemon, bg_kill it, start it detached with `setsid nohup <command> > <logfile> 2>&1 < /dev/null &`, and confirm it is still up.',
++    '- If it is no longer needed, bg_kill it.',
++  ].join('\n');
++}
++
+ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promise<void> {
+   const config = parseBackgroundTasksConfig();
+   const dockEntryHint = dockShortcutFooterHint(config.dockShortcut);
+@@ -710,8 +724,8 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
      currentCtx = ctx;
      const nextRegistryCtx = currentRegistryCtx ?? registryContext(ctx);
      currentRegistryCtx = nextRegistryCtx;
@@ -88,7 +143,36 @@ index c966df5..b073a15 100644
      updateUi(ctx);
      hostService.markReady();
      if (disposed) return;
-@@ -830,22 +830,11 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
+@@ -729,6 +743,28 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
+     if (!disposed) void scheduleUpdateCheck(ctx);
+   });
+ 
++  // Privateer patch: a one-shot run must not quietly kill what it started.
++  //
++  // In the TUI a background task outlives the turn and reports back when it finishes. `-p`
++  // exits when the turn ends and shutdown kills whatever is still running, so a model that
++  // says "training continues in the background", or leaves a server up, has just lost it.
++  // Say so while it can still act. Capped so a model that keeps stopping cannot loop.
++  let oneShotExitNotices = 0;
++  pi.on('agent_end', (_event, ctx) => {
++    if (ctx.mode !== 'print' && ctx.mode !== 'json') return;
++    const running = registry.allTasks().filter((task) => task.status === 'running');
++    if (running.length === 0 || oneShotExitNotices >= MAX_ONE_SHOT_EXIT_NOTICES) return;
++    oneShotExitNotices += 1;
++    pi.sendMessage(
++      {
++        customType: 'bg-one-shot-exit',
++        content: oneShotExitNotice(running.map((task) => `${task.id}: ${taskDisplayName(task)}`)),
++        display: false,
++      },
++      { deliverAs: 'followUp', triggerTurn: true },
++    );
++  });
++
+   pi.on('session_shutdown', async (event, ctx) => {
+     beginSessionShutdown(event.reason);
+     if (shutdownCleanupStarted) return;
+@@ -830,22 +866,11 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
    });
  
    pi.registerCommand('bg-update', {
@@ -114,7 +198,7 @@ index c966df5..b073a15 100644
        ];
        ctx.ui.notify(lines.join('\n'), 'info');
        return Promise.resolve();
-@@ -958,7 +947,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
+@@ -958,7 +983,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
    pi.registerTool<typeof BgRunParams, BgRunDetails>({
      name: 'bg_run',
      label: 'Background Run',

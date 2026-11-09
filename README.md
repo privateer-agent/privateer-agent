@@ -505,6 +505,17 @@ privateer -p --approve-in-app --approval-timeout 300 "make a 6s intro clip"
 `--max-spend` is checked before each call against the server's estimate for that call
 (`media_capabilities` shows the same prices). A call that can't be priced is refused.
 
+Piped input is waited for, however long the pipe stays silent
+(`pytest | privateer -p "why did this fail?"`). If a program starts Privateer with stdin
+open and never writes to it, a run that already has a prompt continues after 3 seconds.
+Scripts with nothing to send can skip the wait with `< /dev/null`.
+
+Before a one-shot run that used tools ends, Privateer asks the model to check its result
+against what actually happened and to open its final message with anything it invented,
+could not verify or lost. That is one extra model call; `PRIVATEER_FINAL_AUDIT=0` turns it
+off. If the provider goes silent mid-run, the request is resent up to twice before the run
+stops with an error.
+
 ## Hand off sensitive work
 
 Your coding agent's context goes to its provider. When a task touches files that shouldn't

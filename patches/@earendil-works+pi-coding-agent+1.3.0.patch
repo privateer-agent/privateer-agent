@@ -1322,10 +1322,79 @@ index ab5cfcc..09fb05b 100644
  export { calculateContextTokens, collectEntriesForBranchSummary, compact, DEFAULT_COMPACTION_SETTINGS, estimateTokens, findCutPoint, findTurnStartIndex, generateBranchSummary, generateSummary, generateSummaryWithUsage, getLastAssistantUsage, prepareBranchEntries, serializeConversation, shouldCompact, } from "./core/compaction/index.js";
  export { createEventBus } from "./core/event-bus.js";
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/main.js b/node_modules/@earendil-works/pi-coding-agent/dist/main.js
-index e4fb658..8af5e0d 100644
+index e4fb658..12127ee 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/main.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/main.js
-@@ -821,7 +821,58 @@ export async function main(args, options) {
+@@ -4,6 +4,7 @@
+  * This file handles CLI argument parsing and translates them into
+  * createAgentSession() options. The SDK does the heavy lifting.
+  */
++import { fstatSync } from "node:fs";
+ import { createInterface } from "node:readline";
+ import { modelsAreEqual } from "@earendil-works/pi-ai";
+ import { setCapabilityOverrides } from "@earendil-works/pi-tui";
+@@ -45,22 +46,50 @@ import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from
+ import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.js";
+ import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.js";
+ const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;
++// Privateer patch: an open stdin that never sends anything must not hang a run.
++//
++// Stock Pi waits for EOF unconditionally, so `privateer -p "task"` started by anything
++// that leaves stdin attached sits forever with no output. The kind of stream separates
++// the two cases. A FIFO is what a shell pipeline provides, and `pytest | privateer -p
++// "why did this fail?"` can legitimately stay silent for minutes, so giving up would
++// throw away the user's input: keep waiting, but say so. A socket is what Node-based
++// harnesses attach, so once there is a prompt to work on, give it a moment and carry on.
++const STDIN_SILENCE_GRACE_MS = 3000;
++function stdinIsShellPipeline() {
++    try {
++        return fstatSync(0).isFIFO();
++    }
++    catch {
++        return false;
++    }
++}
+ /**
+  * Read all content from piped stdin.
+  * Returns undefined if stdin is a TTY (interactive terminal).
+  */
+-async function readPipedStdin() {
++async function readPipedStdin(hasPrompt) {
+     // If stdin is a TTY, we're running interactively - don't read stdin
+     if (process.stdin.isTTY) {
+         return undefined;
+     }
+     return new Promise((resolve) => {
+         let data = "";
++        const silence = setTimeout(() => {
++            if (hasPrompt && !stdinIsShellPipeline()) {
++                console.error("No data on stdin after 3s, continuing without it.");
++                process.stdin.pause();
++                resolve(undefined);
++                return;
++            }
++            console.error("Still waiting for piped stdin. If none is coming, close it with: < /dev/null");
++        }, STDIN_SILENCE_GRACE_MS);
+         process.stdin.setEncoding("utf8");
+         process.stdin.on("data", (chunk) => {
++            clearTimeout(silence);
+             data += chunk;
+         });
+         process.stdin.on("end", () => {
++            clearTimeout(silence);
+             resolve(data.trim() || undefined);
+         });
+         process.stdin.resume();
+@@ -726,7 +755,7 @@ export async function main(args, options) {
+     // Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
+     let stdinContent;
+     if (appMode !== "rpc") {
+-        stdinContent = await readPipedStdin();
++        stdinContent = await readPipedStdin(parsed.messages.length > 0 || parsed.fileArgs.length > 0);
+         if (stdinContent !== undefined && appMode === "interactive") {
+             appMode = "print";
+         }
+@@ -821,7 +850,58 @@ export async function main(args, options) {
          if (exitCode !== 0) {
              process.exitCode = exitCode;
          }
@@ -2356,3 +2425,42 @@ index 6f56150..a68a510 100644
    -a, --approve     Trust project-local files for this command
    -na, --no-approve Ignore project-local files for this command
  
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/modes/print-mode.js b/node_modules/@earendil-works/pi-coding-agent/dist/modes/print-mode.js
+index dfa20b5..74fc846 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/modes/print-mode.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/modes/print-mode.js
+@@ -107,6 +107,15 @@ export async function runPrintMode(runtimeHost, options) {
+         for (const message of messages) {
+             await session.prompt(message);
+         }
++        // Privateer patch: JSON mode exited 0 even when the model call failed, so a script
++        // or benchmark harness had no way to tell a failed run from a finished one.
++        if (mode === "json") {
++            const lastMessage = session.state.messages[session.state.messages.length - 1];
++            if (lastMessage?.role === "assistant" && (lastMessage.stopReason === "error" || lastMessage.stopReason === "aborted")) {
++                console.error(lastMessage.errorMessage || `Request ${lastMessage.stopReason}`);
++                exitCode = 1;
++            }
++        }
+         if (mode === "text") {
+             const state = session.state;
+             const lastMessage = state.messages[state.messages.length - 1];
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/utils/shell.js b/node_modules/@earendil-works/pi-coding-agent/dist/utils/shell.js
+index e5c17aa..58a8d8b 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/utils/shell.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/utils/shell.js
+@@ -115,7 +115,13 @@ export function getPowerShellConfig() {
+ export function getShellEnv() {
+     const binDir = getBinDir();
+     const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+-    const currentPath = process.env[pathKey] ?? "";
++    // Privateer: its private Node runtime is on this process's PATH for its own children.
++    // A shell the agent runs must see the machine as it really is.
++    const privateRuntimeDir = process.env.PRIVATEER_PRIVATE_RUNTIME_DIR;
++    const inheritedPath = process.env[pathKey] ?? "";
++    const currentPath = privateRuntimeDir
++        ? inheritedPath.split(delimiter).filter((entry) => entry !== privateRuntimeDir).join(delimiter)
++        : inheritedPath;
+     const pathEntries = currentPath.split(delimiter).filter(Boolean);
+     const hasBinDir = pathEntries.includes(binDir);
+     const updatedPath = hasBinDir ? currentPath : [binDir, currentPath].filter(Boolean).join(delimiter);

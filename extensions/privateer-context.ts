@@ -53,12 +53,14 @@ export default function privateerContext(pi: any): void {
   //     "here is a prompt to chain onto" (possibly empty, legitimate) from "no field".
   //   • When both markers are already present (a re-entrant chain) we have nothing to
   //     contribute, and undefined leaves what is there alone.
-  pi.on("before_agent_start", (event: any) => {
+  pi.on("before_agent_start", (event: any, ctx: any) => {
     if (CONTEXT_FILES_DISABLED) return;
     const base = event?.systemPrompt;
     if (typeof base !== "string") return;
     let prompt = base;
-    if (!prompt.includes(RUNTIME_GUIDELINES_MARKER)) prompt += runtimeGuidelinesBlock();
+    // A subagent also runs headless, but its parent reads and checks what it returns.
+    const unattended = (ctx?.mode === "print" || ctx?.mode === "json") && process.env.PI_SUBAGENT_CHILD !== "1";
+    if (!prompt.includes(RUNTIME_GUIDELINES_MARKER)) prompt += runtimeGuidelinesBlock({ unattended });
     if (!prompt.includes(CONTEXT_BLOCK_MARKER)) {
       const cwd = event?.systemPromptOptions?.cwd ?? process.cwd();
       prompt += contextBlock(cwd); // "" when there is no PRIVATEER.md anywhere

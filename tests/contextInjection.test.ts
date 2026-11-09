@@ -33,10 +33,10 @@ import {
  */
 
 // Drive the extension the way Pi does: register the handler, then hand it an event.
-function handlerFor(): (event: unknown) => { systemPrompt?: string } | undefined {
-  let handler: ((event: unknown) => any) | undefined;
+function handlerFor(): (event: unknown, ctx?: unknown) => { systemPrompt?: string } | undefined {
+  let handler: ((event: unknown, ctx?: unknown) => any) | undefined;
   const pi = {
-    on: (name: string, fn: (event: unknown) => any) => {
+    on: (name: string, fn: (event: unknown, ctx?: unknown) => any) => {
       if (name === "before_agent_start") handler = fn;
     },
     registerCommand: () => {},
@@ -145,7 +145,7 @@ test("context: -nc / --no-context-files silences EVERYTHING this extension injec
   );
   const gate = src.indexOf("if (CONTEXT_FILES_DISABLED) return;");
   assert.ok(gate > 0, "the handler still opens with the disable gate");
-  for (const injected of ["runtimeGuidelinesBlock()", "contextBlock(cwd)"]) {
+  for (const injected of ["runtimeGuidelinesBlock(", "contextBlock(cwd)"]) {
     assert.ok(
       src.indexOf(injected, gate) > gate,
       `${injected} must sit behind the -nc gate, or the flag half-works`,
@@ -247,6 +247,68 @@ test("budget: the cap is overridable, and 'off' loads the file whole", () => {
       assert.equal(contextMaxBytes(), DEFAULT_CONTEXT_MAX_BYTES);
     });
   } finally {
+    cleanup();
+  }
+});
+
+const UNATTENDED = /<unattended_run>/;
+const NO_HARNESS_RULE = /do not build test harnesses/;
+
+test("guidelines: a run nobody is watching must verify its own work; an interactive one keeps the cost rule", () => {
+  const interactive = runtimeGuidelinesBlock();
+  assert.doesNotMatch(interactive, UNATTENDED);
+  assert.match(interactive, NO_HARNESS_RULE);
+  assert.match(interactive, /upon user approval/);
+
+  const unattended = runtimeGuidelinesBlock({ unattended: true });
+  assert.match(unattended, UNATTENDED);
+  assert.doesNotMatch(unattended, NO_HARNESS_RULE, "it would forbid the checks the block asks for");
+  assert.doesNotMatch(unattended, /upon user approval/, "nobody is there to approve");
+  assert.doesNotMatch(unattended, /command;\n/, "no dangling punctuation where the rule was removed");
+});
+
+test("guidelines: invented data is never reported as real, whoever is watching", () => {
+  for (const block of [runtimeGuidelinesBlock(), runtimeGuidelinesBlock({ unattended: true })]) {
+    assert.match(block, /never present invented, guessed or placeholder data as a real result/);
+  }
+});
+
+test("guidelines: Node is described as Privateer's runtime, never as part of the system", () => {
+  const saved = process.env.PRIVATEER_NODE;
+  try {
+    process.env.PRIVATEER_NODE = "/opt/privateer/node";
+    const launched = runtimeGuidelinesBlock();
+    assert.match(launched, /\$PRIVATEER_NODE/);
+    assert.match(launched, /nothing you deliver/);
+    assert.doesNotMatch(launched, /guaranteed/);
+
+    delete process.env.PRIVATEER_NODE;
+    const embedded = runtimeGuidelinesBlock();
+    assert.match(embedded, /command -v node/);
+    assert.doesNotMatch(embedded, /PRIVATEER_NODE/, "no launcher means no such variable to point at");
+  } finally {
+    if (saved === undefined) delete process.env.PRIVATEER_NODE;
+    else process.env.PRIVATEER_NODE = saved;
+  }
+});
+
+test("handler: only a top-level headless run is treated as unattended", () => {
+  const { cwd, cleanup } = emptyCwd();
+  const saved = process.env.PI_SUBAGENT_CHILD;
+  const promptFor = (mode: string) =>
+    handlerFor()({ systemPrompt: "BASE", systemPromptOptions: { cwd } }, { mode })!.systemPrompt!;
+  try {
+    delete process.env.PI_SUBAGENT_CHILD;
+    assert.match(promptFor("print"), UNATTENDED);
+    assert.match(promptFor("json"), UNATTENDED);
+    assert.doesNotMatch(promptFor("tui"), UNATTENDED);
+    assert.doesNotMatch(promptFor("rpc"), UNATTENDED, "a program driving RPC can still respond");
+
+    process.env.PI_SUBAGENT_CHILD = "1";
+    assert.doesNotMatch(promptFor("json"), UNATTENDED, "a subagent's parent reviews its work");
+  } finally {
+    if (saved === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = saved;
     cleanup();
   }
 });

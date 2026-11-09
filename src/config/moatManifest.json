@@ -25,6 +25,7 @@
     { "entry": "extensions/privateer-hints.ts", "name": "privateer-hints", "note": "rotating tips in the working line + /hints" },
     { "entry": "extensions/privateer-update.ts", "name": "privateer-update", "note": "tool pack updates in place — banner flag + /update" },
     { "entry": "extensions/privateer-truncation.ts", "name": "privateer-truncation", "note": "picks the task back up when a reply is cut off at the output limit" },
+    { "entry": "extensions/privateer-final-audit.ts", "name": "privateer-final-audit", "note": "makes a -p run check its result, and say what it invented or could not verify, before it ends" },
     { "entry": "extensions/privateer-fresh.ts", "name": "privateer-fresh", "note": "/fresh — replace the agent with a new one and stop everything it started" },
     { "entry": "extensions/privateer-recovery.ts", "name": "privateer-recovery", "note": "crash recovery — the live marker the supervisor resumes from, the note that tells the model its last action may have half-run, and session-sealing warnings" },
     { "entry": "extensions/privateer-speak.ts", "name": "privateer-speak", "note": "spoken responses (/speak) + voice input (/talk) — pi-speak + confidential account TTS/STT" },

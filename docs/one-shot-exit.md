@@ -81,9 +81,12 @@ writes one after the first reply. Seen 2026-10-02 as a `-p` run sitting for 14 m
 headless runs. It is armed when a request goes out, re-armed by every streamed event
 (text, thinking and tool-call deltas all count), and off between requests, so a slow but
 live answer or a long local command never trips it. After `PRIVATEER_REPLY_TIMEOUT`
-seconds of silence (default 180, `0` turns it off) it prints why on stderr, aborts the
-turn, and the run exits 1.
+seconds of silence (default 180, `0` turns it off) it aborts the turn and resends it, up
+to two times in a row, because one dropped response should not end a long unattended run.
+If the provider is still silent it prints why on stderr and the run exits 1. A provider
+that answers with an error, including a refusal, is not a stall and is never resent here.
 
 `tests/stallWatchdog.test.ts` runs a real `-p` against a mock model that sends stream
-headers and then nothing, and asserts exit 1 with the reason.
+headers and then nothing, asserts three attempts and exit 1 with the reason, and asserts
+that a run which stalls once recovers and exits 0.
 

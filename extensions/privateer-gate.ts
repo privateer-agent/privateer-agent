@@ -542,6 +542,13 @@ const childChannel = isSubagentChild() ? inheritedChannelDir() : undefined;
 // Neither applies in a subagent child (its grant comes only from childSpend.ts) nor in
 // the TUI; `headlessRun` is set from Pi's own mode at session_start.
 let headlessRun = false;
+
+// Two resends is three attempts, so a provider that has really gone away costs a headless
+// run nine minutes at the default limit rather than three.
+const MAX_STALL_RESENDS = 2;
+const STALL_RESEND_PROMPT =
+  "The previous model request got no response and was cancelled, so nothing from it took effect. " +
+  "Carry on with the task from where it stood.";
 const cliGrant = isSubagentChild() ? null : readCliSpendGrant();
 const approveInAppMs = isSubagentChild() ? 0 : Number(process.env.PRIVATEER_APPROVE_IN_APP) || 0;
 
@@ -835,17 +842,28 @@ export default function privateerControl(pi: any): void {
 
   // A headless run must not wait forever on a provider that went silent (see
   // src/engine/stallWatchdog.ts). Armed per request, re-armed by every streamed event,
-  // off between requests. On a stall: say so on stderr, abort the turn, exit non-zero.
+  // off between requests. On a stall: abort the turn and resend it, since nobody is there
+  // to press retry and one dropped response should not end a long run. After
+  // MAX_STALL_RESENDS in a row: say so on stderr and exit non-zero.
   let stallCtx: any;
+  let stallResends = 0;
+  let resendAfterStall = false;
   const stallMs = replyTimeoutMs();
   const watchdog = new StallWatchdog(stallMs, () => {
     const secs = Math.round(stallMs / 1000);
-    process.stderr.write(
-      `privateer: no reply from ${currentSpec || "the model"} for ${secs}s — stopped. The provider accepted the ` +
-        `request and then sent nothing.\n  Re-run, or pick another model with --model. ` +
-        `${REPLY_TIMEOUT_ENV}=<seconds> changes the limit (0 turns it off).\n`,
-    );
-    process.exitCode = 1;
+    const model = currentSpec || "the model";
+    if (stallResends < MAX_STALL_RESENDS) {
+      stallResends += 1;
+      resendAfterStall = true;
+      process.stderr.write(`privateer: no reply from ${model} for ${secs}s — resending (${stallResends} of ${MAX_STALL_RESENDS}).\n`);
+    } else {
+      process.stderr.write(
+        `privateer: no reply from ${model} for ${secs}s — stopped. The provider accepted the ` +
+          `request and then sent nothing.\n  Re-run, or pick another model with --model. ` +
+          `${REPLY_TIMEOUT_ENV}=<seconds> changes the limit (0 turns it off).\n`,
+      );
+      process.exitCode = 1;
+    }
     try {
       stallCtx?.abort?.();
     } catch {
@@ -871,11 +889,26 @@ export default function privateerControl(pi: any): void {
   pi.on("message_update", () => {
     if (headlessRun) watchdog.arm();
   });
-  pi.on("message_end", () => watchdog.disarm());
+  pi.on("message_end", (ev: any) => {
+    watchdog.disarm();
+    // A reply arrived, so the next stall starts a fresh count.
+    if (ev?.message?.role === "assistant" && ev.message.stopReason !== "aborted") stallResends = 0;
+  });
 
   // Print mode prints a failed turn's raw SDK text — "401 status code (no body)",
   // "Connection error." — and exits. Follow it with what that means and what to do,
   // on stderr so stdout stays the answer (or the JSON stream).
+  // agent_settled rather than agent_end: the abort makes Pi drop anything queued during the
+  // run, while a message sent as the run settles is held and starts a new one.
+  pi.on("agent_settled", () => {
+    if (!resendAfterStall) return;
+    resendAfterStall = false;
+    watchdog.reset();
+    pi.sendMessage(
+      { customType: "privateer-stall-resend", content: STALL_RESEND_PROMPT, display: false },
+      { triggerTurn: true },
+    );
+  });
   pi.on("agent_end", (ev: any) => {
     watchdog.disarm();
     if (!headlessRun || watchdog.stalled) return; // a stall already said what happened

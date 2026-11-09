@@ -191,14 +191,42 @@ export function discoverContextFiles(cwd: string = process.cwd()): ContextFile[]
 export const CONTEXT_BLOCK_MARKER = "<!-- privateer:PRIVATEER.md -->";
 export const RUNTIME_GUIDELINES_MARKER = "<!-- privateer:runtime-guidelines -->";
 
-export function runtimeGuidelinesBlock(): string {
+// bin/privateer-launch.mjs sets PRIVATEER_NODE; a host that embeds Privateer without the
+// launcher has no runtime to promise, so the model is told to check instead.
+function nodeGuideline(): string {
+  if (!process.env.PRIVATEER_NODE) {
+    return "- Node.js: may not be installed here. Check with `command -v node` before relying on it.";
+  }
+  return `- Node.js: Privateer's own runtime is at \`$PRIVATEER_NODE\` (v22+). Use it for throwaway calculations or JSON processing when nothing else fits: \`"$PRIVATEER_NODE" -e "..."\`. It is not part of this system: plain \`node\` exists only if the system really has it, and nothing you deliver (scripts, shebangs, services, git hooks, build output) may depend on \`$PRIVATEER_NODE\`, because it does not exist outside Privateer.`;
+}
+
+// Only for a `-p` run with nobody attached. An interactive user reviews each step and pays
+// per call, so they keep the stricter batching rule below; a run nobody is watching has no
+// other chance to catch its own mistakes.
+const UNATTENDED_RUN_GUIDELINES = `\n<unattended_run>
+Nobody is watching this run: no one can answer a question or catch a mistake before your final message. Work through to the end, take the most plausible reading of anything ambiguous, and name that assumption in your final message.
+- Prove the result before you stop. Exercise it the way the user will: from a fresh shell, through the requested entry point, with their exact commands if they gave any. Check what has to still exist after you exit, and build whatever throwaway checks that takes. Cleaning up must not undo the result.
+- Deliver exactly what was asked: the requested paths, formats and text, with nothing added or reworded.
+- Treat data you were given as irreplaceable. Copy it first and experiment on the copy, because merely opening a file with its usual tool can change or delete it.
+- Keep long jobs visible. Anything that may take more than a few minutes runs in the background writing to a log; check its progress, and shrink or drop an approach that will not finish. Never sit blocked on one silent command.
+- Open your final message with anything unfinished, unverified or lost.
+</unattended_run>\n`;
+
+export function runtimeGuidelinesBlock({ unattended = false }: { unattended?: boolean } = {}): string {
+  const whenToolMissing = unattended
+    ? "install it with the host package manager (e.g. `apt-get install -y`, `brew install`) and mention that in your final message"
+    : "explain clearly what is missing, and offer to install it using the host package manager (e.g. `brew install`, `xcode-select --install`, `winget install`, `apt install`) upon user approval";
+  const whatNotToBuild = unattended
+    ? "."
+    : "; do not build test harnesses, scratch scripts or regression runs that the user did not ask for.";
   return `\n\n${RUNTIME_GUIDELINES_MARKER}\n<environment_guidelines>
-- Node.js environment: Node.js (v22+) is guaranteed to be available in Privateer. Prefer \`node -e "..."\` or small Node.js scripts for quick scripting, calculations, or JSON processing instead of assuming \`python\` or \`python3\` is installed.
+${nodeGuideline()}
 - Search fallback: If \`rg\` (ripgrep) is missing or returns "command not found", fall back to standard POSIX \`grep -rn <pattern> <path>\` or \`find <path>\`.
-- Missing system dependencies: If an essential external tool (e.g. \`git\`, \`python\`, \`rg\`) is missing and needed, check its presence (\`command -v <tool>\`), explain clearly what is missing, and offer to install it using the host package manager (e.g. \`brew install\`, \`xcode-select --install\`, \`winget install\`, \`apt install\`) upon user approval.
+- Missing system dependencies: If an essential external tool (e.g. \`git\`, \`python\`, \`rg\`) is missing and needed, check its presence (\`command -v <tool>\`), ${whenToolMissing}.
 - Shell calls share no state: every shell call runs in a fresh subshell rooted at the session's working directory, so a \`cd\` (or a variable, or an activated venv) in one call is gone by the next. Use absolute paths, or move and work in ONE call (\`cd <dir> && <command>\`). Never spend a call on \`cd\` alone.
-- Batch your steps: every tool call re-sends the whole conversation to the model, so a chain of one-line calls is far slower and more expensive than the same work combined into fewer calls. Group independent reads, searches and checks into one command; do not build test harnesses, scratch scripts or regression runs that the user did not ask for.
-</environment_guidelines>\n`;
+- Batch your steps: every tool call re-sends the whole conversation to the model, so a chain of one-line calls is far slower and more expensive than the same work combined into fewer calls. Group independent reads, searches and checks into one command${whatNotToBuild}
+- Report what really happened: never present invented, guessed or placeholder data as a real result. If something could not be obtained, or you lost or damaged it, say so plainly.
+</environment_guidelines>\n${unattended ? UNATTENDED_RUN_GUIDELINES : ""}`;
 }
 
 // Format the discovered files into a system-prompt fragment using the same framing Pi

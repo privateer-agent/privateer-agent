@@ -9,7 +9,8 @@
 // So: armed when a request goes out, re-armed by every streamed event (text, thinking,
 // tool-call deltas all count, so a slow but live stream never trips it), disarmed when
 // the message ends. Between requests (tool execution) it is off — a long local command
-// is not a provider stall. If it fires, the caller aborts the turn and says why.
+// is not a provider stall. If it fires, the caller aborts the turn and either resends it
+// (reset() re-enables the watchdog) or gives up and says why.
 //
 // The limit: PRIVATEER_REPLY_TIMEOUT seconds, default 180, 0 turns it off. Silence, not
 // total time, is what is measured, so a long answer is never cut off for being long.
@@ -53,6 +54,12 @@ export class StallWatchdog {
   disarm(): void {
     if (this.timer !== undefined) this.timers.clear(this.timer);
     this.timer = undefined;
+  }
+
+  /** The stalled request is being resent: watch the new one. */
+  reset(): void {
+    this.disarm();
+    this.fired = false;
   }
 
   get stalled(): boolean {

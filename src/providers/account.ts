@@ -923,7 +923,17 @@ export function makeAccountProvider(opts: { armOnStart?: boolean } = {}) {
     // all, and the first prompt dead-ends on "No API key found for privateer." — even
     // though the banner says "connected". The REPL (cli/chat.ts) and the harbor
     // already spawn one at startup; this gives the TUI the same seed.
-    if (opts.armOnStart !== false) pi.on?.("session_start", (_e, ctx) => void armAccountCredential(ctx));
+    //
+    // Nobody types faster than this resolves, so the TUI starts without waiting. `-p`
+    // prompts as soon as extensions are bound, and Pi's auth precheck runs before
+    // before_agent_start can re-arm, so a headless launch has to wait here. Without it,
+    // a signed-in machine with no leftover auth.json entry is told it isn't signed in.
+    if (opts.armOnStart !== false) {
+      pi.on?.("session_start", async (_e, ctx) => {
+        const arming = armAccountCredential(ctx);
+        if (!(ctx as SeedContext)?.hasUI) await arming;
+      });
+    }
 
     // Two safety nets around the account channel, both OUTSIDE the request path —
     // they read Pi's in-memory auth map and its finished messages, and never touch the
@@ -1088,8 +1098,10 @@ export async function armAccountCredential(
     // If the credentials vanished during the call, the spawn hit a 401 and
     // onSessionExpired already announced the sign-out — a second line here would
     // just repeat it (we returned early above if we STARTED signed out).
-    if (opts.notify !== false && c?.hasUI && hasCredentials()) {
-      c.ui?.notify?.(`Privateer account channel unavailable — ${(e as Error).message}`, "error");
+    if (opts.notify !== false && hasCredentials()) {
+      const message = `Privateer account channel unavailable — ${(e as Error).message}`;
+      if (c?.hasUI) c.ui?.notify?.(message, "error");
+      else console.error(message); // headless: the real cause, not "isn't signed in"
     }
     return false;
   }
