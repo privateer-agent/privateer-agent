@@ -766,11 +766,48 @@ test("enclave thinking models are registered as steerable, in their verified sha
   }
 
   // gpt-oss is the other shape: reasoning_effort, which is pi's DEFAULT format for
-  // our baseUrl — so a compat override here would actively break it.
+  // our baseUrl — so a thinkingFormat override here would actively break it.
   const oss = thinkingProfile("tinfoil/gpt-oss-120b");
   assert.ok(oss);
-  assert.equal(oss.compat, undefined);
+  assert.equal(oss.compat?.thinkingFormat, undefined);
   assert.equal(oss.thinkingLevelMap?.off, "low");
+});
+
+test("enclave thinking models send instructions as `system`, never `developer`", () => {
+  // Phala answers a `developer` message with 400 "Unexpected message role." and
+  // pi-ai picks `developer` for any reasoning model on a baseUrl it doesn't know.
+  for (const id of ["phala/qwen/qwen3.8-27b", "phala/phala/qwen3.8-27b-uncensored", "phala/z-ai/glm-5.3", "tinfoil/glm-5-2", "tinfoil/gpt-oss-120b", "near/zai-org/GLM-5.1-FP8"]) {
+    const p = thinkingProfile(id);
+    assert.ok(p, `${id} must be steerable`);
+    assert.equal(p.compat?.supportsDeveloperRole, false, `${id} must not send developer`);
+  }
+  // The proxied OpenRouter path is not an enclave and keeps pi's own choice.
+  assert.equal(thinkingProfile("google/gemini-3.8-flash")?.compat?.supportsDeveloperRole, undefined);
+});
+
+test("a registered enclave model really puts its instructions in a `system` message", async () => {
+  // End to end through pi-ai's request builder, so a future pi that stops honouring
+  // the compat field fails here instead of on Phala.
+  const model: any = (accountProviderConfig(["near/zai-org/GLM-5.1-FP8"]) as any).models[0];
+  // phala/* only registers once the sealed shim is up; NEAR shares the same TEE profile path.
+  assert.ok(model, "model registered");
+  let body: any;
+  const s = streamSimple(
+    { ...model, provider: "privateer", api: "openai-completions", baseUrl: "https://relay.invalid/v1" },
+    { systemPrompt: "be brief", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+    {
+      apiKey: "x",
+      // pi-ai's own pre-send hook: capture the exact body, then stop before any network.
+      onPayload: (params: any) => {
+        body = params;
+        throw new Error("stop after capture");
+      },
+    } as any,
+  );
+  for await (const _ of s) { /* drain until the hook stops the request */ }
+  assert.ok(body, "request body was captured");
+  assert.equal(body.messages[0].role, "system");
+  assert.ok(!body.messages.some((m: any) => m.role === "developer"));
 });
 
 test("models whose thinking shape we did not verify are left exactly as they were", () => {

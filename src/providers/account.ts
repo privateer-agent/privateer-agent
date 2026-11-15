@@ -170,7 +170,7 @@ function seedModel(id: string) {
 interface ThinkingProfile {
   reasoning: true;
   thinkingLevelMap?: Record<string, string | null>;
-  compat?: { thinkingFormat: string };
+  compat?: { thinkingFormat?: string; supportsDeveloperRole?: boolean };
 }
 
 // The vLLM chat-template family (GLM, Qwen). Honours
@@ -274,8 +274,19 @@ function proxiedThinkingProfile(id: string): ThinkingProfile | null {
   return PROXIED_THINKING_MODEL.some((re) => re.test(id)) ? OPENROUTER_THINKING : null;
 }
 
+// The enclave gateways are vLLM-style servers that take `system` but REJECT the
+// `developer` role (Phala: 400 "Unexpected message role.", probed 2026-11-15 on
+// qwen/qwen3.8-27b and phala/qwen3.8-27b-uncensored). pi-ai sends instructions as
+// `developer` whenever model.reasoning is true and it doesn't recognise the baseUrl —
+// and our relay URL is one it never will — so every steerable TEE model failed on its
+// first turn. pi-ai merges compat field by field, so this pins only the role and
+// leaves gpt-oss's baseUrl-detected reasoning_effort format untouched.
+const TEE_COMPAT = { supportsDeveloperRole: false } as const;
+
 export function thinkingProfile(id: string): ThinkingProfile | null {
-  const profile = TEE_MODEL.test(id) ? teeThinkingProfile(id) : proxiedThinkingProfile(id);
+  const tee = TEE_MODEL.test(id);
+  const base = tee ? teeThinkingProfile(id) : proxiedThinkingProfile(id);
+  const profile = base && tee ? { ...base, compat: { ...base.compat, ...TEE_COMPAT } } : base;
   // Hand out a COPY. These entries end up on hundreds of registered models, and a
   // shared nested object is one careless mutation away from retuning the whole catalog.
   return profile && { ...profile, thinkingLevelMap: { ...profile.thinkingLevelMap }, ...(profile.compat ? { compat: { ...profile.compat } } : {}) };
