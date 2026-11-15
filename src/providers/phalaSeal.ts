@@ -161,6 +161,19 @@ async function establishAttestation(): Promise<VerifiedAttestation> {
   return { report, verification, enclave };
 }
 
+// @phala/dcap-qvl is CommonJS. Under tsx/Node its named exports resolve, but the
+// shipped bundle wraps it as an ESM chunk whose ONLY export is `default` — so a
+// destructured `{ getCollateralAndVerify }` came back undefined and every Phala
+// attestation in the released agent threw "getCollateralAndVerify is not a
+// function". Accept either shape; fail loudly if neither carries it.
+type DcapVerify = typeof import("@phala/dcap-qvl").getCollateralAndVerify;
+export function resolveDcapVerify(mod: unknown): DcapVerify {
+  const m = mod as { getCollateralAndVerify?: unknown; default?: { getCollateralAndVerify?: unknown } };
+  const fn = m?.getCollateralAndVerify ?? m?.default?.getCollateralAndVerify;
+  if (typeof fn !== "function") throw new Error("phala: @phala/dcap-qvl did not export getCollateralAndVerify");
+  return fn as DcapVerify;
+}
+
 async function verifyHardwareQuote(report: AttestationReport): Promise<PhalaEnclaveIdentity | undefined> {
   if (!requireQuote()) return undefined;
 
@@ -184,7 +197,7 @@ async function verifyHardwareQuote(report: AttestationReport): Promise<PhalaEncl
   if (!reportDataHex) throw new Error("phala: report has no report_data");
 
   // Verify the quote against fetched Intel/Phala collateral (pure-JS dcap-qvl).
-  const { getCollateralAndVerify } = await import("@phala/dcap-qvl");
+  const getCollateralAndVerify = resolveDcapVerify(await import("@phala/dcap-qvl"));
   const verified = await getCollateralAndVerify(fromHex(quoteHex), pccsUrl());
 
   // 1) Genuine hardware + acceptable TCB status.
