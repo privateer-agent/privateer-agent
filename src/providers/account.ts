@@ -30,7 +30,18 @@ import { installGzipRequestBodies } from "../util/gzipRequestBody.ts";
 import { describeAccountBalanceError, isConnectionFailureText } from "../engine/errors.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { interpretReport, teePosture, tierFromTeePosture, type PrivacyTier } from "pi-privacy";
-import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel } from "./defaultModel.ts";
+import { ACCOUNT_DEFAULT_MODEL_ID, ACCOUNT_NEAR_MODEL_ID, ensurePiDefaultModel, writePiDefaultModel } from "./defaultModel.ts";
+import {
+  describeZdrMiss,
+  paintZdrStatus,
+  parseZdrMiss,
+  promptZdrMiss,
+  runZdrCommand,
+  setPendingZdrMiss,
+  takePendingZdrMiss,
+  withZdrOptOut,
+  zdrOptedOut,
+} from "./zdrSession.ts";
 import { visionInput } from "./vision.ts";
 import { piAuthStore } from "./piAuthStore.ts";
 import {
@@ -767,7 +778,10 @@ export interface AccountPosture {
 // zero-retention endpoints server-side, which we can't observe here — a policy claim.
 export async function accountPosture(modelId: string): Promise<AccountPosture> {
   if (privateerChannel(modelId) === "zdr") {
-    return { tier: "zdr-policy" };
+    // A session opt-out (zdrSession.ts) sends this model's requests WITHOUT the ZDR
+    // pin, so claiming zdr-policy would put a false badge on the footer and relax the
+    // PII gate for a provider that may retain the prompt.
+    return { tier: zdrOptedOut(modelId) ? "standard" : "zdr-policy" };
   }
   // Sealed (EHBP) path. When sealed mode is on and the model has a Node sealed
   // client (tinfoil/*), inference goes through the blind relay with the body
@@ -892,6 +906,8 @@ export function makeAccountProvider(opts: { armOnStart?: boolean } = {}) {
   return (pi: {
     registerProvider?: (name: string, config: unknown) => void;
     on?: (event: string, handler: (e: unknown, ctx: unknown) => unknown) => void;
+    registerCommand?: (name: string, opts: unknown) => void;
+    setModel?: (model: never) => Promise<boolean> | boolean;
   }): void => {
     if (typeof pi.registerProvider !== "function") return;
     // Compress this channel's inference bodies before anything can send one. The edge
@@ -961,6 +977,47 @@ export function makeAccountProvider(opts: { armOnStart?: boolean } = {}) {
       }
     });
 
+    // ── Require-ZDR session opt-out (zdrSession.ts) ─────────────────────────────
+    // The opt-out rides as `requireZdr: false` on account-channel requests for the
+    // models the user chose. In memory only; never the account setting.
+    pi.on?.("before_provider_request", (e, ctx) => {
+      if ((ctx as { model?: { provider?: string } })?.model?.provider !== "privateer") return undefined;
+      return withZdrOptOut((e as { payload?: unknown })?.payload, (id) => privateerChannel(id) === "zdr");
+    });
+    const repaintPosture = (ctx: unknown): void => {
+      paintZdrStatus((ctx as { ui?: Parameters<typeof paintZdrStatus>[0] })?.ui);
+      void import("../../extensions/privateer-posture.ts")
+        .then((m) => m.updatePostureBadge(ctx))
+        .catch(() => {
+          /* no badge on this surface */
+        });
+    };
+    pi.on?.("agent_settled", async (_e, ctx) => {
+      const miss = takePendingZdrMiss();
+      const c = ctx as { hasUI?: boolean; ui?: Parameters<typeof promptZdrMiss>[2]; modelRegistry?: { find?: (p: string, id: string) => unknown } };
+      if (!miss || !c?.hasUI || !c.ui?.select || typeof pi.setModel !== "function") return;
+      try {
+        await promptZdrMiss(miss, miss.model, c.ui, {
+          findModel: (id) => c.modelRegistry?.find?.("privateer", id) ?? undefined,
+          setModel: (m) => pi.setModel!(m as never),
+          saveDefault: (ref) => {
+            writePiDefaultModel(ref);
+          },
+          onChange: () => repaintPosture(ctx),
+        });
+      } catch {
+        /* a dismissed dialog or a closing session — the readable error already stands */
+      }
+    });
+    pi.registerCommand?.("zdr", {
+      description: "Allow non-ZDR models for this session only (/zdr off), or restore the requirement (/zdr on)",
+      argumentHint: "[on | off]",
+      handler: (args: string, ctx: unknown) =>
+        runZdrCommand(args, (ctx as { ui?: Parameters<typeof runZdrCommand>[1] })?.ui, {
+          onChange: () => repaintPosture(ctx),
+        }),
+    });
+
     // Replace confirmed balance failures before Pi renders/persists the message.
     // showError alone misses first-attempt failures (the assistant component renders
     // those directly). This also covers print mode and the remote event adapter.
@@ -968,6 +1025,16 @@ export function makeAccountProvider(opts: { armOnStart?: boolean } = {}) {
       const msg = (e as { message?: AssistantMessage })?.message;
       if (msg?.role !== "assistant" || msg.stopReason !== "error" || !msg.errorMessage) return;
       if (msg.provider !== "privateer") return;
+      // Require ZDR + a model with no ZDR endpoint. Replace the provider's JSON with a
+      // sentence, and (only when someone is at the terminal) queue the question for
+      // when the turn settles. See zdrSession.ts.
+      const zdrMiss = parseZdrMiss(msg.errorMessage);
+      if (zdrMiss) {
+        const interactive = !!(ctx as SeedContext)?.hasUI;
+        const failedModel = (msg as { model?: string }).model;
+        if (interactive) setPendingZdrMiss({ ...zdrMiss, model: zdrMiss.model ?? failedModel });
+        return { message: { ...msg, errorMessage: describeZdrMiss(zdrMiss, failedModel, interactive) } };
+      }
       const balance = hasCredentials() ? describeAccountBalanceError(msg.errorMessage) : null;
       if (balance) {
         // Normalize the known billing failure to Payment Required, just as
